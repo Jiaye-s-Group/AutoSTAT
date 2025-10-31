@@ -1,0 +1,53 @@
+# Core
+streamlit==1.48.1
+pandas==2.3.1
+numpy==2.2.6
+scikit-learn==1.7.1
+scipy==1.16.1
+
+# Visualization
+plotly==5.13.0
+matplotlib==3.10.5
+seaborn==0.13.2
+pillow==11.3.0
+# kaleido==0.1.0.post1
+kaleido==0.2.0
+
+# Machine Learning
+torch==2.8.0
+torchvision==0.23.0
+torchaudio==2.8.0
+lightgbm==4.6.0
+xgboost==3.0.4
+joblib==1.5.1
+
+# Statistics
+statsmodels==0.14.5
+
+# LLM APIs
+openai==1.100.1
+requests==2.32.5
+zai-sdk==0.0.3.3
+anthropic==0.69.0
+
+# Data processing
+chardet==5.2.0
+xlrd==2.0.2
+
+# Configuration
+toml==0.10.2
+
+# UI components
+streamlit-ace==0.1.1
+streamlit-elements==0.1.0
+streamlit-antd-components==0.3.2
+
+# Document generation
+python-docx==1.2.0
+reportlab==4.4.3
+pdfkit==1.0.0
+mammoth==1.10.0
+
+# Utilities
+typing-extensions==4.14.1
+stqdm==0.0.5

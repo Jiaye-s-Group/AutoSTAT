@@ -1,0 +1,4 @@
+utils/.streamlit/
+__pycache__/
+*.py[cod]
+*.pyo
