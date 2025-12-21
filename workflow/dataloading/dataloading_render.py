@@ -7,7 +7,42 @@ import streamlit_antd_components as sac
 
 from workflow.dataloading.dataloading_core import process_complex_data, load_from_path, load_concat_file, PathFileWrapper
 
+def loading_reference_docs(agent):
+    """
+    专门处理参考资料的上传逻辑
+    """
+    st.info("💡 提示：在此处上传业务背景、算法说明或数据手册 (PDF/Docx)，AI 会学习这些内容。")
+    
+    # 2. 文件上传组件
+    uploaded_docs = st.file_uploader(
+        "上传参考文档",
+        type=['pdf', 'docx', 'txt', 'names'],
+        accept_multiple_files=True,
+        key="ref_doc_uploader" # 设置 key 防止与数据上传冲突
+    )
 
+    if uploaded_docs:
+        # 记录已处理过的文件名，避免重复学习
+        if 'learned_doc_names' not in st.session_state:
+            st.session_state.learned_doc_names = set()
+
+        new_files = [f for f in uploaded_docs if f.name not in st.session_state.learned_doc_names]
+        
+        if new_files:
+            if st.button("🧠 学习选中的资料", use_container_width=True):
+                with st.spinner("正在解析文档并提取知识点..."):
+                    count = st.session_state.retriever.add_uploaded_files(new_files)
+                    for f in new_files:
+                        st.session_state.learned_doc_names.add(f.name)
+                st.success(f"学习成功！新增 {len(new_files)} 份文档，提取了 {count} 条知识片段。")
+        else:
+            st.caption("✅ 当前上传的文件已全部在知识库中。")
+
+    # 展示已加载的文档列表（可选）
+    if 'learned_doc_names' in st.session_state and st.session_state.learned_doc_names:
+        with st.expander("查看当前已加载的外部资料"):
+            for name in st.session_state.learned_doc_names:
+                st.write(f"- 📄 {name}")
 def loading_data_file(agent):
 
     st.info(
@@ -200,11 +235,12 @@ if __name__ == "__main__":
         ], align='end', color='dark', variant='filled', index=None)
     st.markdown("---")
 
-    c = st.columns(2)
+    c = st.columns(3)
     with c[0].expander('数据上传', True):
         loading_data_file(agent)
-    with c[1].expander('数据建议', True):
-        loading_chat(agent, auto)
     with c[0].expander('数据展示', True):
         loading_basic_info(agent)
-
+    with c[1].expander('参考资料pdf/docx上传', True):
+        loading_reference_docs(agent)
+    with c[2].expander('数据建议', True):
+        loading_chat(agent, auto)

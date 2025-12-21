@@ -40,7 +40,7 @@ class LLMClient:
             context_str = self._retrieve_from_db(rag_query or prompt)
             prompt = self._build_augmented_prompt(context_str, prompt)
         #debug
-        # print(prompt)
+        print(prompt)
 
         model_name = st.session_state.selected_model
         config = self.model_configs.get(model_name, {})
