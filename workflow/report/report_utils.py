@@ -2,17 +2,17 @@ import re
 import base64
 
 import streamlit as st
-# from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright
 
 
-# def html_to_pdf_bytes_playwright(html: str) -> bytes:
-#     with sync_playwright() as p:
-#         browser = p.chromium.launch()
-#         page = browser.new_page()
-#         page.set_content(html, wait_until="load")
-#         pdf_bytes = page.pdf(format="A4", print_background=True)
-#         browser.close()
-#         return pdf_bytes
+def html_to_pdf_bytes_playwright(html: str) -> bytes:
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.set_content(html, wait_until="load")
+        pdf_bytes = page.pdf(format="A4", print_background=True)
+        browser.close()
+        return pdf_bytes
 
 
 def html_dowmload(full_report):

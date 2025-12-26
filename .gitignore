@@ -3,3 +3,6 @@ __pycache__/
 *.py[cod]
 *.pyo
 algo_repo/
+dump_py.py
+all_py_dump.txt
+自己跑.txt

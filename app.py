@@ -21,7 +21,6 @@ np.set_printoptions(edgeitems=250, threshold=501)
 
 sys.path.append(os.path.dirname(__file__))
 
-
 st.set_page_config(
     page_title="Autostat",
     page_icon="🤖",

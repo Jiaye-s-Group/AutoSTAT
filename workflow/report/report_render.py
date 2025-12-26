@@ -176,8 +176,8 @@ def report_execution(report_agent):
                 mime="text/html",
             )
 
-            if st.button("⬇️ 下载 PDF 报告"):
-                html_dowmload(full_report)
+            # if st.button("⬇️ 下载 PDF 报告"):
+            #     html_dowmload(full_report)
     elif report_agent.load_report_format() == 'Markdown':
 
         full_report = report_agent.load_markdown()
