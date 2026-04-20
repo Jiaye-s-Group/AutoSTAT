@@ -1,107 +1,79 @@
-# AutoSTAT 本地化 Agent — 最终版
+<p align='center'>
+<strong><em style="font-size: 36px;">AutoSTAT v2: Statistical Analysis, Instantly.</em></strong>
+</p>
 
-把原本跑在 Coze 云上的 8 个 workflow 完全"vibe"成本地 Python 代码。
-Streamlit 前端保留原样，调 LLM 改走你自选的 OpenAI 兼容接口。
+<p align="center">
+  <img src="frontend/logo/logo_big.png" alt="AutoSTAT Logo" width="200">
+</p>
+
+<p align="center">
+
+AutoSTAT v2，致力于成为用户数据分析的 copilot。
+
+一个入门友好、覆盖数据分析端到端流程、可通过与用户多轮交互持续优化效果，并具备承载未来 LLM 技术迭代能力的数据分析 Agent 框架，助你高效推进每一步分析任务。
+
+</p>
 
 ---
 
-## ⚡ 最快上手（3 步）
+## 功能特点
+
+- **全流程覆盖，模块化重构数据分析。** AutoSTAT v2 覆盖导入、预处理、可视化、建模与报告生成五个流程。针对每一流程内任务采用模块化设计，专职 Agent 负责，将 Agent 的能力无缝融入数据分析。
+
+- **编写代码，释放数据分析潜能。** Agent 不仅能精准理解用户需求，灵活调用现有工具，还可根据需求自主编写新工具。内置代码自愈机制（最多 5 轮自动修复），兼顾稳定性与灵活性。
+
+- **自动模式，让 AI 主导数据分析。** 面向小白用户，简单上手。只需上传数据，剩下交给 Agent 负责。内置 Planning Agent 自动分解任务、智能分工，一键实现高质量数据分析报告。
+
+- **专业报告，一键生成完整分析。** 多智能体协作自动生成初步目录，用户可灵活调整。Report Agent 基于最终目录，从概要到细节一键输出图文并茂的专业级数据分析报告，支持导出 Word / HTML / Markdown。
+
+- **LLM 后端灵活，自由切换。** 支持任何 OpenAI 兼容 API（DeepSeek、OpenAI、通义千问、Moonshot、本地 Ollama 等），一行配置即可切换。
+
+- **轻量级 RAG，无需向量库。** 基于 BM25 + 字段加权检索 274 条算法知识库，冷启动 < 100ms，无需额外部署向量数据库。
+
+- **安全隔离执行。** 所有 LLM 生成的代码在独立子进程中运行，超时自动终止，不会影响主进程。
+
+---
+
+## 快速开始
+
+> 请确保您的计算机上已安装 Python 3.10 及以上版本。
+> 支持 Windows / macOS / Linux 环境。
+
+### 1. 克隆项目
 
 ```bash
-cd autostat_local
+git clone https://github.com/Jiaye-s-Group/AutoSTAT-ver2.git
+cd AutoSTAT-ver2
+```
 
-# 1. 安装依赖
+### 2. 环境配置
+
+```bash
+conda create --name autostat python=3.12
+conda activate autostat
+```
+
+### 3. 安装依赖
+
+```bash
 pip install -r requirements.txt
+```
 
-# 2. 配置 LLM
+### 4. 配置 LLM
+
+```bash
 cp .env.example .env
-# 编辑 .env，填入 OPENAI_API_KEY
-
-# 3. 启动前端
-streamlit run app.py
 ```
 
-浏览器会自动打开 `http://localhost:8501`，能看到和原版一模一样的 Streamlit UI。
-
----
-
-## 🎯 目录结构
-
-```
-autostat_local/
-├── .env.example           # 环境变量模板（填 DeepSeek / OpenAI / 通义 / Kimi 等）
-├── requirements.txt
-├── README.md              ← 你正在看
-│
-├── core/                  # 核心基础设施
-│   ├── llm_client.py      #   OpenAI 兼容客户端（懒加载、JSON 鲁棒 parse、重试）
-│   ├── prompt_template.py #   {{var}} 渲染
-│   ├── rag_retriever.py   #   基于算法黄页的 BM25 检索
-│   └── workflow_runner.py #   safe_object / dig / as_bool 等辅助函数
-│
-├── workflows/             # 8 个 workflow 的本地 Python 实现
-│   ├── _plugins.py        #   16 个自定义 Coze plugin 的本地版
-│   ├── planning.py        #   规划 5 个阶段的开关
-│   ├── loading.py         #   数据语义解析
-│   ├── preprocessing.py   #   预处理（含 Loop 修复 + RAG）
-│   ├── visualizing.py     #   可视化（含 2 个并发 Batch）
-│   ├── modeling.py        #   建模（含 RAG + Loop 修复）
-│   ├── reporting_toc.py   #   生成报告目录
-│   ├── reporting_partly.py #  按目录逐节写，final_html 数组 join
-│   └── autostat.py        #   总编排（串联 6 个子 workflow）
-│
-├── prompts/               # 72 个 LLM prompt（原样从 Coze JSON 抽出）
-│   ├── planning/  loading/  preprocessing/  visualizing/
-│   └── modeling/  reporting_toc/  reporting_partly/
-│
-├── knowledge/             # RAG 知识库
-│   ├── 算法黄页.xlsx       #   你提供的原文件（274 条算法）
-│   ├── algorithm_catalog.jsonl  # 规范化后的检索版
-│   └── category_tree.json
-│
-├── code_nodes/            # Coze Code 节点的原始 Python 代码（参考用）
-├── _extracted/            # workflow 结构化数据（FLOW.md + graph.json）
-│
-├── frontend/              # Streamlit 前端（保留原版 UI，只替换调用层）
-│   ├── app.py             #   主入口
-│   ├── utils/
-│   │   ├── coze_runtime.py         # stub（兼容旧代码调用）
-│   │   └── local_workflow_bridge.py # ⭐ 前端→本地 workflow 的桥接
-│   └── workflow/          #   6 个页面 render（call_coze_* 已替换为本地调用）
-│       ├── dataloading/   visualization/
-│       ├── preprocessing/ modeling/
-│       ├── report/        preference/
-│
-└── tests_offline*.py      # 离线自检脚本（不调 LLM）
-```
-
----
-
-## 🚀 完整运行说明
-
-### 第 1 步 · 装依赖
-
-```bash
-cd autostat_local
-pip install -r requirements.txt
-```
-
-**包括** `streamlit / openai / pandas / plotly / scikit-learn / python-docx` 等。
-**不依赖** `cozepy`、`requests` 调 Coze。
-
-### 第 2 步 · 配置 LLM
-
-`.env.example` 默认 DeepSeek（便宜稳定）：
+编辑 `.env` 文件，填入你的 API Key：
 
 ```ini
 OPENAI_BASE_URL=https://api.deepseek.com/v1
 OPENAI_API_KEY=sk-你的key
 OPENAI_MODEL=deepseek-chat
-LLM_TEMPERATURE=0.7
-LLM_MAX_TOKENS=4096
 ```
 
-支持替换为任何 OpenAI 兼容接口：
+支持的 LLM 服务：
 
 | 服务 | BASE_URL | MODEL |
 |---|---|---|
@@ -111,130 +83,46 @@ LLM_MAX_TOKENS=4096
 | Moonshot | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
 | 本地 Ollama | `http://localhost:11434/v1` | `qwen2.5` |
 
-```bash
-cp .env.example .env
-# 编辑 .env 填 API key
-```
-
-### 第 3 步 · 启动方式（三选一）
-
-#### ① 完整前端（推荐）
-
-保留原 Streamlit UI，5 个页面逐一走：
+### 5. 启动应用
 
 ```bash
 streamlit run app.py
 ```
 
-浏览器打开后：
-1. **数据导入页** — 上传 CSV → 点"解析含义" → 本地 Loading workflow 跑
-2. **数据预处理页** — 获取建议 → 生成代码 → 自愈执行
-3. **数据可视化页** — 推荐方案 → 生成 plotly 代码 → 批量生成图+分析
-4. **建模分析页** — 推荐模型 → 训练代码 → 自愈执行
-5. **报告生成页** — 生成目录 → 逐节填报告 → 下载 Word/HTML/MD/PDF
+浏览器会自动打开 `http://localhost:8501`。
 
-也可以点侧边栏的 **"🚗 开启自动模式"** 一键跑完所有页面。
+---
 
-#### ② CLI 单跑某个 workflow
+## 使用方式
+
+### Web UI（推荐）
+
+启动后进入 Streamlit 界面，按页面顺序操作：
+
+1. **数据导入** — 上传 CSV → 点击"解析含义"
+2. **数据预处理** — 获取建议 → 生成代码 → 自动执行
+3. **数据可视化** — 推荐方案 → 批量生成交互图表
+4. **建模分析** — 选择目标列 → 推荐模型 → 自动训练
+5. **报告生成** — 生成目录 → 逐节填充 → 下载 Word / HTML / Markdown
+
+也可以点击侧边栏的 **"开启自动模式"** 一键跑完所有页面。
+
+### CLI 模式
 
 ```bash
-# 测 Planning
-python -m workflows.planning data/iris.csv "我想做鸢尾花分类预测"
-
-# 测 Loading
+# 单独运行某个阶段
+python -m workflows.planning data/iris.csv "鸢尾花分类预测"
 python -m workflows.loading data/iris.csv
-
-# 测 Preprocessing（含代码生成+执行）
 python -m workflows.preprocessing data/iris.csv
-
-# 测 Visualizing（含 Batch 并发）
 python -m workflows.visualizing data/iris.csv
-
-# 测 Modeling（需指定 target 列）
 python -m workflows.modeling data/iris.csv species
 
-# 一键跑完整条链路
+# 一键运行完整流程
 python -m workflows.autostat data/iris.csv species
-# 生成 autostat_report.html
 ```
 
-#### ③ 离线自检（不花 token）
+### 作为 Python 库调用
 
-```bash
-python tests_offline.py         # 第②批：core + plugins
-python tests_offline_batch3.py  # 第③批：_batch_run + prompt 渲染
-```
-
----
-
-## 🔑 关键技术决策
-
-### 1. LLM 调用层：OpenAI 兼容 + 懒加载
-
-`core/llm_client.py` 封装 `chat()` / `chat_json()`，支持：
-- 自动重试 2 次
-- 不支持 `response_format` 的模型自动降级，从文本里 parse JSON
-
-### 2. 代码自愈循环（最多 5 次）
-
-Preprocessing / Visualizing / Modeling 都内置：
-```
-code_runner(执行) → 失败 → Code_Fixer LLM(修) → 再执行 → ... → 最多 5 次
-```
-
-5 次仍失败则**退化**：Preprocessing 原 df 透传、Visualizing 返回空图表列表并给出错误信息。**不会因为 LLM 生成了坏代码整个流程炸掉**。
-
-### 3. 子进程 + 超时隔离
-
-所有用户代码（LLM 生成的 plotly/sklearn 代码）都在**独立 Python 子进程**里跑：
-- 死循环 → 超时杀掉（默认 300 秒）
-- 抛异常 → 父进程捕获，不影响 Streamlit
-
-### 4. RAG 检索（无向量库）
-
-`core/rag_retriever.py` 基于算法黄页做 **BM25 + 字段加权**（`name`×3 + `category_l2`×3）：
-- 274 条算法，冷启动 < 100ms
-- 查询 `"缺失值处理算法 均值填充 K邻近填充"` → top-1 score=1.0（精确命中）
-- 可选 `jieba` 分词（装了就用，没装走正则）
-
-### 5. Batch 节点 → ThreadPoolExecutor
-
-Coze 原 `batchSize=100, concurrent=10`。本地用线程池 1:1 复刻：
-- 实测 10 张图的 LLM 生成并发耗时 ≈ 1 次调用（串行会 > 10 倍）
-- 如果你的 LLM provider 有 QPS 限制，调小 `workflows/visualizing.py` 里的 `BATCH_CONCURRENCY`
-
-### 6. 前端零侵入
-
-保留了原版 Streamlit 前端的 **session_state 结构、页面布局、UI 交互**。替换只在两处：
-- `utils/coze_runtime.py` → stub，兼容旧调用
-- `utils/local_workflow_bridge.py` → 把本地 workflow 包装成 Coze 返回结构
-
-render 页面里只替换了 `call_coze_workflow*` 函数体，**其他 3000+ 行 UI 代码全部没动**。
-
-### 7. Reporting 的 final_html 拼接
-
-你强调的"逐部分输出需要拼接后输出"：
-- `workflows/reporting_partly.py` 里 `report_parts` 是 list
-- **拼接点**：`final_html = "".join(report_parts)` （批式）
-- 同时返回 `final_html_parts` 数组，方便未来做流式展示
-
----
-
-## 🛠 常见问题
-
-### Q: 跑起来 LLM 特别慢？
-A: 可能是 RAG 关掉后用了更复杂的模型。把 `OPENAI_MODEL` 改成 `deepseek-chat` 或 `gpt-4o-mini`。
-
-### Q: LLM 报 `response_format is not supported`？
-A: `chat_json()` 会自动降级到"从文本挖 JSON"模式。本地 Ollama / 旧版模型都不影响。
-
-### Q: 生成的代码跑不通？
-A: 系统自动会最多重试 5 次。如果一直失败：
-1. 考虑换更强的 `OPENAI_MODEL`
-2. 直接改 `prompts/preprocessing/code_generation_llm_sys.txt` 优化 prompt
-
-### Q: 不想用前端，只想当库调？
-A: 直接 `from workflows.autostat import run_autostat`：
 ```python
 import pandas as pd
 from workflows.autostat import run_autostat
@@ -249,12 +137,82 @@ result = run_autostat(
 print(result["final_html"][:500])
 ```
 
-### Q: 我的算法黄页想换？
-A: 直接替换 `knowledge/算法黄页.xlsx`，或修改 `knowledge/algorithm_catalog.jsonl`。
-格式：每行一个 JSON `{id, category_l1, category_l2, name, description, code}`。
+---
 
-### Q: 遇到乱码/编码错误？
-A: 所有文件都用 UTF-8。Windows PowerShell 跑 CLI 时建议：
+## 系统架构
+
+```
+CSV 文件
+  │
+  ▼
+Planning (分析路径规划)
+  │
+  ▼
+Loading (数据语义解析) ──→ 数据概览
+  │
+  ▼
+Preprocessing (智能预处理) ──→ 预处理后数据集
+  │          ↻ 代码自愈循环 (最多5次)
+  ▼
+Visualizing (自动可视化) ──→ 交互图表集
+  │          ↻ 代码自愈循环 (最多5次)
+  ▼
+Modeling (建模分析) ──→ 模型评估结果
+  │          ↻ 代码自愈循环 (最多5次)
+  ▼
+Reporting (报告生成) ──→ Word / HTML / Markdown
+```
+
+---
+
+## 项目结构
+
+```
+AutoSTAT_ver2/
+├── app.py                 # 启动入口
+├── .env.example           # 环境变量模板
+├── requirements.txt
+│
+├── core/                  # 核心基础设施
+│   ├── llm_client.py      #   OpenAI 兼容客户端（重试、JSON 鲁棒解析）
+│   ├── prompt_template.py #   Prompt 模板渲染
+│   ├── rag_retriever.py   #   BM25 算法知识库检索
+│   └── workflow_runner.py #   辅助工具函数
+│
+├── workflows/             # 8 个 Workflow 实现
+│   ├── autostat.py        #   总编排（串联所有子 workflow）
+│   ├── planning.py        #   分析路径规划
+│   ├── loading.py         #   数据语义解析
+│   ├── preprocessing.py   #   预处理（含自愈循环 + RAG）
+│   ├── visualizing.py     #   可视化（含批量并发生成）
+│   ├── modeling.py        #   建模（含 RAG + 自愈循环）
+│   ├── reporting_toc.py   #   报告目录生成
+│   ├── reporting_partly.py #  报告逐节撰写
+│   └── _plugins.py        #   辅助插件函数
+│
+├── prompts/               # LLM Prompt 模板（按阶段分目录）
+├── knowledge/             # RAG 知识库（274 条算法）
+├── frontend/              # Streamlit 前端界面
+└── tests_offline*.py      # 离线测试脚本
+```
+
+---
+
+## 常见问题
+
+**Q: LLM 响应很慢？**
+建议使用 `deepseek-chat` 或 `gpt-4o-mini` 等轻量模型，性价比较高。
+
+**Q: 提示 `response_format is not supported`？**
+系统会自动降级为从文本中解析 JSON，不影响使用。
+
+**Q: 生成的代码一直执行失败？**
+系统内置最多 5 次自动修复。如仍失败，可尝试更换更强的模型，或优化 `prompts/` 目录下对应的 prompt 模板。
+
+**Q: 想替换算法知识库？**
+替换 `knowledge/算法黄页.xlsx` 或编辑 `knowledge/algorithm_catalog.jsonl`，每行一条 JSON 记录。
+
+**Q: Windows 下出现编码问题？**
 ```powershell
 chcp 65001
 $env:PYTHONIOENCODING="utf-8"
@@ -262,85 +220,16 @@ $env:PYTHONIOENCODING="utf-8"
 
 ---
 
-## 📊 核心数据流（示意）
+## 相关链接
 
-```
-┌──────────┐
-│ CSV 文件  │
-└────┬─────┘
-     ▼
-┌──────────────────────────────────┐
-│ Planning (2 LLM)                  │  plan: 5个开关
-│ df → meta → planner LLM(JSON) →   │  + shape, dtype_info_str
-│  analysis_path LLM                │    head_dict_str, df
-└────┬─────────────────────────────┘
-     ▼
-┌──────────────────┐
-│ Loading (3 LLM)   │  summary_1, abstract_1
-└────┬─────────────┘
-     ▼
-┌────────────────────────────┐
-│ Preprocessing (6 LLM + RAG) │  summary_2, abstract_2, suggestion
-│ + Loop(5 次修复)            │  processed_df → 下游用
-└────┬───────────────────────┘
-     ▼
-┌──────────────────────────────┐
-│ Visualizing (8 LLM + 2 Batch) │  summary_3, abstract_3,
-│ + Loop(5 次修复)              │  final_code, tu_title
-└────┬────────────────────────┘
-     ▼
-┌───────────────────────┐
-│ Modeling (9 LLM + RAG) │  summary_4, abstract_4, model_suggestion
-│ + Loop(5 次修复)       │
-└────┬──────────────────┘
-     ▼
-┌────────────────────────────────┐
-│ Reporting_toc (2 LLM)           │  toc_text + 4 个 abstract 透传
-└────┬───────────────────────────┘
-     ▼
-┌─────────────────────────────────────────┐
-│ Reporting_partly (2 LLM + Loop 对每节): │
-│   writer → fill → composer → validator   │
-│ → final_html_parts: [...]                │
-│ → final_html = "".join(parts)  ⭐ 拼接点  │
-│ → title_maker LLM                        │
-└────┬─────────────────────────────────────┘
-     ▼
-┌──────────────────────────┐
-│ Streamlit 显示 + 下载导出 │
-│ (Word / HTML / Markdown) │
-└──────────────────────────┘
-```
+API Key 获取：
+- [DeepSeek](https://platform.deepseek.com/api_keys)
+- [OpenAI](https://platform.openai.com/docs/overview)
+- [通义千问](https://bailian.console.aliyun.com/)
+- [Moonshot](https://platform.moonshot.cn/)
 
 ---
 
-## 📋 Check List（确认清单）
+## 许可
 
-### 前端是否成功切换到本地
-- [ ] 启动后侧边栏显示 **"状态：本地模式已就绪，LLM=xxx"**（绿色）
-- [ ] 侧边栏不再有"Coze 授权"按钮
-- [ ] 各页面跑 workflow 时 terminal 里看不到 `api.coze.com` 的请求
-
-### Workflow 是否都能跑通
-- [ ] Loading：侧边栏上传 CSV → "解析含义" → 出 summary_1 卡片
-- [ ] Preprocessing：出建议 → 生成代码 → 看到"代码执行：✅ 成功"
-- [ ] Visualizing：推荐方案 → 生成代码 → 页面显示 N 张图
-- [ ] Modeling：选 target → 生成代码 → 出 result_format
-- [ ] Reporting：生成目录 → 生成完整报告 → 可下载 Word
-
----
-
-## 📖 分批交付文档
-
-这个最终版是 5 个批次累积起来的：
-
-- **第①批**：抽取 72 个 prompt + 12 个 code 节点 + 结构化 graph.json
-- **第②批**：core 模块 + Planning + Loading workflow
-- **第③批**：Preprocessing + Visualizing workflow
-- **第④⑤批（本次）**：Modeling + Reporting + AutoSTAT 总编排 + **前端集成**
-
-分批交付的说明文档（`BATCH2_README.md` / `BATCH3_README.md`）仍然保留在包里作为历史记录。
-
----
-
-有问题欢迎提。想加功能（如流式展示 final_html / 切换多个 RAG 知识库 / 自定义 plugin）都可以在这个架构上直接扩展。
+本项目基于 MIT 许可证开源，详见 [LICENSE](./LICENSE) 文件。
