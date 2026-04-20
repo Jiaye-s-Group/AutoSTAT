@@ -1,0 +1,9 @@
+请根据以下输入信息生成最终的 Markdown 建模报告：
+
+=== 输入 JSON 数据 ===
+{{result_json}}
+
+=== 建模背景上下文（参考信息） ===
+- 建模使用的源代码：{{modeling_code}}
+- 用户分析偏好：{{preference_select}}
+- 额外特殊需求：{{additional_preference}}

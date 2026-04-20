@@ -1,0 +1,42 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# === 虚拟环境 ===
+venv/
+.venv/
+env/
+ENV/
+
+# === 环境变量（含 API Key，绝对不能提交！）===
+.env
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === 临时文件 & 输出 ===
+*.log
+tmp/
+temp/
+output/
+*.docx
+*.pdf
+!knowledge/*.xlsx
+
+# === Jupyter ===
+.ipynb_checkpoints/

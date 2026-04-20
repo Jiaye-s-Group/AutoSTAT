@@ -1,0 +1,1422 @@
+{
+  "workflow_name": "autostat",
+  "workflow_id": "7605130804575666181",
+  "space_id": "7594748927577554949",
+  "nodes": [
+    {
+      "id": "100001",
+      "type": "1",
+      "kind": "start",
+      "title": "Start",
+      "subtitle": "",
+      "safe_name": "start",
+      "parent_id": null,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "data",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "add_preference",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "preference_selected",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "user_input_pre",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "user_input_load",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "user_input_vis",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "user_input_model",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "user_input_report",
+          "type": "string",
+          "schema": {}
+        }
+      ]
+    },
+    {
+      "id": "900001",
+      "type": "2",
+      "kind": "end",
+      "title": "End",
+      "subtitle": "",
+      "safe_name": "end",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "final_html",
+          "ref_type": "ref",
+          "from_node": "178163",
+          "from_field": "final_html",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [],
+      "end_params": [
+        {
+          "name": "final_html",
+          "ref_type": "ref",
+          "from_node": "178163",
+          "from_field": "final_html",
+          "source": "block-output"
+        }
+      ]
+    },
+    {
+      "id": "153929",
+      "type": "9",
+      "kind": "subworkflow",
+      "title": "Planner",
+      "subtitle": "",
+      "safe_name": "planner",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "data",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "data",
+          "source": "block-output"
+        },
+        {
+          "name": "add_preference",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "add_preference",
+          "source": "block-output"
+        },
+        {
+          "name": "preference_selected",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "preference_selected",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "loading_auto",
+          "type": "boolean",
+          "schema": {}
+        },
+        {
+          "name": "prep_auto",
+          "type": "boolean",
+          "schema": {}
+        },
+        {
+          "name": "vis_auto",
+          "type": "boolean",
+          "schema": {}
+        },
+        {
+          "name": "modeling_auto",
+          "type": "boolean",
+          "schema": {}
+        },
+        {
+          "name": "report_auto",
+          "type": "boolean",
+          "schema": {}
+        },
+        {
+          "name": "plan",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "shape_0",
+          "type": "integer",
+          "schema": {}
+        },
+        {
+          "name": "shape_1",
+          "type": "integer",
+          "schema": {}
+        },
+        {
+          "name": "dtype_info_str",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "head_dict_str",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "df",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "subworkflow": {
+        "workflowId": "7598078275562799109",
+        "spaceId": "7594748927577554949",
+        "type": 0,
+        "workflowVersion": "v0.0.9",
+        "inputDefs": [
+          {
+            "assistType": 7,
+            "input": {},
+            "name": "data",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "add_preference",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "preference_selected",
+            "required": false,
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "id": "171444",
+      "type": "4",
+      "kind": "plugin",
+      "title": "get_from_processed_df",
+      "subtitle": "",
+      "safe_name": "get_from_processed_df",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "df",
+          "ref_type": "ref",
+          "from_node": "149749",
+          "from_field": "summary_2.processed_df",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "shape0",
+          "type": "integer",
+          "schema": {}
+        },
+        {
+          "name": "shape1",
+          "type": "integer",
+          "schema": {}
+        },
+        {
+          "name": "columns",
+          "type": "list",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "head_dict_str",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "plugin": {
+        "apiParam": [
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "7601888482583527429",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "apiID"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "get_from_processed_df",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "apiName"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "7595804910244102197",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginID"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "for AutoSTAT",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginName"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "0",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginVersion"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "tips"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "outDocLink"
+          }
+        ]
+      }
+    },
+    {
+      "id": "151460",
+      "type": "9",
+      "kind": "subworkflow",
+      "title": "Loading",
+      "subtitle": "",
+      "safe_name": "loading",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "dtype_info_str",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "dtype_info_str",
+          "source": "block-output"
+        },
+        {
+          "name": "head_dict_str",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "head_dict_str",
+          "source": "block-output"
+        },
+        {
+          "name": "loading_auto",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "loading_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "shape_0",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "shape_0",
+          "source": "block-output"
+        },
+        {
+          "name": "shape_1",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "shape_1",
+          "source": "block-output"
+        },
+        {
+          "name": "add_preference",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "add_preference",
+          "source": "block-output"
+        },
+        {
+          "name": "preference_selected",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "preference_selected",
+          "source": "block-output"
+        },
+        {
+          "name": "user_input",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "user_input_load",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "summary_1",
+          "type": "object",
+          "schema": [
+            {
+              "type": "string",
+              "name": "title"
+            },
+            {
+              "type": "string",
+              "name": "desc"
+            },
+            {
+              "type": "string",
+              "name": "df"
+            }
+          ]
+        },
+        {
+          "name": "abstract_1",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "subworkflow": {
+        "workflowId": "7598094351072526389",
+        "spaceId": "7594748927577554949",
+        "type": 0,
+        "workflowVersion": "v0.0.8",
+        "inputDefs": [
+          {
+            "input": {},
+            "name": "shape_0",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "input": {},
+            "name": "shape_1",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "input": {},
+            "name": "dtype_info_str",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "head_dict_str",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "loading_auto",
+            "required": true,
+            "type": "boolean"
+          },
+          {
+            "input": {},
+            "name": "add_preference",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "preference_selected",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "user_input",
+            "required": false,
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "id": "149749",
+      "type": "9",
+      "kind": "subworkflow",
+      "title": "Preprocessing_RAG",
+      "subtitle": "",
+      "safe_name": "preprocessing_rag",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "df",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "df",
+          "source": "block-output"
+        },
+        {
+          "name": "dtype_info_str",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "dtype_info_str",
+          "source": "block-output"
+        },
+        {
+          "name": "head_dict_str",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "head_dict_str",
+          "source": "block-output"
+        },
+        {
+          "name": "prep_auto",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "prep_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "shape_0",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "shape_0",
+          "source": "block-output"
+        },
+        {
+          "name": "shape_1",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "shape_1",
+          "source": "block-output"
+        },
+        {
+          "name": "add_preference",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "add_preference",
+          "source": "block-output"
+        },
+        {
+          "name": "preference_selected",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "preference_selected",
+          "source": "block-output"
+        },
+        {
+          "name": "user_input",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "user_input_pre",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "abstract_2",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "summary_2",
+          "type": "object",
+          "schema": [
+            {
+              "type": "string",
+              "name": "title"
+            },
+            {
+              "type": "string",
+              "name": "desc"
+            },
+            {
+              "type": "string",
+              "name": "processed_df"
+            },
+            {
+              "type": "string",
+              "name": "code"
+            }
+          ]
+        },
+        {
+          "name": "suggestion",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "subworkflow": {
+        "workflowId": "7604840478119706677",
+        "spaceId": "7594748927577554949",
+        "type": 0,
+        "workflowVersion": "v0.0.5",
+        "inputDefs": [
+          {
+            "input": {},
+            "name": "shape_0",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "input": {},
+            "name": "shape_1",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "input": {},
+            "name": "dtype_info_str",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "head_dict_str",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "df",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "prep_auto",
+            "required": true,
+            "type": "boolean"
+          },
+          {
+            "input": {},
+            "name": "preference_selected",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "add_preference",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "user_input",
+            "required": false,
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "id": "145154",
+      "type": "9",
+      "kind": "subworkflow",
+      "title": "Modeling_RAG",
+      "subtitle": "",
+      "safe_name": "modeling_rag",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "columns",
+          "ref_type": "ref",
+          "from_node": "171444",
+          "from_field": "columns",
+          "source": "block-output"
+        },
+        {
+          "name": "data",
+          "ref_type": "ref",
+          "from_node": "149749",
+          "from_field": "summary_2.processed_df",
+          "source": "block-output"
+        },
+        {
+          "name": "df_head",
+          "ref_type": "ref",
+          "from_node": "171444",
+          "from_field": "head_dict_str",
+          "source": "block-output"
+        },
+        {
+          "name": "modeling_auto",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "modeling_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "add_preference",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "add_preference",
+          "source": "block-output"
+        },
+        {
+          "name": "preference_selected",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "preference_selected",
+          "source": "block-output"
+        },
+        {
+          "name": "user_input",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "user_input_model",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "abstract_4",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "summary_4",
+          "type": "object",
+          "schema": [
+            {
+              "type": "string",
+              "name": "title"
+            },
+            {
+              "type": "string",
+              "name": "code"
+            },
+            {
+              "type": "string",
+              "name": "desc"
+            },
+            {
+              "type": "string",
+              "name": "result"
+            }
+          ]
+        },
+        {
+          "name": "model_suggestion",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "subworkflow": {
+        "workflowId": "7605874583226056709",
+        "spaceId": "7594748927577554949",
+        "type": 0,
+        "workflowVersion": "v0.0.6",
+        "inputDefs": [
+          {
+            "input": {},
+            "name": "user_input",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "df_head",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "columns",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "type": "list"
+          },
+          {
+            "input": {},
+            "name": "target",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "train_code",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "preference_selected",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "add_preference",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "user_prompt",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "data",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "modeling_auto",
+            "required": true,
+            "type": "boolean"
+          }
+        ]
+      }
+    },
+    {
+      "id": "177524",
+      "type": "9",
+      "kind": "subworkflow",
+      "title": "Reporting_toc_text",
+      "subtitle": "",
+      "safe_name": "reporting_toc_text",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "coding_abstract",
+          "ref_type": "ref",
+          "from_node": "145154",
+          "from_field": "abstract_4",
+          "source": "block-output"
+        },
+        {
+          "name": "coding_summary",
+          "ref_type": "ref",
+          "from_node": "145154",
+          "from_field": "summary_4",
+          "source": "block-output"
+        },
+        {
+          "name": "load_abstract",
+          "ref_type": "ref",
+          "from_node": "151460",
+          "from_field": "abstract_1",
+          "source": "block-output"
+        },
+        {
+          "name": "load_summary",
+          "ref_type": "ref",
+          "from_node": "151460",
+          "from_field": "summary_1",
+          "source": "block-output"
+        },
+        {
+          "name": "preproc_abstract",
+          "ref_type": "ref",
+          "from_node": "149749",
+          "from_field": "abstract_2",
+          "source": "block-output"
+        },
+        {
+          "name": "preproc_summary",
+          "ref_type": "ref",
+          "from_node": "149749",
+          "from_field": "summary_2",
+          "source": "block-output"
+        },
+        {
+          "name": "report_auto",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "report_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "selected_full_conten",
+          "ref_type": "ref",
+          "from_node": "118694",
+          "from_field": "full",
+          "source": "block-output"
+        },
+        {
+          "name": "toc_md",
+          "literal": "[]"
+        },
+        {
+          "name": "visual_abstract",
+          "ref_type": "ref",
+          "from_node": "118694",
+          "from_field": "abstract_3",
+          "source": "block-output"
+        },
+        {
+          "name": "visual_summary",
+          "ref_type": "ref",
+          "from_node": "118694",
+          "from_field": "summary_3",
+          "source": "block-output"
+        },
+        {
+          "name": "user_input",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "user_input_report",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "add_preference",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "preference_select",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "selected_full_conten",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "toc_text",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "load_abstract",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "preproc_abstract",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "visual_abstract",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "coding_abstract",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "subworkflow": {
+        "workflowId": "7619618199978508341",
+        "spaceId": "7594748927577554949",
+        "type": 0,
+        "workflowVersion": "v0.0.6",
+        "inputDefs": [
+          {
+            "input": {},
+            "name": "load_summary",
+            "required": true,
+            "schema": [],
+            "type": "object"
+          },
+          {
+            "input": {},
+            "name": "preproc_summary",
+            "required": true,
+            "schema": [],
+            "type": "object"
+          },
+          {
+            "input": {},
+            "name": "visual_summary",
+            "required": true,
+            "schema": [],
+            "type": "object"
+          },
+          {
+            "input": {},
+            "name": "coding_summary",
+            "required": true,
+            "schema": [],
+            "type": "object"
+          },
+          {
+            "input": {},
+            "name": "selected_full_conten",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "load_abstract",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "preproc_abstract",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "visual_abstract",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "coding_abstract",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "toc_md",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "type": "list"
+          },
+          {
+            "input": {},
+            "name": "outline_length",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "preference_selected",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "add_preference",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "report_auto",
+            "required": true,
+            "type": "boolean"
+          },
+          {
+            "input": {},
+            "name": "user_input",
+            "required": false,
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "id": "178163",
+      "type": "9",
+      "kind": "subworkflow",
+      "title": "Reporting_partly_output_text",
+      "subtitle": "",
+      "safe_name": "reporting_partly_output_text",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "coding_abstract",
+          "ref_type": "ref",
+          "from_node": "177524",
+          "from_field": "coding_abstract",
+          "source": "block-output"
+        },
+        {
+          "name": "load_abstract",
+          "ref_type": "ref",
+          "from_node": "177524",
+          "from_field": "load_abstract",
+          "source": "block-output"
+        },
+        {
+          "name": "preproc_abstract",
+          "ref_type": "ref",
+          "from_node": "177524",
+          "from_field": "preproc_abstract",
+          "source": "block-output"
+        },
+        {
+          "name": "selected_full_conten",
+          "ref_type": "ref",
+          "from_node": "177524",
+          "from_field": "selected_full_conten",
+          "source": "block-output"
+        },
+        {
+          "name": "toc_text",
+          "ref_type": "ref",
+          "from_node": "177524",
+          "from_field": "toc_text",
+          "source": "block-output"
+        },
+        {
+          "name": "visual_abstract",
+          "ref_type": "ref",
+          "from_node": "177524",
+          "from_field": "visual_abstract",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "final_html",
+          "type": "list",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "subworkflow": {
+        "workflowId": "7619618317418446901",
+        "spaceId": "7594748927577554949",
+        "type": 0,
+        "workflowVersion": "v0.0.13",
+        "inputDefs": [
+          {
+            "input": {},
+            "name": "toc_text",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "selected_full_conten",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "preference_select",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "add_preference",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "load_abstract",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "preproc_abstract",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "visual_abstract",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "coding_abstract",
+            "required": true,
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "id": "118694",
+      "type": "9",
+      "kind": "subworkflow",
+      "title": "Visualizing",
+      "subtitle": "",
+      "safe_name": "visualizing",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "cols",
+          "ref_type": "ref",
+          "from_node": "171444",
+          "from_field": "columns",
+          "source": "block-output"
+        },
+        {
+          "name": "data",
+          "ref_type": "ref",
+          "from_node": "149749",
+          "from_field": "summary_2.processed_df",
+          "source": "block-output"
+        },
+        {
+          "name": "def_head",
+          "ref_type": "ref",
+          "from_node": "171444",
+          "from_field": "head_dict_str",
+          "source": "block-output"
+        },
+        {
+          "name": "shape0",
+          "ref_type": "ref",
+          "from_node": "171444",
+          "from_field": "shape0",
+          "source": "block-output"
+        },
+        {
+          "name": "shape1",
+          "ref_type": "ref",
+          "from_node": "171444",
+          "from_field": "shape1",
+          "source": "block-output"
+        },
+        {
+          "name": "vis_auto",
+          "ref_type": "ref",
+          "from_node": "153929",
+          "from_field": "vis_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "user_input",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "user_input_vis",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "full",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "abstract_3",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "summary_3",
+          "type": "object",
+          "schema": [
+            {
+              "type": "string",
+              "name": "title"
+            },
+            {
+              "type": "list",
+              "name": "fig_analysis",
+              "schema": {
+                "type": "object",
+                "schema": [
+                  {
+                    "type": "string",
+                    "name": "fig"
+                  },
+                  {
+                    "type": "string",
+                    "name": "analysis"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "visual_recommendatio",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "final_code",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "tu_title",
+          "type": "list",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "subworkflow": {
+        "workflowId": "7628850702967930885",
+        "spaceId": "7594748927577554949",
+        "type": 0,
+        "workflowVersion": "v0.0.1",
+        "inputDefs": [
+          {
+            "input": {},
+            "name": "data",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "user_input",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "preference_selected",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "add_preference",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "color",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "shape0",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "input": {},
+            "name": "shape1",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "input": {},
+            "name": "cols",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "type": "list"
+          },
+          {
+            "input": {},
+            "name": "def_head",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "input": {},
+            "name": "vis_auto",
+            "required": true,
+            "type": "boolean"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "sourceNodeID": "100001",
+      "targetNodeID": "153929"
+    },
+    {
+      "sourceNodeID": "178163",
+      "targetNodeID": "900001"
+    },
+    {
+      "sourceNodeID": "153929",
+      "targetNodeID": "151460"
+    },
+    {
+      "sourceNodeID": "153929",
+      "targetNodeID": "149749"
+    },
+    {
+      "sourceNodeID": "149749",
+      "targetNodeID": "171444"
+    },
+    {
+      "sourceNodeID": "171444",
+      "targetNodeID": "145154"
+    },
+    {
+      "sourceNodeID": "171444",
+      "targetNodeID": "118694"
+    },
+    {
+      "sourceNodeID": "151460",
+      "targetNodeID": "177524"
+    },
+    {
+      "sourceNodeID": "149749",
+      "targetNodeID": "177524"
+    },
+    {
+      "sourceNodeID": "145154",
+      "targetNodeID": "177524"
+    },
+    {
+      "sourceNodeID": "118694",
+      "targetNodeID": "177524"
+    },
+    {
+      "sourceNodeID": "177524",
+      "targetNodeID": "178163"
+    }
+  ]
+}

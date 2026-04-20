@@ -1,0 +1,1687 @@
+{
+  "workflow_name": "modeling",
+  "workflow_id": "7605874583226056709",
+  "space_id": "7594748927577554949",
+  "nodes": [
+    {
+      "id": "150776",
+      "type": "3",
+      "kind": "llm",
+      "title": "Sec4_refine_suggestion",
+      "subtitle": "LLM",
+      "safe_name": "sec4_refine_suggestion_llm",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "model_suggestion",
+          "ref_type": "ref",
+          "from_node": "114596",
+          "from_field": "model_suggestion",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "refine_suggestion",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "model_cfg": {
+        "generationDiversity": "default_val",
+        "temperature": "1",
+        "topP": "1",
+        "frequencyPenalty": "0",
+        "presencePenalty": "0",
+        "maxTokens": "4096",
+        "responseFormat": "2",
+        "modleName": "GPT-4o",
+        "modelType": "1719845284",
+        "parameters": "",
+        "enableChatHistory": false,
+        "chatHistoryRound": "3",
+        "stableSystemPrompt": "",
+        "canContinue": false,
+        "loopPromptVersion": "",
+        "loopPromptName": "",
+        "loopPromptId": ""
+      },
+      "sys_file": "sec4_refine_suggestion_llm_sys.txt",
+      "user_file": "sec4_refine_suggestion_llm_user.txt"
+    },
+    {
+      "id": "900001",
+      "type": "2",
+      "kind": "end",
+      "title": "End",
+      "subtitle": "",
+      "safe_name": "end",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "abstract_4",
+          "ref_type": "ref",
+          "from_node": "180967",
+          "from_field": "abstract_4",
+          "source": "block-output"
+        },
+        {
+          "name": "summary_4",
+          "ref_type": "ref",
+          "from_node": "180967",
+          "from_field": "summary_4",
+          "source": "block-output"
+        },
+        {
+          "name": "model_suggestion",
+          "ref_type": "ref",
+          "from_node": "114596",
+          "from_field": "model_suggestion",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [],
+      "end_params": [
+        {
+          "name": "abstract_4",
+          "ref_type": "ref",
+          "from_node": "180967",
+          "from_field": "abstract_4",
+          "source": "block-output"
+        },
+        {
+          "name": "summary_4",
+          "ref_type": "ref",
+          "from_node": "180967",
+          "from_field": "summary_4",
+          "source": "block-output"
+        },
+        {
+          "name": "model_suggestion",
+          "ref_type": "ref",
+          "from_node": "114596",
+          "from_field": "model_suggestion",
+          "source": "block-output"
+        }
+      ]
+    },
+    {
+      "id": "100001",
+      "type": "1",
+      "kind": "start",
+      "title": "Start",
+      "subtitle": "",
+      "safe_name": "start",
+      "parent_id": null,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "user_input",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "df_head",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "columns",
+          "type": "list",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "target",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "train_code",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "preference_selected",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "add_preference",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "user_prompt",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "data",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "modeling_auto",
+          "type": "boolean",
+          "schema": {}
+        }
+      ]
+    },
+    {
+      "id": "159674",
+      "type": "40",
+      "kind": "variable_assign",
+      "title": "Variable assign_1",
+      "subtitle": "Variable assign",
+      "safe_name": "variable_assign_1_variable_assign",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "code_modeling",
+          "ref_type": "ref",
+          "from_node": "115320",
+          "from_field": "generated_code",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "isSuccess",
+          "type": "boolean",
+          "schema": {}
+        }
+      ],
+      "variable_assign": {
+        "inputParameters": [
+          {
+            "name": "code_modeling",
+            "left": {
+              "type": "string",
+              "value": {
+                "type": "ref",
+                "content": {
+                  "source": "global_variable_user",
+                  "path": [
+                    "code_modeling"
+                  ],
+                  "blockID": "",
+                  "name": ""
+                },
+                "rawMeta": {
+                  "type": 1
+                }
+              }
+            },
+            "input": {
+              "type": "string",
+              "value": {
+                "type": "ref",
+                "content": {
+                  "source": "block-output",
+                  "blockID": "115320",
+                  "name": "generated_code"
+                },
+                "rawMeta": {
+                  "type": 1
+                }
+              }
+            }
+          }
+        ],
+        "variableTypeMap": {
+          "code_modeling": "global_variable_user"
+        }
+      }
+    },
+    {
+      "id": "144655",
+      "type": "8",
+      "kind": "condition",
+      "title": "Condition",
+      "subtitle": "Condition",
+      "safe_name": "condition_condition",
+      "parent_id": "191159",
+      "inputs": [],
+      "outputs": [],
+      "branches": [
+        {
+          "index": 0,
+          "logic": 2,
+          "conditions": [
+            {
+              "left": {
+                "ref_type": "ref",
+                "from_node": "149770",
+                "from_field": "success",
+                "source": "block-output"
+              },
+              "operator": 1,
+              "right": {
+                "literal": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "113022",
+      "type": "19",
+      "kind": "unknown_19",
+      "title": "Break",
+      "subtitle": "Break",
+      "safe_name": "break_break",
+      "parent_id": "191159",
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "id": "155172",
+      "type": "40",
+      "kind": "variable_assign",
+      "title": "Variable assign_2",
+      "subtitle": "Variable assign",
+      "safe_name": "variable_assign_2_variable_assign",
+      "parent_id": "191159",
+      "inputs": [
+        {
+          "name": "code_modeling",
+          "ref_type": "ref",
+          "from_node": "1704668",
+          "from_field": "fixed_code",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "isSuccess",
+          "type": "boolean",
+          "schema": {}
+        }
+      ],
+      "variable_assign": {
+        "inputParameters": [
+          {
+            "name": "code_modeling",
+            "left": {
+              "type": "string",
+              "value": {
+                "type": "ref",
+                "content": {
+                  "source": "global_variable_user",
+                  "path": [
+                    "code_modeling"
+                  ],
+                  "blockID": "",
+                  "name": ""
+                },
+                "rawMeta": {
+                  "type": 1
+                }
+              }
+            },
+            "input": {
+              "type": "string",
+              "value": {
+                "type": "ref",
+                "content": {
+                  "source": "block-output",
+                  "blockID": "1704668",
+                  "name": "fixed_code"
+                },
+                "rawMeta": {
+                  "type": 1
+                }
+              }
+            }
+          }
+        ],
+        "variableTypeMap": {
+          "code_modeling": "global_variable_user"
+        }
+      }
+    },
+    {
+      "id": "1704668",
+      "type": "3",
+      "kind": "llm",
+      "title": "sec4_code_fixed",
+      "subtitle": "LLM",
+      "safe_name": "sec4_code_fixed_llm",
+      "parent_id": "191159",
+      "inputs": [
+        {
+          "name": "df_head",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "df_head",
+          "source": "block-output"
+        },
+        {
+          "name": "user_prompt",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "user_prompt",
+          "source": "block-output"
+        },
+        {
+          "name": "additional_preference",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "add_preference",
+          "source": "block-output"
+        },
+        {
+          "name": "preference_select",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "preference_selected",
+          "source": "block-output"
+        },
+        {
+          "name": "code",
+          "ref_type": "ref",
+          "from_node": "149770",
+          "from_field": "final_code",
+          "source": "block-output"
+        },
+        {
+          "name": "error",
+          "ref_type": "ref",
+          "from_node": "149770",
+          "from_field": "error",
+          "source": "block-output"
+        },
+        {
+          "name": "refined_suggestions",
+          "ref_type": "ref",
+          "from_node": "150776",
+          "from_field": "refine_suggestion",
+          "source": "block-output"
+        },
+        {
+          "name": "knowledge_results",
+          "ref_type": "ref",
+          "from_node": "155311",
+          "from_field": "knowledge_results",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "fixed_code",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "model_cfg": {
+        "generationDiversity": "default_val",
+        "temperature": "1",
+        "topP": "1",
+        "frequencyPenalty": "0",
+        "presencePenalty": "0",
+        "maxTokens": "4096",
+        "responseFormat": "2",
+        "modleName": "GPT-4o",
+        "modelType": "1719845284",
+        "parameters": "",
+        "enableChatHistory": false,
+        "chatHistoryRound": "3",
+        "stableSystemPrompt": "",
+        "canContinue": false,
+        "loopPromptVersion": "",
+        "loopPromptName": "",
+        "loopPromptId": ""
+      },
+      "sys_file": "sec4_code_fixed_llm_sys.txt",
+      "user_file": "sec4_code_fixed_llm_user.txt"
+    },
+    {
+      "id": "168115",
+      "type": "45",
+      "kind": "unknown_45",
+      "title": "HTTP request",
+      "subtitle": "HTTP request",
+      "safe_name": "http_request_http_request",
+      "parent_id": "191159",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "body",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "statusCode",
+          "type": "integer",
+          "schema": {}
+        },
+        {
+          "name": "headers",
+          "type": "string",
+          "schema": {}
+        }
+      ]
+    },
+    {
+      "id": "149770",
+      "type": "5",
+      "kind": "code",
+      "title": "Code_1",
+      "subtitle": "Code",
+      "safe_name": "code_1_code",
+      "parent_id": "191159",
+      "inputs": [
+        {
+          "name": "body",
+          "ref_type": "ref",
+          "from_node": "168115",
+          "from_field": "body",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "success",
+          "type": "boolean",
+          "schema": {}
+        },
+        {
+          "name": "error",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "final_code",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "result",
+          "type": "object",
+          "schema": []
+        }
+      ],
+      "language": 3,
+      "code_file": "code_1_code.js"
+    },
+    {
+      "id": "191159",
+      "type": "21",
+      "kind": "loop",
+      "title": "Loop",
+      "subtitle": "Loop",
+      "safe_name": "loop_loop",
+      "parent_id": null,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "final_code_list",
+          "type": null,
+          "schema": {}
+        },
+        {
+          "name": "result_list",
+          "type": null,
+          "schema": {}
+        }
+      ],
+      "loop": {
+        "loopType": "count",
+        "loopCount": {
+          "type": "integer",
+          "value": {
+            "type": "literal",
+            "content": 5,
+            "rawMeta": {
+              "type": 2
+            }
+          }
+        },
+        "inputParameters": [],
+        "variableParameters": []
+      },
+      "child_ids": [
+        "144655",
+        "113022",
+        "155172",
+        "1704668",
+        "168115",
+        "149770"
+      ]
+    },
+    {
+      "id": "114553",
+      "type": "3",
+      "kind": "llm",
+      "title": "Sec4_check_abstract",
+      "subtitle": "LLM",
+      "safe_name": "sec4_check_abstract_llm",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "target",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "target",
+          "source": "block-output"
+        },
+        {
+          "name": "code",
+          "ref_type": "ref",
+          "from_node": "129918",
+          "from_field": "final_code",
+          "source": "block-output"
+        },
+        {
+          "name": "result",
+          "ref_type": "ref",
+          "from_node": "129918",
+          "from_field": "result_json",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "chapt4_abstract",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "model_cfg": {
+        "generationDiversity": "default_val",
+        "temperature": "1",
+        "topP": "1",
+        "frequencyPenalty": "0",
+        "presencePenalty": "0",
+        "maxTokens": "4096",
+        "responseFormat": "2",
+        "modleName": "GPT-4o",
+        "modelType": "1719845284",
+        "parameters": "",
+        "enableChatHistory": false,
+        "chatHistoryRound": "3",
+        "stableSystemPrompt": "",
+        "canContinue": false,
+        "loopPromptVersion": "",
+        "loopPromptName": "",
+        "loopPromptId": ""
+      },
+      "sys_file": "sec4_check_abstract_llm_sys.txt",
+      "user_file": "sec4_check_abstract_llm_user.txt"
+    },
+    {
+      "id": "106706",
+      "type": "31",
+      "kind": "comment",
+      "title": "note",
+      "subtitle": "",
+      "safe_name": "note",
+      "parent_id": null,
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "id": "115320",
+      "type": "3",
+      "kind": "llm",
+      "title": "sec4_code_generation",
+      "subtitle": "LLM",
+      "safe_name": "sec4_code_generation_llm",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "df_head",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "df_head",
+          "source": "block-output"
+        },
+        {
+          "name": "user_prompt",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "user_prompt",
+          "source": "block-output"
+        },
+        {
+          "name": "additional_preference",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "add_preference",
+          "source": "block-output"
+        },
+        {
+          "name": "preference_selected",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "preference_selected",
+          "source": "block-output"
+        },
+        {
+          "name": "refined_suggestions",
+          "ref_type": "ref",
+          "from_node": "150776",
+          "from_field": "refine_suggestion",
+          "source": "block-output"
+        },
+        {
+          "name": "knowledge_results",
+          "ref_type": "ref",
+          "from_node": "155311",
+          "from_field": "knowledge_results",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "generated_code",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "model_cfg": {
+        "generationDiversity": "default_val",
+        "temperature": "1",
+        "topP": "1",
+        "frequencyPenalty": "0",
+        "presencePenalty": "0",
+        "maxTokens": "4096",
+        "responseFormat": "2",
+        "modleName": "GPT-4o",
+        "modelType": "1719845284",
+        "parameters": "",
+        "enableChatHistory": false,
+        "chatHistoryRound": "3",
+        "stableSystemPrompt": "",
+        "canContinue": false,
+        "loopPromptVersion": "",
+        "loopPromptName": "",
+        "loopPromptId": ""
+      },
+      "sys_file": "sec4_code_generation_llm_sys.txt",
+      "user_file": "sec4_code_generation_llm_user.txt"
+    },
+    {
+      "id": "114596",
+      "type": "3",
+      "kind": "llm",
+      "title": "Sec4_get_model_suggestion",
+      "subtitle": "LLM",
+      "safe_name": "sec4_get_model_suggestion_llm",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "columns",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "columns",
+          "source": "block-output"
+        },
+        {
+          "name": "df_head",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "df_head",
+          "source": "block-output"
+        },
+        {
+          "name": "target",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "target",
+          "source": "block-output"
+        },
+        {
+          "name": "train_code",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "train_code",
+          "source": "block-output"
+        },
+        {
+          "name": "user_input",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "user_input",
+          "source": "block-output"
+        },
+        {
+          "name": "preference_selected",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "preference_selected",
+          "source": "block-output"
+        },
+        {
+          "name": "add_preference",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "add_preference",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model_suggestion",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "model_cfg": {
+        "generationDiversity": "default_val",
+        "temperature": "1",
+        "topP": "1",
+        "frequencyPenalty": "0",
+        "presencePenalty": "0",
+        "maxTokens": "4096",
+        "responseFormat": "2",
+        "modleName": "GPT-4o",
+        "modelType": "1719845284",
+        "parameters": "",
+        "enableChatHistory": false,
+        "chatHistoryRound": "3",
+        "stableSystemPrompt": "",
+        "canContinue": false,
+        "loopPromptVersion": "",
+        "loopPromptName": "",
+        "loopPromptId": ""
+      },
+      "sys_file": "sec4_get_model_suggestion_llm_sys.txt",
+      "user_file": "sec4_get_model_suggestion_llm_user.txt"
+    },
+    {
+      "id": "139836",
+      "type": "3",
+      "kind": "llm",
+      "title": "sec4_result_format_prompt",
+      "subtitle": "LLM",
+      "safe_name": "sec4_result_format_prompt_llm",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "result_json",
+          "ref_type": "ref",
+          "from_node": "129918",
+          "from_field": "result_json",
+          "source": "block-output"
+        },
+        {
+          "name": "additional_preference",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "add_preference",
+          "source": "block-output"
+        },
+        {
+          "name": "modeling_code",
+          "ref_type": "ref",
+          "from_node": "129918",
+          "from_field": "final_code",
+          "source": "block-output"
+        },
+        {
+          "name": "preference_select",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "preference_selected",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "result_format",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "model_cfg": {
+        "generationDiversity": "default_val",
+        "temperature": "1",
+        "topP": "1",
+        "frequencyPenalty": "0",
+        "presencePenalty": "0",
+        "maxTokens": "4096",
+        "responseFormat": "2",
+        "modleName": "GPT-4o",
+        "modelType": "1719845284",
+        "parameters": "",
+        "enableChatHistory": false,
+        "chatHistoryRound": "3",
+        "stableSystemPrompt": "",
+        "canContinue": false,
+        "loopPromptVersion": "",
+        "loopPromptName": "",
+        "loopPromptId": ""
+      },
+      "sys_file": "sec4_result_format_prompt_llm_sys.txt",
+      "user_file": "sec4_result_format_prompt_llm_user.txt"
+    },
+    {
+      "id": "184364",
+      "type": "3",
+      "kind": "llm",
+      "title": "Sec4_summary_html",
+      "subtitle": "LLM",
+      "safe_name": "sec4_summary_html_llm",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "code",
+          "ref_type": "ref",
+          "from_node": "129918",
+          "from_field": "final_code",
+          "source": "block-output"
+        },
+        {
+          "name": "result",
+          "ref_type": "ref",
+          "from_node": "139836",
+          "from_field": "result_format",
+          "source": "block-output"
+        },
+        {
+          "name": "target",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "target",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "decs",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "model_cfg": {
+        "generationDiversity": "default_val",
+        "temperature": "1",
+        "topP": "1",
+        "frequencyPenalty": "0",
+        "presencePenalty": "0",
+        "maxTokens": "4096",
+        "responseFormat": "2",
+        "modleName": "GPT-4o",
+        "modelType": "1719845284",
+        "parameters": "",
+        "enableChatHistory": false,
+        "chatHistoryRound": "3",
+        "stableSystemPrompt": "",
+        "canContinue": false,
+        "loopPromptVersion": "",
+        "loopPromptName": "",
+        "loopPromptId": ""
+      },
+      "sys_file": "sec4_summary_html_llm_sys.txt",
+      "user_file": "sec4_summary_html_llm_user.txt"
+    },
+    {
+      "id": "148910",
+      "type": "4",
+      "kind": "plugin",
+      "title": "sec4_composer",
+      "subtitle": "",
+      "safe_name": "sec4_composer",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "code",
+          "ref_type": "ref",
+          "from_node": "129918",
+          "from_field": "final_code",
+          "source": "block-output"
+        },
+        {
+          "name": "desc",
+          "ref_type": "ref",
+          "from_node": "184364",
+          "from_field": "decs",
+          "source": "block-output"
+        },
+        {
+          "name": "result",
+          "ref_type": "ref",
+          "from_node": "139836",
+          "from_field": "result_format",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "summary_4",
+          "type": "object",
+          "schema": [
+            {
+              "type": "string",
+              "name": "code",
+              "required": true,
+              "description": ".."
+            },
+            {
+              "type": "string",
+              "name": "desc",
+              "required": true,
+              "description": ".."
+            },
+            {
+              "type": "string",
+              "name": "result",
+              "required": true,
+              "description": ".."
+            },
+            {
+              "type": "string",
+              "name": "title",
+              "required": true,
+              "description": ".."
+            }
+          ]
+        }
+      ],
+      "plugin": {
+        "apiParam": [
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "7601452329728327685",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "apiID"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "sec4_composer",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "apiName"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "7601450984904359989",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginID"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "for AutoSTAT Composer",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginName"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "0",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginVersion"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "tips"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "outDocLink"
+          }
+        ]
+      }
+    },
+    {
+      "id": "121298",
+      "type": "8",
+      "kind": "condition",
+      "title": "modeling_auto",
+      "subtitle": "Condition",
+      "safe_name": "modeling_auto_condition",
+      "parent_id": null,
+      "inputs": [],
+      "outputs": [],
+      "branches": [
+        {
+          "index": 0,
+          "logic": 2,
+          "conditions": [
+            {
+              "left": {
+                "ref_type": "ref",
+                "from_node": "100001",
+                "from_field": "modeling_auto",
+                "source": "block-output"
+              },
+              "operator": 1,
+              "right": {
+                "literal": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "180967",
+      "type": "5",
+      "kind": "code",
+      "title": "Code",
+      "subtitle": "Code",
+      "safe_name": "code_code",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "abstract_4",
+          "ref_type": "ref",
+          "from_node": "114553",
+          "from_field": "chapt4_abstract",
+          "source": "block-output"
+        },
+        {
+          "name": "summary_4",
+          "ref_type": "ref",
+          "from_node": "148910",
+          "from_field": "summary_4",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "abstract_4",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "summary_4",
+          "type": "object",
+          "schema": [
+            {
+              "type": "string",
+              "name": "title"
+            },
+            {
+              "type": "string",
+              "name": "code"
+            },
+            {
+              "type": "string",
+              "name": "desc"
+            },
+            {
+              "type": "string",
+              "name": "result"
+            }
+          ]
+        }
+      ],
+      "language": 3,
+      "code_file": "code_code.js"
+    },
+    {
+      "id": "127142",
+      "type": "3",
+      "kind": "llm",
+      "title": "get_query",
+      "subtitle": "LLM",
+      "safe_name": "get_query_llm",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "refined_suggestions",
+          "ref_type": "ref",
+          "from_node": "150776",
+          "from_field": "refine_suggestion",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "model_cfg": {
+        "temperature": "1",
+        "topP": "1",
+        "frequencyPenalty": "0",
+        "presencePenalty": "0",
+        "maxTokens": "4096",
+        "responseFormat": "2",
+        "modleName": "GPT-4o",
+        "modelType": "1719845284",
+        "generationDiversity": "default_val",
+        "parameters": "",
+        "enableChatHistory": false,
+        "chatHistoryRound": "3",
+        "stableSystemPrompt": "",
+        "canContinue": false,
+        "loopPromptVersion": "",
+        "loopPromptName": "",
+        "loopPromptId": ""
+      },
+      "sys_file": "get_query_llm_sys.txt",
+      "user_file": "get_query_llm_user.txt"
+    },
+    {
+      "id": "160795",
+      "type": "6",
+      "kind": "knowledge",
+      "title": "Knowledge retrieval",
+      "subtitle": "Knowledge retrieval",
+      "safe_name": "knowledge_retrieval_knowledge_retrieval",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "Query",
+          "ref_type": "ref",
+          "from_node": "127142",
+          "from_field": "output",
+          "source": "block-output"
+        },
+        {
+          "name": "enableChatHistory",
+          "literal": false
+        },
+        {
+          "name": "chatHistoryRound",
+          "literal": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "outputList",
+          "type": "list",
+          "schema": {
+            "type": "object",
+            "schema": [
+              {
+                "type": "string",
+                "name": "output"
+              },
+              {
+                "type": "string",
+                "name": "documentId"
+              }
+            ]
+          }
+        }
+      ],
+      "knowledge": {
+        "datasetParam": [
+          {
+            "name": "datasetList",
+            "input": {
+              "type": "list",
+              "schema": {
+                "type": "string"
+              },
+              "value": {
+                "type": "literal",
+                "content": [
+                  "7604086215256358917"
+                ]
+              }
+            }
+          },
+          {
+            "name": "topK",
+            "input": {
+              "type": "integer",
+              "value": {
+                "type": "literal",
+                "content": "3",
+                "rawMeta": {
+                  "type": 2
+                }
+              }
+            }
+          },
+          {
+            "name": "useRerank",
+            "input": {
+              "type": "boolean",
+              "value": {
+                "type": "literal",
+                "content": true,
+                "rawMeta": {
+                  "type": 3
+                }
+              }
+            }
+          },
+          {
+            "name": "useRewrite",
+            "input": {
+              "type": "boolean",
+              "value": {
+                "type": "literal",
+                "content": true,
+                "rawMeta": {
+                  "type": 3
+                }
+              }
+            }
+          },
+          {
+            "name": "isPersonalOnly",
+            "input": {
+              "type": "boolean",
+              "value": {
+                "type": "literal",
+                "content": true,
+                "rawMeta": {
+                  "type": 3
+                }
+              }
+            }
+          },
+          {
+            "name": "datasetType",
+            "input": {
+              "type": "integer",
+              "value": {
+                "type": "literal",
+                "content": "0",
+                "rawMeta": {
+                  "type": 2
+                }
+              }
+            }
+          },
+          {
+            "name": "VolcanoInfoList",
+            "input": {
+              "type": "list",
+              "schema": {
+                "type": "object",
+                "schema": [
+                  {
+                    "type": "string",
+                    "name": "datasetID"
+                  },
+                  {
+                    "type": "string",
+                    "name": "volcanoServiceID"
+                  }
+                ]
+              },
+              "value": {
+                "type": "literal",
+                "content": []
+              }
+            }
+          },
+          {
+            "name": "useNl2sql",
+            "input": {
+              "type": "boolean",
+              "value": {
+                "type": "literal",
+                "content": true,
+                "rawMeta": {
+                  "type": 3
+                }
+              }
+            }
+          },
+          {
+            "name": "minScore",
+            "input": {
+              "type": "float",
+              "value": {
+                "type": "literal",
+                "content": "0.5",
+                "rawMeta": {
+                  "type": 4
+                }
+              }
+            }
+          },
+          {
+            "name": "strategy",
+            "input": {
+              "type": "integer",
+              "value": {
+                "type": "literal",
+                "content": "1",
+                "rawMeta": {
+                  "type": 2
+                }
+              }
+            }
+          }
+        ],
+        "inputParameters": [
+          {
+            "name": "Query",
+            "input": {
+              "type": "string",
+              "value": {
+                "type": "ref",
+                "content": {
+                  "source": "block-output",
+                  "blockID": "127142",
+                  "name": "output"
+                },
+                "rawMeta": {
+                  "type": 1
+                }
+              }
+            }
+          },
+          {
+            "name": "enableChatHistory",
+            "input": {
+              "type": "boolean",
+              "value": {
+                "type": "literal",
+                "content": false,
+                "rawMeta": {
+                  "type": 3
+                }
+              }
+            }
+          },
+          {
+            "name": "chatHistoryRound",
+            "input": {
+              "type": "float",
+              "value": {
+                "type": "literal",
+                "content": 3,
+                "rawMeta": {
+                  "type": 4
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "155311",
+      "type": "4",
+      "kind": "plugin",
+      "title": "format_recall",
+      "subtitle": "",
+      "safe_name": "format_recall",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "output_list",
+          "ref_type": "ref",
+          "from_node": "160795",
+          "from_field": "outputList",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "knowledge_results",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "plugin": {
+        "apiParam": [
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "7605075076588912693",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "apiID"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "format_recall",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "apiName"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "7595804910244102197",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginID"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "for AutoSTAT",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginName"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "0",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginVersion"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "tips"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "outDocLink"
+          }
+        ]
+      }
+    },
+    {
+      "id": "129918",
+      "type": "5",
+      "kind": "code",
+      "title": "Code_2",
+      "subtitle": "Code",
+      "safe_name": "code_2_code",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "final_code_list",
+          "ref_type": "ref",
+          "from_node": "191159",
+          "from_field": "final_code_list",
+          "source": "block-output"
+        },
+        {
+          "name": "result_list",
+          "ref_type": "ref",
+          "from_node": "191159",
+          "from_field": "result_list",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "final_code",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "result_json",
+          "type": "object",
+          "schema": []
+        }
+      ],
+      "language": 3,
+      "code_file": "code_2_code.js"
+    }
+  ],
+  "edges": [
+    {
+      "sourceNodeID": "114596",
+      "targetNodeID": "150776"
+    },
+    {
+      "sourceNodeID": "150776",
+      "targetNodeID": "127142"
+    },
+    {
+      "sourceNodeID": "180967",
+      "targetNodeID": "900001"
+    },
+    {
+      "sourceNodeID": "100001",
+      "targetNodeID": "121298"
+    },
+    {
+      "sourceNodeID": "115320",
+      "targetNodeID": "159674"
+    },
+    {
+      "sourceNodeID": "159674",
+      "targetNodeID": "191159"
+    },
+    {
+      "sourceNodeID": "191159",
+      "targetNodeID": "129918",
+      "sourcePortID": "loop-output"
+    },
+    {
+      "sourceNodeID": "139836",
+      "targetNodeID": "114553"
+    },
+    {
+      "sourceNodeID": "114553",
+      "targetNodeID": "180967"
+    },
+    {
+      "sourceNodeID": "155311",
+      "targetNodeID": "115320"
+    },
+    {
+      "sourceNodeID": "121298",
+      "targetNodeID": "114596",
+      "sourcePortID": "true"
+    },
+    {
+      "sourceNodeID": "129918",
+      "targetNodeID": "139836"
+    },
+    {
+      "sourceNodeID": "139836",
+      "targetNodeID": "184364"
+    },
+    {
+      "sourceNodeID": "184364",
+      "targetNodeID": "148910"
+    },
+    {
+      "sourceNodeID": "148910",
+      "targetNodeID": "180967"
+    },
+    {
+      "sourceNodeID": "121298",
+      "targetNodeID": "180967",
+      "sourcePortID": "false"
+    },
+    {
+      "sourceNodeID": "127142",
+      "targetNodeID": "160795"
+    },
+    {
+      "sourceNodeID": "160795",
+      "targetNodeID": "155311"
+    }
+  ]
+}

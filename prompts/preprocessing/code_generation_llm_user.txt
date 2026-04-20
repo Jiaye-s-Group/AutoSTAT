@@ -1,0 +1,14 @@
+=== 运行环境说明（已提供对象，禁止重复导入）===
+运行环境中已提供以下对象与库，可直接使用：
+- pandas DataFrame 变量：df
+- numpy：np
+- sklearn 相关对象：
+  SimpleImputer、StandardScaler、MinMaxScaler、RobustScaler、
+  OneHotEncoder、OrdinalEncoder、LabelEncoder、FunctionTransformer、
+  ColumnTransformer、Pipeline
+===输入完整数据df====
+{{df}}
+=== 输入数据示例（仅用于推断列名与类型，不可假设示例覆盖全量数据）===
+{{head_dict_str}}
+=== LLM 返回的列级预处理建议（若为空则基于数据自行判断）===
+{{refined_suggestions}}

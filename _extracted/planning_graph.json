@@ -1,0 +1,618 @@
+{
+  "workflow_name": "planning",
+  "workflow_id": "7598078275562799109",
+  "space_id": "7594748927577554949",
+  "nodes": [
+    {
+      "id": "900001",
+      "type": "2",
+      "kind": "end",
+      "title": "End",
+      "subtitle": "",
+      "safe_name": "end",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "loading_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "loading_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "prep_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "prep_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "vis_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "vis_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "modeling_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "modeling_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "report_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "report_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "plan",
+          "ref_type": "ref",
+          "from_node": "1268149",
+          "from_field": "plan",
+          "source": "block-output"
+        },
+        {
+          "name": "shape_0",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "shape_0",
+          "source": "block-output"
+        },
+        {
+          "name": "shape_1",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "shape_1",
+          "source": "block-output"
+        },
+        {
+          "name": "dtype_info_str",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "dtype_info_str",
+          "source": "block-output"
+        },
+        {
+          "name": "head_dict_str",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "head_dict_str",
+          "source": "block-output"
+        },
+        {
+          "name": "df",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "df",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [],
+      "end_params": [
+        {
+          "name": "loading_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "loading_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "prep_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "prep_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "vis_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "vis_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "modeling_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "modeling_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "report_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "report_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "plan",
+          "ref_type": "ref",
+          "from_node": "1268149",
+          "from_field": "plan",
+          "source": "block-output"
+        },
+        {
+          "name": "shape_0",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "shape_0",
+          "source": "block-output"
+        },
+        {
+          "name": "shape_1",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "shape_1",
+          "source": "block-output"
+        },
+        {
+          "name": "dtype_info_str",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "dtype_info_str",
+          "source": "block-output"
+        },
+        {
+          "name": "head_dict_str",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "head_dict_str",
+          "source": "block-output"
+        },
+        {
+          "name": "df",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "df",
+          "source": "block-output"
+        }
+      ]
+    },
+    {
+      "id": "1977728",
+      "type": "3",
+      "kind": "llm",
+      "title": "planner",
+      "subtitle": "LLM",
+      "safe_name": "planner_llm",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "shape_0",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "shape_0",
+          "source": "block-output"
+        },
+        {
+          "name": "shape_1",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "shape_1",
+          "source": "block-output"
+        },
+        {
+          "name": "dtype_info_str",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "dtype_info_str",
+          "source": "block-output"
+        },
+        {
+          "name": "head_dict_str",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "head_dict_str",
+          "source": "block-output"
+        },
+        {
+          "name": "add_preference",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "add_preference",
+          "source": "block-output"
+        },
+        {
+          "name": "preference_selected",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "preference_selected",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "loading_auto",
+          "type": "boolean",
+          "schema": {}
+        },
+        {
+          "name": "prep_auto",
+          "type": "boolean",
+          "schema": {}
+        },
+        {
+          "name": "vis_auto",
+          "type": "boolean",
+          "schema": {}
+        },
+        {
+          "name": "modeling_auto",
+          "type": "boolean",
+          "schema": {}
+        },
+        {
+          "name": "report_auto",
+          "type": "boolean",
+          "schema": {}
+        }
+      ],
+      "model_cfg": {
+        "generationDiversity": "default_val",
+        "temperature": "1",
+        "topP": "1",
+        "frequencyPenalty": "0",
+        "presencePenalty": "0",
+        "maxTokens": "4096",
+        "responseFormat": "2",
+        "modleName": "GPT-4o",
+        "modelType": "1719845284",
+        "parameters": "",
+        "enableChatHistory": false,
+        "chatHistoryRound": "3",
+        "stableSystemPrompt": "",
+        "canContinue": false,
+        "loopPromptVersion": "",
+        "loopPromptName": "",
+        "loopPromptId": ""
+      },
+      "sys_file": "planner_llm_sys.txt",
+      "user_file": "planner_llm_user.txt"
+    },
+    {
+      "id": "1268149",
+      "type": "3",
+      "kind": "llm",
+      "title": "analysis_path",
+      "subtitle": "LLM",
+      "safe_name": "analysis_path_llm",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "shape_0",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "shape_0",
+          "source": "block-output"
+        },
+        {
+          "name": "shape_1",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "shape_1",
+          "source": "block-output"
+        },
+        {
+          "name": "dtype_info_str",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "dtype_info_str",
+          "source": "block-output"
+        },
+        {
+          "name": "head_dict_str",
+          "ref_type": "ref",
+          "from_node": "128297",
+          "from_field": "head_dict_str",
+          "source": "block-output"
+        },
+        {
+          "name": "loading_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "loading_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "prep_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "prep_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "vis_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "vis_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "modeling_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "modeling_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "report_auto",
+          "ref_type": "ref",
+          "from_node": "1977728",
+          "from_field": "report_auto",
+          "source": "block-output"
+        },
+        {
+          "name": "add_preference",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "add_preference",
+          "source": "block-output"
+        },
+        {
+          "name": "preference_select",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "preference_selected",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "plan",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "model_cfg": {
+        "generationDiversity": "default_val",
+        "temperature": "0.5",
+        "topP": "1",
+        "frequencyPenalty": "0",
+        "presencePenalty": "0",
+        "maxTokens": "8192",
+        "responseFormat": "2",
+        "modelType": "1716293913",
+        "modleName": "GPT-4o",
+        "parameters": "",
+        "enableChatHistory": false,
+        "chatHistoryRound": "3",
+        "stableSystemPrompt": "",
+        "canContinue": false,
+        "loopPromptVersion": "",
+        "loopPromptName": "",
+        "loopPromptId": ""
+      },
+      "sys_file": "analysis_path_llm_sys.txt",
+      "user_file": "analysis_path_llm_user.txt"
+    },
+    {
+      "id": "1328330",
+      "type": "5",
+      "kind": "code",
+      "title": "Data_to_url",
+      "subtitle": "Code",
+      "safe_name": "data_to_url_code",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "data",
+          "ref_type": "ref",
+          "from_node": "100001",
+          "from_field": "data",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "file_url",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "language": 3,
+      "code_file": "data_to_url_code.js"
+    },
+    {
+      "id": "100001",
+      "type": "1",
+      "kind": "start",
+      "title": "Start",
+      "subtitle": "",
+      "safe_name": "start",
+      "parent_id": null,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "data",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "add_preference",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "preference_selected",
+          "type": "string",
+          "schema": {}
+        }
+      ]
+    },
+    {
+      "id": "128297",
+      "type": "4",
+      "kind": "plugin",
+      "title": "Loading_Data",
+      "subtitle": "",
+      "safe_name": "loading_data",
+      "parent_id": null,
+      "inputs": [
+        {
+          "name": "file_url",
+          "ref_type": "ref",
+          "from_node": "1328330",
+          "from_field": "file_url",
+          "source": "block-output"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "error",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "head_dict_str",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "is_success",
+          "type": "boolean",
+          "schema": {}
+        },
+        {
+          "name": "shape_0",
+          "type": "integer",
+          "schema": {}
+        },
+        {
+          "name": "shape_1",
+          "type": "integer",
+          "schema": {}
+        },
+        {
+          "name": "df",
+          "type": "string",
+          "schema": {}
+        },
+        {
+          "name": "dtype_info_str",
+          "type": "string",
+          "schema": {}
+        }
+      ],
+      "plugin": {
+        "apiParam": [
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "7595804650859806725",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "apiID"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "Loading_Data",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "apiName"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "7595804910244102197",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginID"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "for AutoSTAT",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginName"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "0",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "pluginVersion"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "tips"
+          },
+          {
+            "input": {
+              "type": "string",
+              "value": {
+                "content": "",
+                "rawMeta": {
+                  "type": 1
+                },
+                "type": "literal"
+              }
+            },
+            "name": "outDocLink"
+          }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "sourceNodeID": "1268149",
+      "targetNodeID": "900001"
+    },
+    {
+      "sourceNodeID": "128297",
+      "targetNodeID": "1977728"
+    },
+    {
+      "sourceNodeID": "1977728",
+      "targetNodeID": "1268149"
+    },
+    {
+      "sourceNodeID": "100001",
+      "targetNodeID": "1328330"
+    },
+    {
+      "sourceNodeID": "1328330",
+      "targetNodeID": "128297"
+    }
+  ]
+}

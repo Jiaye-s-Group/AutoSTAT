@@ -1,0 +1,29 @@
+示例数据头部：
+{{df_head}}
+
+Requirement（请根据以下建模任务指令，对所有列出的模型依次执行训练与评估。若某模型在当前环境不可用，请手动实现对应算法或类，使结果完整可复现）：
+{此处填入 refined_suggestions 或 user_prompt}
+
+Allowed libraries: numpy, sklearn.model_selection, sklearn.preprocessing, sklearn.ensemble, xgboost, lightgbm。
+
+返回：完整 Python 代码（纯代码块）。
+
+上次生成的代码运行失败。
+【错误信息】：
+{{error}}
+
+【原始代码】：
+{{code}}
+
+请在不输出任何解释性文字的情况下，推理并理解导致错误的根本原因，对错误进行修正。
+
+要求：
+1. 不输出任何分析、解释或说明（包括文字、列表或注释段落）；
+2. 若错误源于逻辑、数据结构或函数使用不当，请自行调整；
+3. 若依赖库方法不适用，可自行实现替代函数；
+4. 生成的代码必须可独立运行，无语法错误；
+5. 保持整体逻辑与原代码意图一致，仅做必要修正。
+
+以下是用户的分析偏好设置：{{preference_select}}
+
+用户提供了以下建模目的与特殊需求：{{additional_preference}}
