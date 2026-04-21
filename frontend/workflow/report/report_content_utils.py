@@ -63,6 +63,9 @@ INLINE_MARKDOWN_HEADING_AFTER_TEXT_PATTERN = re.compile(
 )
 
 
+TABLE_TITLE_PATTERN = re.compile(r"^(?:表|Table)\s*\d+[\s\u3000:：].+$", flags=re.IGNORECASE)
+
+
 def maybe_json_loads(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -302,6 +305,85 @@ def _split_markdown_heading_lines(text: str) -> list[tuple[str, str]]:
     return parsed_lines if has_heading else []
 
 
+def _parse_markdown_table_row(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped or "|" not in stripped:
+        return []
+
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+
+    cells = [part.strip().replace("\\|", "|") for part in re.split(r"(?<!\\)\|", stripped)]
+    if not any(cells):
+        return []
+    return cells
+
+
+def _is_markdown_table_delimiter_row(cells: list[str], expected_columns: int | None = None) -> bool:
+    if not cells:
+        return False
+    if expected_columns is not None and len(cells) != expected_columns:
+        return False
+    return all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+
+
+def _extract_markdown_table(lines: list[str], start_index: int) -> tuple[list[list[str]], int] | None:
+    if start_index + 1 >= len(lines):
+        return None
+
+    header_cells = _parse_markdown_table_row(lines[start_index])
+    delimiter_cells = _parse_markdown_table_row(lines[start_index + 1])
+    if not header_cells or not _is_markdown_table_delimiter_row(delimiter_cells, expected_columns=len(header_cells)):
+        return None
+
+    rows: list[list[str]] = [header_cells]
+    next_index = start_index + 2
+
+    while next_index < len(lines):
+        stripped = lines[next_index].strip()
+        if not stripped:
+            break
+
+        row_cells = _parse_markdown_table_row(stripped)
+        if not row_cells or _is_markdown_table_delimiter_row(row_cells):
+            break
+        rows.append(row_cells)
+        next_index += 1
+
+    column_count = max(len(row) for row in rows)
+    normalized_rows = [row + [""] * (column_count - len(row)) for row in rows]
+    return normalized_rows, next_index
+
+
+def _markdown_table_rows_to_html(rows: list[list[str]]) -> str:
+    if not rows:
+        return ""
+
+    header_cells = "".join(f"<th>{html.escape(cell)}</th>" for cell in rows[0])
+    body_rows = rows[1:]
+    body_html = "".join(
+        "<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>"
+        for row in body_rows
+    )
+    table_html = (
+        '<table class="report-model-comparison-table">'
+        "<thead><tr>"
+        f"{header_cells}"
+        "</tr></thead>"
+    )
+    if body_html:
+        table_html += f"<tbody>{body_html}</tbody>"
+    table_html += "</table>"
+    return table_html
+
+
+def _looks_like_table_title(text: str) -> bool:
+    normalized = str(text or "").strip()
+    return bool(normalized and TABLE_TITLE_PATTERN.match(normalized))
+
+
 def html_to_markdown(html_text: str) -> str:
     if not html_text.strip():
         return ""
@@ -327,6 +409,35 @@ def html_to_markdown(html_text: str) -> str:
         "li",
         "figure",
     }
+
+    def table_to_markdown(table_tag: Tag) -> str:
+        def escape_cell(text: str) -> str:
+            return str(text or "").replace("|", "\\|")
+
+        row_tags = table_tag.find_all("tr")
+        rows: list[list[str]] = []
+        for row_tag in row_tags:
+            cell_tags = row_tag.find_all(["th", "td"], recursive=False)
+            if not cell_tags:
+                cell_tags = row_tag.find_all(["th", "td"])
+            row_values = [cell.get_text(" ", strip=True) for cell in cell_tags]
+            if row_values:
+                rows.append(row_values)
+
+        if not rows:
+            return ""
+
+        column_count = max(len(row) for row in rows)
+        normalized_rows = [row + [""] * (column_count - len(row)) for row in rows]
+        header = normalized_rows[0]
+        separator = ["---"] * column_count
+        body = normalized_rows[1:] if len(normalized_rows) > 1 else []
+        lines = [
+            "| " + " | ".join(escape_cell(cell) for cell in header) + " |",
+            "| " + " | ".join(separator) + " |",
+        ]
+        lines.extend("| " + " | ".join(escape_cell(cell) for cell in row) + " |" for row in body)
+        return "\n".join(lines).strip()
 
     def add_line(text: str) -> None:
         clean = text.strip()
@@ -372,8 +483,12 @@ def html_to_markdown(html_text: str) -> str:
             caption_text = caption_tag.get_text(" ", strip=True) if caption_tag else ""
             if img_src:
                 add_line(f"![{caption_text or '图表'}]({img_src})")
-            if caption_text:
-                add_line(caption_text)
+            return
+
+        if node.name == "table":
+            table_markdown = table_to_markdown(node)
+            if table_markdown:
+                add_line(table_markdown)
             return
 
         if node.name == "p":
@@ -484,8 +599,6 @@ def build_markdown_preview_from_html(html_text: str, max_chars: int = 20000) -> 
             caption_tag = node.find(class_="report-figure-caption")
             caption_text = caption_tag.get_text(" ", strip=True) if caption_tag else ""
             append_block(f"![{caption_text or '图表'}](embedded-image)")
-            if caption_text:
-                append_block(caption_text)
             return
 
         if node.name in {"p", "figcaption"}:
@@ -607,6 +720,17 @@ def _configure_doc_style(doc: Document) -> None:
     caption_style.paragraph_format.space_before = Pt(0)
     caption_style.paragraph_format.space_after = Pt(10)
 
+    table_title_style = _get_or_create_paragraph_style(doc, "ChatGPT Table Title")
+    table_title_style.base_style = normal_style
+    table_title_style.font.name = WORD_EXPORT_FONT_LATIN
+    table_title_style._element.rPr.rFonts.set(qn("w:eastAsia"), WORD_EXPORT_FONT_EAST_ASIA)
+    table_title_style.font.size = Pt(10.5)
+    table_title_style.font.color.rgb = WORD_EXPORT_TEXT_COLOR
+    table_title_style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    table_title_style.paragraph_format.line_spacing = 1.2
+    table_title_style.paragraph_format.space_before = Pt(6)
+    table_title_style.paragraph_format.space_after = Pt(6)
+
 
 def _get_or_create_paragraph_style(doc: Document, style_name: str):
     try:
@@ -679,6 +803,101 @@ def _set_cell_shading(cell, fill: str) -> None:
     tc_pr.append(shd)
 
 
+def _set_table_borders(
+    table,
+    *,
+    top: dict[str, str] | None = None,
+    bottom: dict[str, str] | None = None,
+    left: dict[str, str] | None = None,
+    right: dict[str, str] | None = None,
+    inside_h: dict[str, str] | None = None,
+    inside_v: dict[str, str] | None = None,
+) -> None:
+    tbl_pr = table._tbl.tblPr
+    tbl_borders = tbl_pr.first_child_found_in("w:tblBorders")
+    if tbl_borders is not None:
+        tbl_pr.remove(tbl_borders)
+    tbl_borders = OxmlElement("w:tblBorders")
+
+    border_map = {
+        "top": top,
+        "bottom": bottom,
+        "left": left,
+        "right": right,
+        "insideH": inside_h,
+        "insideV": inside_v,
+    }
+    for edge_name, border_value in border_map.items():
+        edge = OxmlElement(f"w:{edge_name}")
+        border_value = border_value or {"val": "nil"}
+        for attr_name, attr_value in border_value.items():
+            edge.set(qn(f"w:{attr_name}"), attr_value)
+        tbl_borders.append(edge)
+
+    tbl_pr.append(tbl_borders)
+
+
+def _set_cell_borders(
+    cell,
+    *,
+    top: dict[str, str] | None = None,
+    bottom: dict[str, str] | None = None,
+    left: dict[str, str] | None = None,
+    right: dict[str, str] | None = None,
+) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_borders = tc_pr.first_child_found_in("w:tcBorders")
+    if tc_borders is not None:
+        tc_pr.remove(tc_borders)
+    tc_borders = OxmlElement("w:tcBorders")
+
+    border_map = {
+        "top": top,
+        "bottom": bottom,
+        "left": left,
+        "right": right,
+    }
+    for edge_name, border_value in border_map.items():
+        edge = OxmlElement(f"w:{edge_name}")
+        border_value = border_value or {"val": "nil"}
+        for attr_name, attr_value in border_value.items():
+            edge.set(qn(f"w:{attr_name}"), attr_value)
+        tc_borders.append(edge)
+
+    tc_pr.append(tc_borders)
+
+
+def _apply_three_line_table_style(table, header_rows: set[int], total_rows: int) -> None:
+    border = {"val": "single", "sz": "12", "color": "111827", "space": "0"}
+    _set_table_borders(
+        table,
+        top={"val": "nil"},
+        bottom={"val": "nil"},
+        left={"val": "nil"},
+        right={"val": "nil"},
+        inside_h={"val": "nil"},
+        inside_v={"val": "nil"},
+    )
+
+    for row_index, row in enumerate(table.rows):
+        is_header = row_index in header_rows
+        is_last_row = row_index == total_rows - 1
+        for cell in row.cells:
+            _set_cell_borders(
+                cell,
+                top=border if is_header else {"val": "nil"},
+                bottom=border if is_header or is_last_row else {"val": "nil"},
+                left={"val": "nil"},
+                right={"val": "nil"},
+            )
+
+
+def _add_table_title(doc: Document, text: str):
+    paragraph = _add_text_paragraph(doc, text, style_name="ChatGPT Table Title")
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    return paragraph
+
+
 def _add_text_paragraph(doc: Document, text: str, style_name: str = "Normal"):
     paragraph = doc.add_paragraph(style=style_name)
     paragraph.add_run(text)
@@ -744,6 +963,38 @@ def _add_code_block(doc: Document, text: str) -> None:
     _set_paragraph_shading(paragraph, WORD_EXPORT_CODE_BACKGROUND)
 
 
+def _add_table_from_rows(doc: Document, rows: list[list[str]], header_rows: set[int] | None = None) -> bool:
+    if not rows:
+        return False
+
+    header_rows = header_rows or {0}
+    column_count = max(len(row) for row in rows)
+    if column_count == 0:
+        return False
+
+    normalized_rows = [row + [""] * (column_count - len(row)) for row in rows]
+    table = doc.add_table(rows=len(normalized_rows), cols=column_count)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = True
+
+    for row_index, row_values in enumerate(normalized_rows):
+        for column_index in range(column_count):
+            text = row_values[column_index]
+            cell = table.cell(row_index, column_index)
+            cell.text = text
+            for paragraph in cell.paragraphs:
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                paragraph.paragraph_format.space_after = Pt(0)
+                _style_paragraph_runs(paragraph)
+                if row_index in header_rows:
+                    for run in paragraph.runs:
+                        run.font.bold = True
+
+    _apply_three_line_table_style(table, header_rows=header_rows, total_rows=len(normalized_rows))
+    doc.add_paragraph("")
+    return True
+
+
 def _add_table_from_html(doc: Document, table_tag: Tag) -> bool:
     row_tags = table_tag.find_all("tr")
     if not row_tags:
@@ -751,44 +1002,18 @@ def _add_table_from_html(doc: Document, table_tag: Tag) -> bool:
 
     rows: list[list[str]] = []
     header_rows: set[int] = set()
-    column_count = 0
 
-    for row_index, row_tag in enumerate(row_tags):
+    for row_tag in row_tags:
         cell_tags = row_tag.find_all(["th", "td"], recursive=False)
         if not cell_tags:
             cell_tags = row_tag.find_all(["th", "td"])
         if not cell_tags:
             continue
-        row_values = [cell.get_text(" ", strip=True) for cell in cell_tags]
-        rows.append(row_values)
-        column_count = max(column_count, len(row_values))
+        rows.append([cell.get_text(" ", strip=True) for cell in cell_tags])
         if any(cell.name == "th" for cell in cell_tags):
             header_rows.add(len(rows) - 1)
 
-    if not rows or column_count == 0:
-        return False
-
-    table = doc.add_table(rows=len(rows), cols=column_count)
-    table.style = "Table Grid"
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table.autofit = True
-
-    for row_index, row_values in enumerate(rows):
-        for column_index in range(column_count):
-            text = row_values[column_index] if column_index < len(row_values) else ""
-            cell = table.cell(row_index, column_index)
-            cell.text = text
-            for paragraph in cell.paragraphs:
-                paragraph.paragraph_format.space_after = Pt(0)
-                _style_paragraph_runs(paragraph)
-                if row_index in header_rows:
-                    for run in paragraph.runs:
-                        run.font.bold = True
-                if row_index in header_rows:
-                    _set_cell_shading(cell, "EEF2F7")
-
-    doc.add_paragraph("")
-    return True
+    return _add_table_from_rows(doc, rows, header_rows=header_rows or {0})
 
 
 def _add_docx_image(doc: Document, image_buffer: io.BytesIO, caption_text: str | None = None) -> None:
@@ -913,10 +1138,26 @@ def build_docx_from_html(html_text: str) -> bytes:
                 _add_caption(doc, caption_text)
             return
 
+        if node.name == "div" and "report-modeling-table-block" in (node.get("class") or []):
+            title_tag = node.find(class_="report-modeling-table-title")
+            table_tag = node.find("table")
+            title_text = title_tag.get_text(" ", strip=True) if title_tag else ""
+            if title_text:
+                _add_table_title(doc, title_text)
+            if table_tag is not None:
+                _add_table_from_html(doc, table_tag)
+            return
+
         if node.name == "figcaption":
             text = node.get_text(" ", strip=True)
             if text:
                 _add_caption(doc, text)
+            return
+
+        if node.name == "p" and "report-modeling-table-title" in (node.get("class") or []):
+            text = node.get_text(" ", strip=True)
+            if text:
+                _add_table_title(doc, text)
             return
 
         if node.name == "blockquote":
@@ -1077,6 +1318,96 @@ def markdown_to_html(markdown_text: str, title: str = "") -> str:
 </html>"""
 
 
+def markdown_to_html(markdown_text: str, title: str = "") -> str:
+    """
+    轻量 Markdown -> HTML：
+    - 不生成目录
+    - 不生成 aside
+    - 只保留正文结构，交给 report_render 补充导出样式
+    """
+    body_parts: list[str] = []
+    in_ul = False
+    lines = markdown_text.splitlines()
+
+    def close_list() -> None:
+        nonlocal in_ul
+        if in_ul:
+            body_parts.append("</ul>")
+            in_ul = False
+
+    index = 0
+    while index < len(lines):
+        line = lines[index].rstrip()
+        stripped = line.strip()
+
+        if not stripped:
+            close_list()
+            index += 1
+            continue
+
+        if _looks_like_table_title(stripped):
+            parsed_table = _extract_markdown_table(lines, index + 1)
+            if parsed_table is not None:
+                close_list()
+                table_rows, next_index = parsed_table
+                body_parts.append(
+                    "<div class='report-modeling-table-block'>"
+                    f"<p class='report-modeling-table-title'>{html.escape(stripped)}</p>"
+                    f"{_markdown_table_rows_to_html(table_rows)}"
+                    "</div>"
+                )
+                index = next_index
+                continue
+
+        parsed_table = _extract_markdown_table(lines, index)
+        if parsed_table is not None:
+            close_list()
+            table_rows, next_index = parsed_table
+            body_parts.append(_markdown_table_rows_to_html(table_rows))
+            index = next_index
+            continue
+
+        heading_match = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if heading_match:
+            close_list()
+            level = len(heading_match.group(1))
+            text = html.escape(heading_match.group(2).strip())
+            body_parts.append(f"<h{level}>{text}</h{level}>")
+            index += 1
+            continue
+
+        bullet_match = re.match(r"^[-*]\s+(.*)$", stripped)
+        if bullet_match:
+            if not in_ul:
+                body_parts.append("<ul>")
+                in_ul = True
+            body_parts.append(f"<li>{html.escape(bullet_match.group(1).strip())}</li>")
+            index += 1
+            continue
+
+        close_list()
+        body_parts.append(f"<p>{html.escape(stripped)}</p>")
+        index += 1
+
+    close_list()
+    body_html = "\n".join(body_parts)
+
+    page_title = html.escape(title or "")
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{page_title}</title>
+</head>
+<body>
+  <main class="report-body">
+    {body_html}
+  </main>
+</body>
+</html>"""
+
+
 def build_docx_from_markdown(markdown_text: str) -> bytes:
     markdown_text = normalize_trailing_punctuation_before_figure_placeholder(markdown_text)
 
@@ -1139,6 +1470,105 @@ def build_docx_from_markdown(markdown_text: str) -> bytes:
             continue
 
         _add_body_paragraph(doc, stripped_line)
+
+    if in_code_block and code_lines:
+        _add_code_block(doc, "\n".join(code_lines))
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def build_docx_from_markdown(markdown_text: str) -> bytes:
+    markdown_text = normalize_trailing_punctuation_before_figure_placeholder(markdown_text)
+
+    doc = Document()
+    _configure_doc_style(doc)
+    state = {"has_title": False}
+    code_lines: list[str] = []
+    in_code_block = False
+    lines = markdown_text.splitlines()
+    index = 0
+
+    while index < len(lines):
+        line = lines[index].rstrip()
+        stripped_line = line.strip()
+
+        if stripped_line.startswith("```"):
+            if in_code_block:
+                _add_code_block(doc, "\n".join(code_lines))
+                code_lines = []
+                in_code_block = False
+            else:
+                in_code_block = True
+            index += 1
+            continue
+
+        if in_code_block:
+            code_lines.append(line)
+            index += 1
+            continue
+
+        if not stripped_line:
+            index += 1
+            continue
+
+        if _looks_like_table_title(stripped_line):
+            parsed_table = _extract_markdown_table(lines, index + 1)
+            if parsed_table is not None:
+                table_rows, next_index = parsed_table
+                _add_table_title(doc, stripped_line)
+                _add_table_from_rows(doc, table_rows, header_rows={0})
+                index = next_index
+                continue
+
+        parsed_table = _extract_markdown_table(lines, index)
+        if parsed_table is not None:
+            table_rows, next_index = parsed_table
+            _add_table_from_rows(doc, table_rows, header_rows={0})
+            index = next_index
+            continue
+
+        parsed_segments = _split_markdown_heading_lines(stripped_line)
+        if parsed_segments:
+            for line_kind, line_text in parsed_segments:
+                if line_kind == "heading":
+                    _add_heading_paragraph(doc, line_text, level=1, state=state)
+                else:
+                    _add_body_paragraph(doc, line_text)
+            index += 1
+            continue
+
+        ordered_match = re.match(r"^\d+\.\s+(.*)$", stripped_line)
+        if ordered_match:
+            _add_list_item(doc, ordered_match.group(1).strip(), ordered=True)
+            index += 1
+            continue
+
+        bullet_match = re.match(r"^[-*]\s+(.*)$", stripped_line)
+        if bullet_match:
+            _add_list_item(doc, bullet_match.group(1).strip(), ordered=False)
+            index += 1
+            continue
+
+        quote_match = re.match(r"^>\s?(.*)$", stripped_line)
+        if quote_match:
+            _add_quote_block(doc, quote_match.group(1).strip())
+            index += 1
+            continue
+
+        image_match = re.match(r"^!\[([^\]]*)\]\((.+)\)$", stripped_line)
+        if image_match:
+            image_buffer = _decode_data_image_uri(image_match.group(2).strip())
+            if image_buffer is not None:
+                caption_text = image_match.group(1).strip() or None
+                _add_docx_image(doc, image_buffer, caption_text=caption_text)
+            index += 1
+            continue
+
+        _add_body_paragraph(doc, stripped_line)
+        index += 1
 
     if in_code_block and code_lines:
         _add_code_block(doc, "\n".join(code_lines))
@@ -1241,17 +1671,26 @@ def normalize_for_dedup(text: str) -> str:
     return normalized
 
 
+def sanitize_section_heading_text(text: str) -> str:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return ""
+
+    normalized = re.sub(r"[（(][^()（）]*[）)]", "", normalized)
+    normalized = re.sub(r"[【\[][^][】\[]*[】\]]", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
 def wrap_section_as_markdown(section: Any, content: str) -> str:
     content = normalize_part(content)
-    if not content:
-        return ""
 
     title = ""
     level = 2
 
     if isinstance(section, dict):
         num = str(section.get("num", "")).strip()
-        raw_title = str(section.get("title", "")).strip()
+        raw_title = sanitize_section_heading_text(section.get("title", ""))
         level_raw = section.get("level", 1)
 
         try:
@@ -1261,7 +1700,7 @@ def wrap_section_as_markdown(section: Any, content: str) -> str:
 
         title = f"{num} {raw_title}".strip()
     else:
-        title = str(section).strip()
+        title = sanitize_section_heading_text(section)
         if re.match(r"^\d+\.\d+\.\d+\s+", title):
             level = 3
         elif re.match(r"^\d+\.\d+\s+", title):
@@ -1276,6 +1715,8 @@ def wrap_section_as_markdown(section: Any, content: str) -> str:
         4: "#####",
     }.get(level, "###")
 
+    if not content:
+        return f"{heading_prefix} {title}\n"
     return f"{heading_prefix} {title}\n\n{content}\n"
 
 

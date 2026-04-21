@@ -1,9 +1,14 @@
-请根据以下输入信息生成最终的 Markdown 建模报告：
+请根据以下输入信息生成最终的 Markdown 建模结果说明。
 
 === 输入 JSON 数据 ===
 {{result_json}}
 
-=== 建模背景上下文（参考信息） ===
-- 建模使用的源代码：{{modeling_code}}
-- 用户分析偏好：{{preference_select}}
-- 额外特殊需求：{{additional_preference}}
+=== 建模背景上下文 ===
+- 建模代码：{{modeling_code}}
+- 用户偏好：{{preference_select}}
+- 额外需求：{{additional_preference}}
+
+=== 需要保留的模型对比表 ===
+下列表格由系统在正文后自动追加，你只需撰写正文，不要在正文里重复输出表格或“内容汇总表格”字样。
+
+{{comparison_table_markdown}}

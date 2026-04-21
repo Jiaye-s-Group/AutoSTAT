@@ -18,7 +18,10 @@ async def main(args: Args) -> Output:
                 "title": "",
                 "desc": "",
                 "result": "",
-                "code": ""
+                "code": "",
+                "table_title": "",
+                "table_markdown": "",
+                "table_html": ""
             }
         }
 
@@ -29,6 +32,9 @@ async def main(args: Args) -> Output:
     desc_out = to_str(s.get("desc", ""))
     result_out = to_str(s.get("result", ""))
     code_out = to_str(s.get("code", ""))
+    table_title_out = to_str(s.get("table_title", ""))
+    table_markdown_out = to_str(s.get("table_markdown", ""))
+    table_html_out = to_str(s.get("table_html", ""))
 
     abstract_out = abstract_in if isinstance(abstract_in, str) else ""
 
@@ -38,6 +44,9 @@ async def main(args: Args) -> Output:
             "title": title_out,
             "desc": desc_out,
             "result": result_out,
-            "code": code_out
+            "code": code_out,
+            "table_title": table_title_out,
+            "table_markdown": table_markdown_out,
+            "table_html": table_html_out,
         }
     }

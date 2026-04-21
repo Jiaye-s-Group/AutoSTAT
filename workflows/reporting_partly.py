@@ -20,6 +20,7 @@ from core.prompt_template import render_file
 from workflow.report.report_content_utils import (
     normalize_part,
     normalize_for_dedup,
+    sanitize_section_heading_text,
     wrap_section_as_markdown,
     build_history_context,
     truncate_text,
@@ -31,7 +32,7 @@ def _clean_report_title(raw_title: Any) -> str:
         return ""
 
     if isinstance(raw_title, dict):
-        for key in ("title", "text", "name", "label", "content"):
+        for key in ("title", "标题", "题目", "text", "name", "label", "content"):
             cleaned = _clean_report_title(raw_title.get(key))
             if cleaned:
                 return cleaned
@@ -66,7 +67,7 @@ def _clean_report_title(raw_title: Any) -> str:
         if cleaned:
             return cleaned
 
-    json_title_match = re.search(r'"title"\s*:\s*"([^"]+)"', text, flags=re.IGNORECASE)
+    json_title_match = re.search(r'"(?:title|标题|题目)"\s*:\s*"([^"]+)"', text, flags=re.IGNORECASE)
     if json_title_match:
         return json_title_match.group(1).strip()
 
@@ -185,27 +186,17 @@ def run_reporting_partly_workflow(
 
         print(f"[REPORT][SECTION {idx+1}] HAS_FIG_IN_FINAL =", "[FIG:" in final_part)
 
-        if not final_part:
-            continue
-
-        # 关键修复：去掉“模型已经生成的重复标题”
+        # 关键修复：去掉模型自己写在正文开头的章节标题，最终统一以目录标题为准
         final_part = _strip_redundant_heading(final_part, section)
         final_part = normalize_part(final_part)
 
-        if not final_part:
-            continue
-
-        dedup_key = normalize_for_dedup(final_part)
+        dedup_key = normalize_for_dedup(final_part or _extract_section_title(section))
         if dedup_key in seen_parts:
             continue
 
         seen_parts.add(dedup_key)
 
-        # 如果模型已经输出 markdown 标题，就不要再包一层，避免标题重复
-        if _starts_with_markdown_heading(final_part):
-            wrapped_part = final_part
-        else:
-            wrapped_part = wrap_section_as_markdown(section, final_part)
+        wrapped_part = wrap_section_as_markdown(section, final_part)
 
         wrapped_part = normalize_part(wrapped_part)
         if wrapped_part:
@@ -300,9 +291,9 @@ def _starts_with_markdown_heading(text: str) -> bool:
 def _extract_section_title(section: Any) -> str:
     if isinstance(section, dict):
         num = str(section.get("num", "")).strip()
-        raw_title = str(section.get("title", "")).strip()
+        raw_title = sanitize_section_heading_text(section.get("title", ""))
         return f"{num} {raw_title}".strip()
-    return str(section).strip()
+    return sanitize_section_heading_text(section)
 
 
 def _strip_redundant_heading(text: str, section: Any) -> str:
@@ -323,6 +314,14 @@ def _strip_redundant_heading(text: str, section: Any) -> str:
 
     expected_title = _extract_section_title(section)
     expected_title_norm = _normalize_heading_text(expected_title)
+
+    first_non_empty_idx = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if first_non_empty_idx is not None:
+        first_line_norm = _normalize_heading_text(lines[first_non_empty_idx])
+        if _starts_with_markdown_heading(lines[first_non_empty_idx]) or (
+            expected_title_norm and first_line_norm == expected_title_norm
+        ):
+            del lines[first_non_empty_idx]
 
     # 取前两条非空行看看是否重复
     non_empty_indices = [i for i, line in enumerate(lines) if line.strip()]
@@ -359,5 +358,6 @@ def _strip_redundant_heading(text: str, section: Any) -> str:
 def _normalize_heading_text(text: str) -> str:
     t = (text or "").strip()
     t = re.sub(r"^\s*#{1,6}\s*", "", t)
+    t = sanitize_section_heading_text(t)
     t = re.sub(r"\s+", " ", t)
     return t.strip()

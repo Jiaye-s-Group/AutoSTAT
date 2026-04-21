@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 import re
 from typing import Any
@@ -18,6 +19,9 @@ from typing import Any
 try:
     import jieba  # type: ignore
 
+    if hasattr(jieba, "setLogLevel"):
+        jieba.setLogLevel(logging.ERROR)
+    logging.getLogger("jieba").setLevel(logging.ERROR)
     _HAS_JIEBA = True
 except ImportError:
     _HAS_JIEBA = False

@@ -182,7 +182,7 @@ def _clean_report_title_text(raw_title: Any) -> str:
         return ""
 
     if isinstance(raw_title, dict):
-        for key in ("title", "text", "name", "label", "content"):
+        for key in ("title", "标题", "题目", "text", "name", "label", "content"):
             cleaned = _clean_report_title_text(raw_title.get(key))
             if cleaned:
                 return cleaned
@@ -213,7 +213,7 @@ def _clean_report_title_text(raw_title: Any) -> str:
         if cleaned:
             return cleaned
 
-    json_title_match = re.search(r'"title"\s*:\s*"([^"]+)"', text, flags=re.IGNORECASE)
+    json_title_match = re.search(r'"(?:title|标题|题目)"\s*:\s*"([^"]+)"', text, flags=re.IGNORECASE)
     if json_title_match:
         return json_title_match.group(1).strip()
 
@@ -226,7 +226,7 @@ def _clean_report_title_text(raw_title: Any) -> str:
 
 
 def _extract_report_title(workflow_result: Any) -> str:
-    title_value = find_first_nested_field(workflow_result, ["title"])
+    title_value = find_first_nested_field(workflow_result, ["title", "标题", "题目"])
     title_text = _clean_report_title_text(title_value)
     if title_text:
         return title_text
@@ -672,6 +672,140 @@ def _inject_visualizations_into_html(final_html: str) -> str:
 
 
 
+def _looks_like_modeling_heading(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(text or "")).lower()
+    if not normalized:
+        return False
+    keywords = (
+        "建模",
+        "模型构建",
+        "模型建立",
+        "模型分析",
+        "模型评估",
+        "模型训练",
+        "建模分析",
+        "modelinganalysis",
+        "modelanalysis",
+        "modelbuilding",
+        "modelevaluation",
+        "modeltraining",
+    )
+    return any(keyword in normalized for keyword in keywords)
+
+
+def _looks_like_chapter4_heading(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(text or "")).lower()
+    if not normalized:
+        return False
+    chapter4_prefixes = (
+        "4",
+        "4.",
+        "4、",
+        "4．",
+        "4章",
+        "第4章",
+        "第四章",
+    )
+    return any(normalized.startswith(prefix) for prefix in chapter4_prefixes)
+
+
+def _load_modeling_table_payload() -> dict[str, str]:
+    summary_4 = maybe_json_loads(
+        st.session_state.get("summary_4") or st.session_state.get("modeling_summary_4", {})
+    )
+    if not isinstance(summary_4, dict):
+        return {"title": "", "caption": "", "table_html": "", "table_markdown": ""}
+
+    title = stringify_string(summary_4.get("table_title"))
+    table_html = stringify_string(summary_4.get("table_html"))
+    table_markdown = stringify_string(summary_4.get("table_markdown"))
+    caption = f"表1 {title}" if title else ""
+    return {
+        "title": title,
+        "caption": caption,
+        "table_html": table_html,
+        "table_markdown": table_markdown,
+    }
+
+
+def _inject_modeling_table_into_html(final_html: str) -> str:
+    if not final_html:
+        return final_html
+
+    payload = _load_modeling_table_payload()
+    caption_text = payload.get("caption", "")
+    table_html = payload.get("table_html", "")
+    table_markdown = payload.get("table_markdown", "")
+    if not caption_text or (not table_html and not table_markdown):
+        return final_html
+
+    soup = BeautifulSoup(final_html, "html.parser")
+    if soup.find("div", class_="report-modeling-table-block") is not None:
+        return final_html
+
+    modeling_heading = None
+    heading_tags = soup.find_all(re.compile(r"^h[1-6]$"))
+    for heading in heading_tags:
+        if _looks_like_chapter4_heading(heading.get_text(" ", strip=True)):
+            modeling_heading = heading
+            break
+
+    if modeling_heading is None:
+        candidate_tags = soup.find_all(["p", "div", "section", "article"])
+        for tag in candidate_tags:
+            if tag.find(["img", "table", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6", "p"]):
+                continue
+            if _looks_like_chapter4_heading(tag.get_text(" ", strip=True)):
+                modeling_heading = tag
+                break
+
+    if modeling_heading is None:
+        return final_html
+
+    insert_after: Tag | None = modeling_heading
+    if modeling_heading is not None:
+        for sibling in modeling_heading.next_siblings:
+            if not isinstance(sibling, Tag):
+                continue
+            if re.match(r"^h[1-6]$", sibling.name or ""):
+                break
+            if sibling.get_text(" ", strip=True):
+                insert_after = sibling
+                break
+
+    block = soup.new_tag("div")
+    block["class"] = ["report-modeling-table-block"]
+
+    title_tag = soup.new_tag("p")
+    title_tag["class"] = ["report-modeling-table-title"]
+    title_tag.string = caption_text
+    block.append(title_tag)
+
+    if not table_html and table_markdown:
+        table_fragment = BeautifulSoup(markdown_to_html(table_markdown, title=""), "html.parser")
+    else:
+        table_fragment = BeautifulSoup(table_html, "html.parser")
+    table_tag = table_fragment.find("table")
+    if table_tag is None:
+        return final_html
+    block.append(table_tag)
+
+    insert_after.insert_after(block)
+    return str(soup)
+
+
+def _finalize_report_html(final_html: str, report_title: str) -> str:
+    if not final_html:
+        return final_html
+
+    final_html = _normalize_markdown_headings_in_html(final_html)
+    final_html = _inject_report_title_into_html(final_html, report_title)
+    final_html = _inject_visualizations_into_html(final_html)
+    final_html = _inject_modeling_table_into_html(final_html)
+    final_html = _inject_report_base_style(final_html)
+    return final_html
+
+
 def _inject_report_base_style(final_html: str) -> str:
     if not final_html or "data-report-font-patch" in final_html:
         return final_html
@@ -751,6 +885,44 @@ main ul, main ol {
   text-align: center !important;
   font-size: 0.96rem !important;
   color: #4b5563 !important;
+}
+.report-modeling-table-block {
+  margin: 20px 0 24px 0 !important;
+  text-align: center !important;
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+.report-modeling-table-title {
+  margin: 0 0 10px 0 !important;
+  text-align: center !important;
+  font-weight: 700 !important;
+  color: #111827 !important;
+}
+.report-model-comparison-table {
+  width: auto !important;
+  max-width: 100% !important;
+  border-collapse: collapse !important;
+  margin: 0 auto !important;
+  table-layout: auto !important;
+}
+.report-model-comparison-table th,
+.report-model-comparison-table td {
+  padding: 8px 10px !important;
+  text-align: center !important;
+  vertical-align: middle !important;
+  border-left: none !important;
+  border-right: none !important;
+  border-top: none !important;
+  border-bottom: none !important;
+}
+.report-model-comparison-table th {
+  font-weight: 700 !important;
+  background: transparent !important;
+  border-top: 2px solid #111827 !important;
+  border-bottom: 1px solid #111827 !important;
+}
+.report-model-comparison-table tbody tr:last-child td {
+  border-bottom: 2px solid #111827 !important;
 }
 @media print {
   body {
@@ -906,9 +1078,7 @@ def _prepare_downloadable_reports(report_agent) -> dict[str, Any]:
                 html_content = markdown_to_html(markdown_content, title="")
 
             # 不再注入额外 report title
-            html_content = _inject_report_title_into_html(html_content, report_title)
-            html_content = _inject_visualizations_into_html(html_content)
-            html_content = _inject_report_base_style(html_content)
+            html_content = _finalize_report_html(html_content, report_title)
             markdown_content = html_to_markdown(html_content) if html_content else markdown_content
 
             report_agent.save_html(html_content)
@@ -1246,6 +1416,12 @@ def _build_report_inputs(load_agent, report_agent) -> dict[str, Any]:
 
 
 def _build_word_report_inputs(report_agent) -> dict[str, Any]:
+    current_coding_abstract = stringify_string(
+        st.session_state.get("abstract_4") or st.session_state.get("modeling_abstract_4")
+    )
+    if not current_coding_abstract:
+        current_coding_abstract = stringify_string(st.session_state.get("report_coding_abstract"))
+
     return {
         "toc_text": _normalize_multiline_text(report_agent.load_outline()),
         "title": "",
@@ -1255,7 +1431,7 @@ def _build_word_report_inputs(report_agent) -> dict[str, Any]:
         "load_abstract": stringify_string(st.session_state.get("report_load_abstract")),
         "preproc_abstract": stringify_string(st.session_state.get("report_preproc_abstract")),
         "visual_abstract": stringify_string(st.session_state.get("report_visual_abstract")),
-        "coding_abstract": stringify_string(st.session_state.get("report_coding_abstract")),
+        "coding_abstract": current_coding_abstract,
     }
 
 
@@ -1335,9 +1511,7 @@ def _generate_formatted_report(report_agent, action: str) -> None:
         markdown_content = _deduplicate_report_html_blocks(markdown_content)
         html_content = markdown_to_html(markdown_content, title="")
 
-    html_content = _inject_report_title_into_html(html_content, report_title)
-    html_content = _inject_visualizations_into_html(html_content)
-    html_content = _inject_report_base_style(html_content)
+    html_content = _finalize_report_html(html_content, report_title)
     markdown_content = html_to_markdown(html_content) if html_content else markdown_content
 
     _clear_generated_report_files(report_agent)
@@ -1350,7 +1524,7 @@ def _generate_formatted_report(report_agent, action: str) -> None:
 
     _prepare_downloadable_reports(report_agent)
     st.session_state.report_final_html = html_content
-    st.success(f"{action} 报告已生成，已在右侧展示。")
+    st.success(f"{action} 报告已生成，已在下侧展示。")
     
 
 def _normalize_report_block_for_dedup(text: str) -> str:
@@ -1447,7 +1621,7 @@ def report_basic_info(load_agent, report_agent, auto: bool) -> None:
         report_agent.save_outline(toc_text)
         if auto:
             st.rerun()
-        st.success("目录已生成，已在右侧显示目录文本。")
+        st.success("目录已生成，已在下侧显示目录文本。")
 
 
 def report_outline(report_agent) -> None:

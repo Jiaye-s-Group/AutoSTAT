@@ -337,9 +337,13 @@ def call_coze_workflow_modeling(inputs: dict[str, Any]) -> dict[str, Any] | None
 
 
 def _clear_modeling_workflow_state(agent) -> None:
+    agent.clear_memory()
     agent.save_suggestion(None)
     agent.save_code(None)
     agent.save_modeling_result(None)
+    _agent_save_value(agent, "save_user_input", "user_input", None)
+    _agent_save_value(agent, "save_user_selection", "user_selection", None)
+    _agent_save_value(agent, "save_target", "target", "")
     _agent_save_value(agent, "save_history_train_code", "history_train_code", "")
     st.session_state.history_train_code_reset_pending = True
     st.session_state.pop("modeling_workflow_result", None)
@@ -350,6 +354,7 @@ def _clear_modeling_workflow_state(agent) -> None:
     st.session_state.pop("summary_4", None)
     st.session_state.pop("abstract_4", None)
     st.session_state.pop("modeling_result_from_summary_4", None)
+    st.session_state.pop("modeling_user_prompt", None)
 
 
 def _reset_modeling_outputs(agent) -> None:

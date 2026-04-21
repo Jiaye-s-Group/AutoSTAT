@@ -1,15 +1,20 @@
 import base64
+from contextlib import contextmanager
 import gzip
 import importlib
-import json
 import pickle
 import traceback
+from typing import Any
 
 import lightgbm
 import numpy as np
 import pandas as pd
 import streamlit as st
 import xgboost
+from core.modeling_table_utils import (
+    build_model_comparison_table_bundle,
+    build_modeling_execution_summary_markdown,
+)
 from sklearn.ensemble import (
     GradientBoostingRegressor,
     RandomForestClassifier,
@@ -20,6 +25,46 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 from utils.sanitize_code import sanitize_code, to_json_serializable
+
+
+def _update_modeling_summary_state(agent, code: str, formatted: str, table_bundle: dict[str, Any]) -> None:
+    current_summary = st.session_state.get("summary_4") or st.session_state.get("modeling_summary_4")
+    if isinstance(current_summary, dict):
+        updated_summary = dict(current_summary)
+    else:
+        updated_summary = {
+            "title": "建模分析",
+            "desc": "",
+        }
+
+    updated_summary["code"] = code or updated_summary.get("code", "")
+    updated_summary["result"] = formatted
+    updated_summary["table_title"] = table_bundle.get("title", "")
+    updated_summary["table_markdown"] = table_bundle.get("markdown_table", "")
+    updated_summary["table_html"] = table_bundle.get("html_table", "")
+
+    st.session_state.summary_4 = updated_summary
+    st.session_state.modeling_summary_4 = updated_summary
+    st.session_state.modeling_result_from_summary_4 = formatted
+    st.session_state.abstract_4 = formatted
+    st.session_state.modeling_abstract_4 = formatted
+    agent.save_modeling_result(formatted)
+
+
+def _build_modeling_result_summary(
+    current_summary: Any,
+    serializable_result: Any,
+    table_bundle: dict[str, Any],
+) -> str:
+    _ = current_summary
+    return build_modeling_execution_summary_markdown(serializable_result, table_bundle)
+
+
+def _load_workflow_modeling_code(agent, workflow_code: str) -> None:
+    agent.save_code(workflow_code)
+    message = "建模代码已从工作流结果回填，请在下方重新执行。"
+    st.chat_message("assistant").write(message)
+    agent.add_memory({"role": "assistant", "content": message})
 
 
 def _code_requires_torch(code: str) -> bool:
@@ -55,6 +100,61 @@ def _load_optional_torch_modules(code: str):
         torchvision_module = None
 
     return torch_module, torchvision_module, False
+
+
+def _ensure_lightgbm_quiet_params(params: Any) -> Any:
+    if not isinstance(params, dict):
+        return params
+
+    quiet_params = dict(params)
+    if "verbosity" not in quiet_params and "verbose" not in quiet_params:
+        quiet_params["verbosity"] = -1
+    return quiet_params
+
+
+@contextmanager
+def _temporary_quiet_lightgbm():
+    patched_attrs: list[tuple[Any, str, Any]] = []
+
+    try:
+        for estimator_name in ("LGBMRegressor", "LGBMClassifier", "LGBMRanker"):
+            estimator_cls = getattr(lightgbm, estimator_name, None)
+            if estimator_cls is None or not hasattr(estimator_cls, "__init__"):
+                continue
+
+            original_init = estimator_cls.__init__
+
+            def quiet_init(self, *args, __orig_init=original_init, **kwargs):
+                if "verbosity" not in kwargs and "verbose" not in kwargs:
+                    kwargs["verbosity"] = -1
+                return __orig_init(self, *args, **kwargs)
+
+            quiet_init.__name__ = original_init.__name__
+            quiet_init.__qualname__ = original_init.__qualname__
+            quiet_init.__wrapped__ = original_init
+
+            setattr(estimator_cls, "__init__", quiet_init)
+            patched_attrs.append((estimator_cls, "__init__", original_init))
+
+        for fn_name in ("train", "cv"):
+            original_fn = getattr(lightgbm, fn_name, None)
+            if not callable(original_fn):
+                continue
+
+            def quiet_fn(params, *args, __orig_fn=original_fn, **kwargs):
+                return __orig_fn(_ensure_lightgbm_quiet_params(params), *args, **kwargs)
+
+            quiet_fn.__name__ = original_fn.__name__
+            quiet_fn.__qualname__ = original_fn.__qualname__
+            quiet_fn.__wrapped__ = original_fn
+
+            setattr(lightgbm, fn_name, quiet_fn)
+            patched_attrs.append((lightgbm, fn_name, original_fn))
+
+        yield
+    finally:
+        for target, attr_name, original_value in reversed(patched_attrs):
+            setattr(target, attr_name, original_value)
 
 
 def train_download_model(agent) -> None:
@@ -124,7 +224,8 @@ def train_execution(agent):
 
     try:
         with st.spinner("正在运行程序..."):
-            exec(code, exec_ns)
+            with _temporary_quiet_lightgbm():
+                exec(code, exec_ns)
     except Exception:
         st.error("出现报错，请重新生成调试后的建模代码。")
         st.text(traceback.format_exc())
@@ -143,14 +244,17 @@ def train_execution(agent):
         result_dict.pop("artifacts", None)
 
     serializable = to_json_serializable(result_dict)
-    try:
-        result_json = json.dumps(serializable, ensure_ascii=False)
-    except Exception:
-        result_json = json.dumps(serializable, default=str, ensure_ascii=False)
 
     with st.spinner("正在格式化训练结果..."):
-        formatted = agent.result_format_prompt(result_json)
-        agent.save_modeling_result(formatted)
+        current_summary = st.session_state.get("summary_4") or st.session_state.get("modeling_summary_4")
+        table_bundle = build_model_comparison_table_bundle(
+            serializable,
+            target=getattr(agent, "load_target", lambda: "")() or "",
+            user_input=getattr(agent, "load_user_input", lambda: "")() or "",
+            additional_preference=st.session_state.get("add_preference") or "",
+        )
+        formatted = _build_modeling_result_summary(current_summary, serializable, table_bundle)
+        _update_modeling_summary_state(agent, code, formatted, table_bundle)
 
     if best_model_b64:
         gz_bytes = base64.b64decode(best_model_b64)
@@ -178,13 +282,13 @@ def modeling_code_gen(agent, debug=False, auto=False) -> None:
     )
 
     if workflow_code:
-        analyze_btn = st.button("🎯 生成模型建议代码", key="modeling_code")
+        if debug:
+            _load_workflow_modeling_code(agent, workflow_code)
+            return
+
+        analyze_btn = st.button("🎯 生成模型建议代码", key="modeling_code_from_workflow")
         if analyze_btn:
-            agent.save_code(workflow_code)
-            st.chat_message("assistant").write("建模代码已完成加载，请在下方执行。")
-            agent.add_memory(
-                {"role": "assistant", "content": "建模代码已完成加载，请在下方执行。"}
-            )
+            _load_workflow_modeling_code(agent, workflow_code)
             st.rerun()
         return
 
@@ -202,7 +306,7 @@ def modeling_code_gen(agent, debug=False, auto=False) -> None:
             agent.add_memory({"role": "assistant", "content": "训练脚本已更新，请重新运行代码！"})
             st.rerun()
 
-        analyze_btn = st.button("🎯 生成模型建议代码", key="modeling_code")
+        analyze_btn = st.button("🎯 生成模型建议代码", key="modeling_code_from_suggest")
         if analyze_btn:
             with st.spinner("向 LLM 请求生成建模脚本..."):
                 raw = agent.code_generation(

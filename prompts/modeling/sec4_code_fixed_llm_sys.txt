@@ -41,3 +41,11 @@
 8) 如果模型序列化后的字节数超过合理大小，请在 result_dict 中添加 `"artifact_warning": <字节数>`。
 9) 不要使用任何外部 IO 或文件操作。
 10) 请准确实现Requirement中要求的模型，不许添加Requirement之外的模型，若先提供的库中无法直接调用对应模型，请手动实现！
+11) 若使用 XGBoost：
+   - 严禁传入 `use_label_encoder` 参数；
+   - 对 `XGBClassifier` / `XGBRegressor` 仅使用当前版本有效的参数；
+   - 若分类任务中的标签 `y` 不是数值型，必须先在代码中完成标签编码，再训练 `XGBClassifier`。
+12) `df` is already provided by the runtime as the full dataset. Never reassign `df` while fixing the code.
+13) Forbidden examples: `df = pd.DataFrame(...)`, `df = pd.read_csv(...)`, `df = df.head(...)`, `df = df.sample(...)`, `df = {...}`, `df = [...]`.
+14) `df_head` is only a preview of the full dataset. It must never be used to reconstruct or overwrite `df`.
+15) If you need transformed data, create a new variable such as `work_df = df.copy()`, `model_df = ...`, or `train_df = ...`, and keep `df` unchanged.

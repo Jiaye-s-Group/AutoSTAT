@@ -84,7 +84,15 @@ def sec3_composer(*, fig_analysis: list) -> dict[str, Any]:
     }
 
 
-def sec4_composer(*, code: str, desc: str, result: str) -> dict[str, Any]:
+def sec4_composer(
+    *,
+    code: str,
+    desc: str,
+    result: str,
+    table_title: str = "",
+    table_markdown: str = "",
+    table_html: str = "",
+) -> dict[str, Any]:
     """
     modeling/148910
     组装 summary_4 = {title, desc, result, code}
@@ -95,6 +103,9 @@ def sec4_composer(*, code: str, desc: str, result: str) -> dict[str, Any]:
             "desc": to_str(desc),
             "result": to_str(result),
             "code": to_str(code),
+            "table_title": to_str(table_title),
+            "table_markdown": to_str(table_markdown),
+            "table_html": to_str(table_html),
         }
     }
 

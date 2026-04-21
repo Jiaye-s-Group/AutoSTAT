@@ -31,6 +31,9 @@ from __future__ import annotations
 from typing import Any
 
 from core.llm_client import chat
+from core.modeling_table_utils import (
+    build_model_comparison_table_bundle,
+)
 from core.prompt_template import render_file
 from core.rag_retriever import retrieve
 from core.workflow_runner import to_str
@@ -60,7 +63,15 @@ def run_modeling_workflow(
     # ---------- Condition: modeling_auto ----------
     if not modeling_auto:
         return {
-            "summary_4": {"title": "", "desc": "", "result": "", "code": ""},
+            "summary_4": {
+                "title": "",
+                "desc": "",
+                "result": "",
+                "code": "",
+                "table_title": "",
+                "table_markdown": "",
+                "table_html": "",
+            },
             "abstract_4": "",
             "model_suggestion": "",
         }
@@ -153,6 +164,9 @@ def run_modeling_workflow(
                 "desc": f"建模代码执行失败：{last_error[:500]}",
                 "result": "",
                 "code": final_code,
+                "table_title": "",
+                "table_markdown": "",
+                "table_html": "",
             },
             "abstract_4": f"建模代码执行失败：{last_error[:200]}",
             "model_suggestion": model_suggestion,
@@ -163,6 +177,15 @@ def run_modeling_workflow(
     ctx["modeling_code"] = final_code
     ctx["result_json"] = final_result_json
     ctx["result"] = final_result_str
+    table_bundle = build_model_comparison_table_bundle(
+        final_result_json,
+        target=ctx.get("target", ""),
+        user_input=ctx.get("user_input", ""),
+        additional_preference=ctx.get("additional_preference", ""),
+    )
+    ctx["comparison_table_title"] = table_bundle.get("title", "")
+    ctx["comparison_table_markdown"] = table_bundle.get("markdown_table", "")
+    ctx["comparison_table_html"] = table_bundle.get("html_table", "")
 
     rfp_sys = render_file("modeling/sec4_result_format_prompt_llm_sys.txt", ctx)
     rfp_user = render_file("modeling/sec4_result_format_prompt_llm_user.txt", ctx)
@@ -180,7 +203,14 @@ def run_modeling_workflow(
     abstract_4 = chat(ab_sys, ab_user, name="model.check_abstract").strip()
 
     # ---------- 节点 9: sec4_composer ----------
-    composed = sec4_composer(code=final_code, desc=desc, result=result_format)
+    composed = sec4_composer(
+        code=final_code,
+        desc=desc,
+        result=result_format,
+        table_title=table_bundle.get("title", ""),
+        table_markdown=table_bundle.get("markdown_table", ""),
+        table_html=table_bundle.get("html_table", ""),
+    )
 
     return {
         "summary_4": composed["summary_4"],
@@ -228,7 +258,13 @@ except Exception as e:
     sys.exit(2)
 
 # 收集 result 变量
-_out = locals().get("result") or locals().get("result_json") or {}
+# 兼容工作流脚本返回 result_dict，以及旧版 result / result_json。
+_result_candidates = (
+    locals().get("result_dict"),
+    locals().get("result_json"),
+    locals().get("result"),
+)
+_out = next((item for item in _result_candidates if item is not None), {})
 if not isinstance(_out, dict):
     try:
         _out = {"value": str(_out)}

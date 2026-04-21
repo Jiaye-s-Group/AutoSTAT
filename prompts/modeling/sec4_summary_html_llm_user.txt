@@ -6,3 +6,7 @@
 
 === 建模运行结果 ===
 {{result}}
+
+=== 模型对比表信息 ===
+- 内容汇总表格：
+{{comparison_table_markdown}}

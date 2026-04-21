@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -21,6 +22,9 @@ from typing import Any
 try:
     import jieba  # 可选：中文分词
 
+    if hasattr(jieba, "setLogLevel"):
+        jieba.setLogLevel(logging.ERROR)
+    logging.getLogger("jieba").setLevel(logging.ERROR)
     _HAS_JIEBA = True
 except ImportError:
     _HAS_JIEBA = False
