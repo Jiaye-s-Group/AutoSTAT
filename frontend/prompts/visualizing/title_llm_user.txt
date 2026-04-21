@@ -1,0 +1,21 @@
+现在请根据以下图表信息生成一个专业论文图标题：
+
+- 用户需求：{{user_input}}
+- 可视化推荐：{{visual_recommendation}}
+- 精炼方案：{{refined_suggestions}}
+- 数据字段：{{cols_wo_id_text}}
+- 图中分组或系列：{{trace_names_text}}
+- 横轴信息：{{x_axis_title}}
+- 纵轴信息：{{y_axis_title}}
+- 图例信息：{{legend_title}}
+- 图中已有标题：{{existing_title}}
+- 图任务标识：{{raw_title}}
+- 图表描述：{{desc}}
+- 图表类型：{{chart_types_text}}
+- 图表 JSON 摘要：{{fig}}
+
+请注意：
+1. 输出必须尽量为中文，不要中英文混杂。
+2. 不要把“柱状图、折线图、散点图、直方图、箱线图”等图类型词当成标题主体。
+3. 如果信息不足，优先概括变量关系、分布特征、比较关系或变化趋势。
+4. 只输出一个最终标题。

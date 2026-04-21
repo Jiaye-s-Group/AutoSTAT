@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      overflow: hidden;
+    }
+
+    #root {
+      width: 100%;
+    }
+
+    .swatch {
+      position: relative;
+      width: 100%;
+      height: 30px;
+      border-radius: 4px;
+      margin-bottom: 2px;
+      overflow: hidden;
+      box-sizing: border-box;
+      background: #ffffff;
+    }
+
+    .swatch.white {
+      border: 1px solid #d8dde6;
+    }
+
+    .swatch:not(.white) {
+      border: none;
+    }
+
+    .swatch input[type="color"] {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      cursor: pointer;
+      border: none;
+      padding: 0;
+      margin: 0;
+    }
+
+    .code {
+      font-size: 10px;
+      line-height: 1.2;
+      text-align: center;
+      color: #1f2937;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div id="swatch" class="swatch white">
+      <input id="picker" type="color" />
+    </div>
+    <div id="code" class="code">#FFFFFF</div>
+  </div>
+
+  <script>
+    const swatch = document.getElementById("swatch");
+    const picker = document.getElementById("picker");
+    const code = document.getElementById("code");
+    let currentColor = "#FFFFFF";
+
+    function sendMessage(type, payload) {
+      window.parent.postMessage(
+        Object.assign({ isStreamlitMessage: true, type }, payload),
+        "*"
+      );
+    }
+
+    function setFrameHeight() {
+      const height = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
+      sendMessage("streamlit:setFrameHeight", { height });
+    }
+
+    function normalizeHex(value) {
+      if (!value) return "#FFFFFF";
+      const normalized = String(value).trim().toUpperCase();
+      return /^#[0-9A-F]{6}$/.test(normalized) ? normalized : "#FFFFFF";
+    }
+
+    function applyColor(color) {
+      currentColor = normalizeHex(color);
+      swatch.style.background = currentColor;
+      swatch.classList.toggle("white", currentColor === "#FFFFFF");
+      code.textContent = currentColor;
+      picker.value = currentColor;
+    }
+
+    picker.addEventListener("input", (event) => {
+      applyColor(event.target.value);
+    });
+
+    picker.addEventListener("change", (event) => {
+      applyColor(event.target.value);
+      sendMessage("streamlit:setComponentValue", {
+        value: currentColor,
+        dataType: "json",
+      });
+    });
+
+    window.addEventListener("message", (event) => {
+      const message = event.data;
+      if (!message || message.type !== "streamlit:render") return;
+      applyColor(message.args?.color);
+      requestAnimationFrame(setFrameHeight);
+    });
+
+    sendMessage("streamlit:componentReady", { apiVersion: 1 });
+    setFrameHeight();
+  </script>
+</body>
+</html>
