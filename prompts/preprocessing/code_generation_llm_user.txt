@@ -6,9 +6,14 @@
   SimpleImputer、StandardScaler、MinMaxScaler、RobustScaler、
   OneHotEncoder、OrdinalEncoder、LabelEncoder、FunctionTransformer、
   ColumnTransformer、Pipeline
-===输入完整数据df====
-{{df}}
-=== 输入数据示例（仅用于推断列名与类型，不可假设示例覆盖全量数据）===
+=== 数据概览 ===
+- 数据规模：{{n_rows}} 行 × {{n_cols}} 列
+- 数据类型分布：{{dtype_counts}}
+- 缺失值总数：{{missing_total}}
+- 各列缺失率：{{missing_by_col}}
+- 数值型列：{{num_cols}}
+
+=== 输入数据示例（前5行，仅用于推断列名与类型，不可假设示例覆盖全量数据）===
 {{head_dict_str}}
 === LLM 返回的列级预处理建议（若为空则基于数据自行判断）===
 {{refined_suggestions}}

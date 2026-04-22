@@ -1,7 +1,11 @@
-【输入完整数据df】
-{{df}}
+=== 数据概览 ===
+- 数据规模：{{n_rows}} 行 × {{n_cols}} 列
+- 数据类型分布：{{dtype_counts}}
+- 缺失值总数：{{missing_total}}
+- 各列缺失率：{{missing_by_col}}
+- 数值型列：{{num_cols}}
 
-【输入数据示例（df.head()）】
+【输入数据示例（前5行）】
 {{head_dict_str}}
 
 【LLM 提炼后的逐列建议（可能为空）】

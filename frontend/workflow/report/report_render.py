@@ -709,6 +709,185 @@ def _looks_like_chapter4_heading(text: str) -> bool:
     return any(normalized.startswith(prefix) for prefix in chapter4_prefixes)
 
 
+def _is_heading_tag(tag: Any) -> bool:
+    return isinstance(tag, Tag) and bool(re.match(r"^h[1-6]$", tag.name or ""))
+
+
+def _normalize_heading_text(text: str) -> str:
+    normalized = html.unescape(str(text or "")).lower()
+    normalized = normalized.replace("\u3000", " ")
+    normalized = re.sub(r"\s+", "", normalized)
+    return normalized
+
+
+def _extract_chapter_number_from_text(text: str) -> int | None:
+    normalized = html.unescape(str(text or ""))
+    match = re.search(r"\b(\d+)(?:[\.．、]\d+)*\b", normalized)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    chinese_match = re.search(r"\u7b2c\s*([\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+)\s*\u7ae0", normalized)
+    if not chinese_match:
+        return None
+
+    numeral = chinese_match.group(1)
+    chinese_numerals = {
+        "\u4e00": 1,
+        "\u4e8c": 2,
+        "\u4e09": 3,
+        "\u56db": 4,
+        "\u4e94": 5,
+        "\u516d": 6,
+        "\u4e03": 7,
+        "\u516b": 8,
+        "\u4e5d": 9,
+        "\u5341": 10,
+    }
+    return chinese_numerals.get(numeral)
+
+
+def _extract_section_path(text: str) -> tuple[int, ...]:
+    normalized = html.unescape(str(text or "")).strip()
+    match = re.search(r"\b(\d+(?:[\.．、]\d+)*)\b", normalized)
+    if match:
+        parts = [part for part in re.split(r"[\.．、]", match.group(1)) if part]
+        try:
+            return tuple(int(part) for part in parts)
+        except ValueError:
+            return ()
+
+    chapter_number = _extract_chapter_number_from_text(normalized)
+    if chapter_number is not None:
+        return (chapter_number,)
+
+    return ()
+
+
+def _is_top_level_chapter4_heading(tag: Tag) -> bool:
+    text = tag.get_text(" ", strip=True)
+    path = _extract_section_path(text)
+    if path == (4,):
+        return True
+    normalized = _normalize_heading_text(text)
+    return "\u7b2c\u56db\u7ae0" in normalized
+
+
+def _find_modeling_chapter_heading(soup: BeautifulSoup) -> Tag | None:
+    heading_tags = soup.find_all(re.compile(r"^h[1-6]$"))
+    for heading in heading_tags:
+        if _is_top_level_chapter4_heading(heading):
+            return heading
+
+    for heading in heading_tags:
+        text = heading.get_text(" ", strip=True)
+        if _looks_like_chapter4_heading(text) and _looks_like_modeling_heading(text):
+            return heading
+
+    candidate_tags = soup.find_all(["p", "div", "section", "article"])
+    for tag in candidate_tags:
+        if tag.find(["img", "table", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6", "p"]):
+            continue
+        text = tag.get_text(" ", strip=True)
+        path = _extract_section_path(text)
+        if path == (4,) or (_looks_like_chapter4_heading(text) and _looks_like_modeling_heading(text)):
+            return tag
+
+    return None
+
+
+def _iter_named_next_siblings(tag: Tag):
+    for sibling in tag.next_siblings:
+        if isinstance(sibling, Tag):
+            yield sibling
+
+
+def _score_modeling_table_heading(text: str) -> int:
+    normalized = _normalize_heading_text(text)
+    if not normalized:
+        return 0
+
+    score = 0
+    weighted_keywords = (
+        ("\u6bd4\u8f83", 6),
+        ("\u5bf9\u6bd4", 6),
+        ("\u6027\u80fd", 5),
+        ("\u8bc4\u4f30", 5),
+        ("\u8bc4\u4ef7", 5),
+        ("\u7ed3\u679c", 4),
+        ("\u5b9e\u9a8c", 4),
+        ("\u6700\u4f18", 4),
+        ("\u6700\u4f73", 4),
+        ("\u9009\u62e9", 3),
+        ("comparison", 6),
+        ("compare", 5),
+        ("performance", 5),
+        ("evaluation", 5),
+        ("metric", 4),
+        ("metrics", 4),
+        ("result", 4),
+        ("results", 4),
+        ("best", 3),
+        ("accuracy", 3),
+        ("precision", 3),
+        ("recall", 3),
+        ("auc", 3),
+        ("f1", 3),
+        ("rmse", 3),
+        ("mae", 3),
+        ("mse", 3),
+        ("r2", 3),
+    )
+    for keyword, weight in weighted_keywords:
+        if keyword in normalized:
+            score += weight
+
+    if "\u6a21\u578b" in normalized or "model" in normalized:
+        score += 1
+    if "\u5206\u6790" in normalized or "analysis" in normalized:
+        score += 1
+
+    path = _extract_section_path(text)
+    if path and path[0] == 4 and len(path) >= 2:
+        score += 2
+
+    return score
+
+
+def _find_best_modeling_table_section_heading(modeling_heading: Tag) -> Tag | None:
+    best_heading: Tag | None = None
+    best_score = 0
+
+    for sibling in _iter_named_next_siblings(modeling_heading):
+        if _is_heading_tag(sibling):
+            sibling_text = sibling.get_text(" ", strip=True)
+            sibling_path = _extract_section_path(sibling_text)
+            if sibling_path and len(sibling_path) == 1 and sibling_path[0] != 4:
+                break
+
+            score = _score_modeling_table_heading(sibling_text)
+            if score > best_score:
+                best_score = score
+                best_heading = sibling
+
+    if best_score < 5:
+        return None
+    return best_heading
+
+
+def _find_modeling_table_insert_anchor(target_heading: Tag) -> Tag:
+    insert_after: Tag = target_heading
+    for sibling in _iter_named_next_siblings(target_heading):
+        if _is_heading_tag(sibling):
+            break
+        if sibling.get_text(" ", strip=True):
+            insert_after = sibling
+            break
+    return insert_after
+
+
 def _load_modeling_table_payload() -> dict[str, str]:
     summary_4 = maybe_json_loads(
         st.session_state.get("summary_4") or st.session_state.get("modeling_summary_4", {})
@@ -743,35 +922,12 @@ def _inject_modeling_table_into_html(final_html: str) -> str:
     if soup.find("div", class_="report-modeling-table-block") is not None:
         return final_html
 
-    modeling_heading = None
-    heading_tags = soup.find_all(re.compile(r"^h[1-6]$"))
-    for heading in heading_tags:
-        if _looks_like_chapter4_heading(heading.get_text(" ", strip=True)):
-            modeling_heading = heading
-            break
-
-    if modeling_heading is None:
-        candidate_tags = soup.find_all(["p", "div", "section", "article"])
-        for tag in candidate_tags:
-            if tag.find(["img", "table", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6", "p"]):
-                continue
-            if _looks_like_chapter4_heading(tag.get_text(" ", strip=True)):
-                modeling_heading = tag
-                break
-
+    modeling_heading = _find_modeling_chapter_heading(soup)
     if modeling_heading is None:
         return final_html
 
-    insert_after: Tag | None = modeling_heading
-    if modeling_heading is not None:
-        for sibling in modeling_heading.next_siblings:
-            if not isinstance(sibling, Tag):
-                continue
-            if re.match(r"^h[1-6]$", sibling.name or ""):
-                break
-            if sibling.get_text(" ", strip=True):
-                insert_after = sibling
-                break
+    target_heading = _find_best_modeling_table_section_heading(modeling_heading) or modeling_heading
+    insert_after = _find_modeling_table_insert_anchor(target_heading)
 
     block = soup.new_tag("div")
     block["class"] = ["report-modeling-table-block"]
