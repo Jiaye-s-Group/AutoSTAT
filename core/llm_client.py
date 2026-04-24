@@ -114,7 +114,7 @@ class LLMClient:
             messages.append({"role": "system", "content": sys})
         messages.append({"role": "user", "content": user})
 
-        use_max_completion_tokens = True
+        use_max_completion_tokens = "api.openai.com" in (self.base_url or "")
         kwargs = self._build_chat_kwargs(
             messages=messages,
             model=model,

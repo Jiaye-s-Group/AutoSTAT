@@ -378,6 +378,92 @@ def _discrete_marker_colors(color_value, palette):
     ]
 
 
+def _split_trace_by_discrete_color(trace, palette, secondary_color):
+    """Split a trace with discrete color encoding into per-category sub-traces.
+
+    When marker.color is a categorical array, Plotly won't create per-category
+    legend entries on its own.  This function returns a list of sub-traces,
+    one per unique category value, each with:
+      - its own ``name`` (= category label) so the legend gets a dedicated swatch
+      - a single solid ``marker.color`` so the swatch matches the data points
+      - ``legendgroup`` set to avoid duplicate entries if the same category
+        appears in another sub-figure
+
+    Returns ``None`` if the trace does not use discrete color encoding.
+    """
+    marker = getattr(trace, "marker", None)
+    if marker is None:
+        return None
+
+    original_color_value = getattr(marker, "color", None)
+    values = _color_value_sequence(original_color_value)
+    if not values:
+        return None
+
+    unique_values = _ordered_unique_values(values)
+    if len(unique_values) <= 1:
+        return None
+
+    max_discrete_values = max(len(palette) * 2, 12)
+    if len(unique_values) > max_discrete_values:
+        return None
+
+    # Reject continuous numeric sequences
+    if all(_is_integer_like(value) for value in unique_values):
+        pass
+    else:
+        numeric_vals = _numeric_color_sequence(unique_values)
+        if numeric_vals is not None:
+            return None
+
+    color_map = {
+        _hashable_color_key(value): palette[index % len(palette)]
+        for index, value in enumerate(unique_values)
+    }
+
+    trace_type = getattr(trace, "type", "")
+    sub_traces = []
+    for cat_value in unique_values:
+        cat_key = _hashable_color_key(cat_value)
+        cat_color = color_map[cat_key]
+        mask = [
+            (not _is_missing_color_value(v)) and _hashable_color_key(v) == cat_key
+            for v in values
+        ]
+
+        # Clone the trace as a dict so we can slice data arrays
+        trace_dict = trace.to_plotly_json()
+        cat_label = str(cat_value)
+
+        # Slice array-like data attributes
+        for attr in ("x", "y", "text", "hovertext", "customdata", "ids"):
+            arr = trace_dict.get(attr)
+            if arr is not None and isinstance(arr, (list, tuple)) and len(arr) == len(mask):
+                trace_dict[attr] = [arr[i] for i, m in enumerate(mask) if m]
+
+        # Set single-color marker
+        trace_dict.setdefault("marker", {})
+        trace_dict["marker"]["color"] = cat_color
+        trace_dict["marker"]["line"] = {"color": secondary_color, "width": 0.8}
+        # Remove coloraxis / colorscale that no longer apply
+        trace_dict["marker"].pop("coloraxis", None)
+        trace_dict["marker"].pop("colorscale", None)
+        trace_dict["marker"].pop("showscale", None)
+
+        trace_dict["name"] = cat_label
+        trace_dict["legendgroup"] = f"autostat_cat_{cat_label}"
+        trace_dict["showlegend"] = True
+
+        # Reconstruct as a proper go trace
+        try:
+            sub_trace = go.Figure(data=[trace_dict]).data[0]
+        except Exception:
+            return None
+        sub_traces.append(sub_trace)
+
+    return sub_traces
+
+
 def _apply_existing_color_encoding(trace, palette, secondary_color):
     marker = getattr(trace, "marker", None)
     if marker is None:
@@ -559,6 +645,35 @@ def _convert_histogram_to_bar(trace, fill_color, shared_edges=None):
             "line": {"color": "#000000", "width": 0.5},
         },
     }
+
+    # Plotly legend swatches render marker.color literally; when fill_color
+    # is an rgba with alpha < 1, the legend swatch looks faded / mismatched
+    # against the actual bars (which are composited on a white/dark bg).
+    # Extracting the base hex and setting it on the trace-level `legend*`
+    # attributes isn't supported by Plotly, so we instead move the
+    # semi-transparency from marker.color to trace-level opacity.  This way
+    # the legend swatch uses the opaque base color and matches the bars.
+    _rgba_match = None
+    if isinstance(fill_color, str) and fill_color.startswith("rgba("):
+        import re as _re
+        _rgba_match = _re.match(
+            r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)",
+            fill_color,
+        )
+    if _rgba_match:
+        _r, _g, _b = int(_rgba_match.group(1)), int(_rgba_match.group(2)), int(_rgba_match.group(3))
+        _a = float(_rgba_match.group(4))
+        _opaque_hex = "#{:02X}{:02X}{:02X}".format(_r, _g, _b)
+        common_kwargs["marker"]["color"] = _opaque_hex
+        # Combine with any existing trace-level opacity
+        existing_opacity = common_kwargs.get("opacity")
+        if existing_opacity is not None:
+            try:
+                common_kwargs["opacity"] = float(existing_opacity) * _a
+            except (TypeError, ValueError):
+                common_kwargs["opacity"] = _a
+        else:
+            common_kwargs["opacity"] = _a
 
     if orientation == "h":
         bar_trace = go.Bar(
@@ -883,6 +998,7 @@ def apply_palette_to_figure(fig, colors, fig_index=0):
         trace_mode = getattr(trace, "mode", "") or ""
         trace_type = getattr(trace, "type", "")
         is_box_median_overlay = False
+        _color_encoding_applied = False
         point_count = 0
         for attr in ("x", "y", "labels", "values"):
             values = getattr(trace, attr, None)
@@ -931,21 +1047,31 @@ def apply_palette_to_figure(fig, colors, fig_index=0):
             elif trace_type == "splom" or (
                 trace_type.startswith("scatter") and "markers" in trace_mode
             ):
-                if _apply_existing_color_encoding(trace, palette, secondary_color):
-                    pass
+                split_traces = _split_trace_by_discrete_color(trace, palette, secondary_color)
+                if split_traces is not None:
+                    new_traces.extend(split_traces)
+                    _color_encoding_applied = True
+                    continue
+                elif _apply_existing_color_encoding(trace, palette, secondary_color):
+                    _color_encoding_applied = True
                 else:
                     trace.marker.color = primary_color
                     trace.marker.line.color = secondary_color
                     trace.marker.line.width = 0.8
             elif trace_type.startswith("scatter"):
-                if _apply_existing_color_encoding(trace, palette, secondary_color):
-                    pass
+                split_traces = _split_trace_by_discrete_color(trace, palette, secondary_color)
+                if split_traces is not None:
+                    new_traces.extend(split_traces)
+                    _color_encoding_applied = True
+                    continue
+                elif _apply_existing_color_encoding(trace, palette, secondary_color):
+                    _color_encoding_applied = True
                 else:
                     trace.marker.color = primary_color
                     trace.marker.line.color = secondary_color
                     trace.marker.line.width = 0.8
             elif _apply_existing_color_encoding(trace, palette, secondary_color):
-                pass
+                _color_encoding_applied = True
             else:
                 trace.marker.color = primary_color
                 if hasattr(trace.marker, "line") and trace.marker.line is not None:
@@ -972,10 +1098,10 @@ def apply_palette_to_figure(fig, colors, fig_index=0):
                 except Exception:
                     pass
 
-        if hasattr(trace, "line") and trace.line is not None:
+        if hasattr(trace, "line") and trace.line is not None and not _color_encoding_applied:
             trace.line.color = primary_color
 
-        if hasattr(trace, "fillcolor"):
+        if hasattr(trace, "fillcolor") and not _color_encoding_applied:
             trace.fillcolor = _hex_to_rgba(primary_color, 0.65)
 
         if trace_type == "box" and is_box_median_overlay:

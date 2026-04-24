@@ -318,7 +318,7 @@ def _render_modeling_result(result_value: Any) -> None:
 
 
 def call_coze_workflow_modeling(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """本地化版本：改走本地 Modeling workflow。"""
+    """本地化版本：改走本地 Modeling workflow（完整执行，兼容旧路径）。"""
     from utils.local_workflow_bridge import call_modeling_bridge
 
     inputs = dict(inputs)
@@ -336,6 +336,35 @@ def call_coze_workflow_modeling(inputs: dict[str, Any]) -> dict[str, Any] | None
     return normalized
 
 
+def _call_modeling_phase1(inputs: dict[str, Any]) -> dict[str, Any] | None:
+    """Phase 1: 仅生成 suggestion，快速返回给前端展示。"""
+    from utils.local_workflow_bridge import call_modeling_phase1_bridge
+
+    inputs = dict(inputs)
+    inputs.setdefault("add_preference", st.session_state.get("add_preference") or "")
+    inputs.setdefault("preference_selected", st.session_state.get("preference_selected") or "")
+    return call_modeling_phase1_bridge(inputs)
+
+
+def _call_modeling_phase2(inputs: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """Phase 2: RAG + 代码生成 + 验证 + 分析。"""
+    from utils.local_workflow_bridge import call_modeling_phase2_bridge
+
+    inputs = dict(inputs)
+    inputs.setdefault("add_preference", st.session_state.get("add_preference") or "")
+    inputs.setdefault("preference_selected", st.session_state.get("preference_selected") or "")
+
+    result = call_modeling_phase2_bridge(inputs, ctx)
+    if result is None:
+        return None
+
+    normalized = _normalize_modeling_workflow_result(result)
+    if normalized is None:
+        st.error("建模代码生成阶段返回结构异常。")
+        return None
+    return normalized
+
+
 def _clear_modeling_workflow_state(agent) -> None:
     agent.clear_memory()
     agent.save_suggestion(None)
@@ -346,29 +375,26 @@ def _clear_modeling_workflow_state(agent) -> None:
     _agent_save_value(agent, "save_target", "target", "")
     _agent_save_value(agent, "save_history_train_code", "history_train_code", "")
     st.session_state.history_train_code_reset_pending = True
-    st.session_state.pop("modeling_workflow_result", None)
-    st.session_state.pop("modeling_suggestion", None)
-    st.session_state.pop("model_suggestion", None)
-    st.session_state.pop("modeling_summary_4", None)
-    st.session_state.pop("modeling_abstract_4", None)
-    st.session_state.pop("summary_4", None)
-    st.session_state.pop("abstract_4", None)
-    st.session_state.pop("modeling_result_from_summary_4", None)
-    st.session_state.pop("modeling_user_prompt", None)
+    for key in (
+        "modeling_workflow_result", "modeling_suggestion", "model_suggestion",
+        "modeling_summary_4", "modeling_abstract_4", "summary_4", "abstract_4",
+        "modeling_result_from_summary_4", "modeling_user_prompt",
+        "_model_phase1_ctx", "_model_phase2_inputs", "_model_phase2_pending",
+    ):
+        st.session_state.pop(key, None)
 
 
 def _reset_modeling_outputs(agent) -> None:
     agent.save_suggestion(None)
     agent.save_code(None)
     agent.save_modeling_result(None)
-    st.session_state.pop("modeling_workflow_result", None)
-    st.session_state.pop("modeling_suggestion", None)
-    st.session_state.pop("model_suggestion", None)
-    st.session_state.pop("modeling_summary_4", None)
-    st.session_state.pop("modeling_abstract_4", None)
-    st.session_state.pop("summary_4", None)
-    st.session_state.pop("abstract_4", None)
-    st.session_state.pop("modeling_result_from_summary_4", None)
+    for key in (
+        "modeling_workflow_result", "modeling_suggestion", "model_suggestion",
+        "modeling_summary_4", "modeling_abstract_4", "summary_4", "abstract_4",
+        "modeling_result_from_summary_4",
+        "_model_phase1_ctx", "_model_phase2_inputs", "_model_phase2_pending",
+    ):
+        st.session_state.pop(key, None)
 
 
 def _request_modeling_recommendation(
@@ -392,22 +418,52 @@ def _request_modeling_recommendation(
         st.error("无法从当前可用数据构造建模工作流输入，请检查预处理结果或原始上传数据是否可解析。")
         return
 
-    with st.spinner("正在生成建模推荐，请稍候..."):
-        workflow_result = call_coze_workflow_modeling(inputs)
+    # ── Phase 1: 快速获取 suggestion 并展示 ──────────────────────
+    with st.spinner("正在生成建模推荐方案..."):
+        phase1_result = _call_modeling_phase1(inputs)
+
+    if not phase1_result:
+        return
+
+    suggestion = phase1_result.get("model_suggestion", "")
+    phase1_ctx = phase1_result.get("_ctx", {})
+
+    # 先把 suggestion 写入 session_state，让前端立刻可以显示
+    st.session_state.modeling_suggestion = suggestion
+    st.session_state.model_suggestion = suggestion
+    agent.save_suggestion(suggestion)
+
+    # 缓存 phase1 上下文和 inputs，供 phase2 使用
+    st.session_state._model_phase1_ctx = phase1_ctx
+    st.session_state._model_phase2_inputs = inputs
+    st.session_state._model_phase2_pending = True
+
+    agent.add_memory({"role": "assistant", "content": suggestion})
+    st.rerun()
+
+
+def _continue_modeling_phase2(agent) -> None:
+    """在 suggestion 已展示的前提下，继续执行 phase2（RAG + 代码生成 + 训练 + 分析）。"""
+    phase1_ctx = st.session_state.pop("_model_phase1_ctx", None)
+    inputs = st.session_state.pop("_model_phase2_inputs", None)
+    st.session_state.pop("_model_phase2_pending", None)
+
+    if not phase1_ctx or not inputs:
+        return
+
+    with st.spinner("建模建议已生成，正在生成代码与训练分析..."):
+        workflow_result = _call_modeling_phase2(inputs, phase1_ctx)
 
     if not workflow_result:
         return
 
-    suggestion = _extract_modeling_suggestion(workflow_result)
     st.session_state.modeling_workflow_result = workflow_result
-    st.session_state.modeling_suggestion = suggestion
-    st.session_state.model_suggestion = suggestion
     st.session_state.modeling_summary_4 = workflow_result.get("summary_4")
     st.session_state.modeling_abstract_4 = workflow_result.get("abstract_4")
     st.session_state.summary_4 = workflow_result.get("summary_4")
     st.session_state.abstract_4 = workflow_result.get("abstract_4")
-    agent.save_suggestion(suggestion)
-    agent.add_memory({"role": "assistant", "content": suggestion})
+
+    agent.add_memory({"role": "assistant", "content": workflow_result})
     agent.finish_auto()
     st.rerun()
 
@@ -554,6 +610,11 @@ def modeling_chat(agent, source_data: Any, auto: bool) -> None:
         st.session_state.get("model_suggestion") or st.session_state.get("modeling_suggestion")
     )
     saved_user_input = _agent_load_value(agent, "load_user_input", "user_input", "") or ""
+
+    # ── Phase 2 自动续接：suggestion 已展示，继续生成代码 ──────────
+    if st.session_state.get("_model_phase2_pending"):
+        _continue_modeling_phase2(agent)
+        return
 
     if auto and _has_modeling_result(agent) and not agent.finish_auto_task:
         agent.finish_auto()

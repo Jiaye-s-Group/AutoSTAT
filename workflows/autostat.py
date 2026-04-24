@@ -87,89 +87,109 @@ def run_autostat(
         "df": plan["df"],
     }
 
-    # ========== 2. Loading ==========
-    loading = run_loading_workflow(
-        shape_0=base["shape_0"],
-        shape_1=base["shape_1"],
-        dtype_info_str=base["dtype_info_str"],
-        head_dict_str=base["head_dict_str"],
-        loading_auto=plan["loading_auto"],
-        user_input=user_input_load,
-        add_preference=add_preference,
-        preference_selected=preference_selected,
-        ref_context=_get_ref(f"字段含义 数据说明 {base['dtype_info_str'][:200]}"),
-    )
-    notify("loading", loading)
+# ========== 2 & 3. Loading + Preprocessing 并行 ==========
+    from concurrent.futures import ThreadPoolExecutor
 
-    # ========== 3. Preprocessing ==========
-    if plan["prep_auto"]:
-        prep = run_preprocessing_workflow(
-            df=base["df"],
+    def _run_loading():
+        return run_loading_workflow(
             shape_0=base["shape_0"],
             shape_1=base["shape_1"],
             dtype_info_str=base["dtype_info_str"],
             head_dict_str=base["head_dict_str"],
-            prep_auto=True,
-            user_input=user_input_pre,
+            loading_auto=plan["loading_auto"],
+            user_input=user_input_load,
             add_preference=add_preference,
             preference_selected=preference_selected,
-            ref_context=_get_ref(f"数据预处理 缺失值 异常值 {add_preference}"),
+            ref_context=_get_ref(f"字段含义 数据说明 {base['dtype_info_str'][:200]}"),
         )
-    else:
-        prep = {
+
+    def _run_prep():
+        if plan["prep_auto"]:
+            return run_preprocessing_workflow(
+                df=base["df"],
+                shape_0=base["shape_0"],
+                shape_1=base["shape_1"],
+                dtype_info_str=base["dtype_info_str"],
+                head_dict_str=base["head_dict_str"],
+                prep_auto=True,
+                user_input=user_input_pre,
+                add_preference=add_preference,
+                preference_selected=preference_selected,
+                ref_context=_get_ref(f"数据预处理 缺失值 异常值 {add_preference}"),
+            )
+        return {
             "summary_2": {"title": "", "desc": "", "processed_df": base["df"], "code": ""},
             "abstract_2": "",
             "suggestion": "",
         }
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        load_future = pool.submit(_run_loading)
+        prep_future = pool.submit(_run_prep)
+        loading = load_future.result()
+        prep = prep_future.result()
+
+    notify("loading", loading)
     notify("preprocessing", prep)
 
-    # 如果预处理成功，后续的 data/df_head/cols 改用处理后的版本
-    if prep["summary_2"].get("processed_df"):
-        try:
-            import json
-            processed_records = json.loads(prep["summary_2"]["processed_df"])
-            processed_df = pd.DataFrame(processed_records)
-            processed_meta = df_to_meta(processed_df)
-            next_data = processed_meta["df"]
-            next_head = processed_meta["head_dict_str"]
-            next_cols = list(processed_df.columns)
-        except Exception:
-            next_data = base["df"]
-            next_head = base["head_dict_str"]
-            next_cols = list(df.columns)
-    else:
-        next_data = base["df"]
+    # ── 从 preprocessing 输出中提取下游数据 ──────────────────────
+    # 预处理成功时用 processed_df，否则退化为原始 df
+    _prep_summary = prep.get("summary_2", {})
+    _processed_df_str = _prep_summary.get("processed_df") or base["df"]
+    next_data = _processed_df_str
+
+    # 解析 processed_df 以获取最新列名和 head
+    try:
+        import json as _json
+        _records = _json.loads(str(next_data))
+        _next_df = pd.DataFrame(_records)
+        next_cols = list(_next_df.columns.astype(str))
+        next_head = _json.dumps(
+            _next_df.head(5).to_dict(orient="list"), ensure_ascii=False
+        )
+    except Exception:
+        # 解析失败时退化为 Planning 阶段的元信息
+        next_cols = list(df.columns.astype(str))
         next_head = base["head_dict_str"]
-        next_cols = list(df.columns)
 
-    # ========== 4. Visualizing ==========
-    viz = run_visualizing_workflow(
-        data=next_data,
-        shape0=base["shape_0"],
-        shape1=len(next_cols),
-        cols=next_cols,
-        def_head=next_head,
-        vis_auto=plan["vis_auto"],
-        user_input=user_input_vis,
-        add_preference=add_preference,
-        preference_selected=preference_selected,
-        ref_context=_get_ref(f"可视化 图表 数据分布 {add_preference}"),
-    )
+# ========== 4 & 5. Visualizing + Modeling 并行 ==========
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _run_viz():
+        return run_visualizing_workflow(
+            data=next_data,
+            shape0=base["shape_0"],
+            shape1=len(next_cols),
+            cols=next_cols,
+            def_head=next_head,
+            vis_auto=plan["vis_auto"],
+            user_input=user_input_vis,
+            add_preference=add_preference,
+            preference_selected=preference_selected,
+            ref_context=_get_ref(f"可视化 图表 数据分布 {add_preference}"),
+        )
+
+    def _run_model():
+        return run_modeling_workflow(
+            data=next_data,
+            df_head=next_head,
+            columns=next_cols,
+            modeling_auto=plan["modeling_auto"],
+            target=target_column,
+            user_input=user_input_model,
+            user_prompt=user_input_model or add_preference,
+            add_preference=add_preference,
+            preference_selected=preference_selected,
+            ref_context=_get_ref(f"建模 算法 {target_column} {add_preference}"),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        viz_future = pool.submit(_run_viz)
+        model_future = pool.submit(_run_model)
+        viz = viz_future.result()
+        model = model_future.result()
+
     notify("visualizing", viz)
-
-    # ========== 5. Modeling ==========
-    model = run_modeling_workflow(
-        data=next_data,
-        df_head=next_head,
-        columns=next_cols,
-        modeling_auto=plan["modeling_auto"],
-        target=target_column,
-        user_input=user_input_model,
-        user_prompt=user_input_model or add_preference,
-        add_preference=add_preference,
-        preference_selected=preference_selected,
-        ref_context=_get_ref(f"建模 算法 {target_column} {add_preference}"),
-    )
     notify("modeling", model)
 
     # ========== 6. Reporting ==========

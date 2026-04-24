@@ -50,14 +50,26 @@ def _summary_3_fig_analysis(summary_3):
 
 
 def _match_fig_analysis(fig_analysis_items, fig_key, index):
+    # Primary: match by position index
     if index < len(fig_analysis_items):
         item = fig_analysis_items[index]
         if item.get("analysis"):
             return item["analysis"]
 
+    # Fallback: match by fig_key appearing in the fig JSON or as the fig field
     for item in fig_analysis_items:
-        if item.get("fig") == fig_key and item.get("analysis"):
-            return item["analysis"]
+        fig_field = item.get("fig", "")
+        if not fig_field:
+            continue
+        # Exact match (legacy path)
+        if fig_field == fig_key:
+            if item.get("analysis"):
+                return item["analysis"]
+        # fig_key is the dict key (e.g. "fig_1") – check if it appears
+        # in the fig JSON title or as a substring of the serialised figure
+        if fig_key and fig_key in fig_field:
+            if item.get("analysis"):
+                return item["analysis"]
 
     return None
 
@@ -131,6 +143,11 @@ def execute_visualization_code_once(agent, code_override=None) -> bool:
 
     summary_3 = st.session_state.get("summary_3")
     fig_analysis_items = _summary_3_fig_analysis(summary_3)
+    tu_title_all = st.session_state.get("tu_title")
+    if isinstance(tu_title_all, list):
+        tu_title_list = list(tu_title_all)
+    else:
+        tu_title_list = []
     with st.spinner("正在处理可视化结果..."):
         for idx, (col_name, fig) in enumerate(stqdm(fig_dict.items())):
             try:
@@ -155,7 +172,11 @@ def execute_visualization_code_once(agent, code_override=None) -> bool:
                     except Exception:
                         desc = None
 
-                agent.add_fig(normalized_fig, desc, base_fig=base_fig.to_json())
+                # Bundle the matching title so it stays aligned with this figure
+                # even when other figures are skipped.
+                fig_title = tu_title_list[idx] if idx < len(tu_title_list) else ""
+
+                agent.add_fig(normalized_fig, desc, base_fig=base_fig.to_json(), title=fig_title)
             except Exception:
                 continue
 
@@ -236,6 +257,11 @@ def vis_execution(agent, auto = False):
                 else:
                     summary_3 = st.session_state.get("summary_3")
                     fig_analysis_items = _summary_3_fig_analysis(summary_3)
+                    tu_title_all = st.session_state.get("tu_title")
+                    if isinstance(tu_title_all, list):
+                        tu_title_list = list(tu_title_all)
+                    else:
+                        tu_title_list = []
                     with st.spinner("正在处理可视化结果..."):
                         for idx, (col_name, fig) in enumerate(stqdm(fig_dict.items())):
                             try:
@@ -259,7 +285,9 @@ def vis_execution(agent, auto = False):
                                         desc = agent.desc_fig(normalized_fig, dtype_info)
                                     except Exception:
                                         desc = None
-                                agent.add_fig(normalized_fig, desc, base_fig=base_fig.to_json())
+
+                                fig_title = tu_title_list[idx] if idx < len(tu_title_list) else ""
+                                agent.add_fig(normalized_fig, desc, base_fig=base_fig.to_json(), title=fig_title)
                             except Exception:
                                 continue
                         agent.finish_auto()

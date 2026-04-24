@@ -28,6 +28,7 @@ Preprocessing workflow 本地实现。
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from core.llm_client import chat
@@ -176,15 +177,17 @@ def run_preprocessing_workflow(
     ctx["processed_df"] = processed_df
     ctx["processed_df_head"] = processed_df_head
 
-    # ---------- 节点 8: CHAP2_summary_html (LLM) ----------
+    # ---------- 节点 8 & 9: 章节正文 + 摘要 并行 ----------
     chap_sys = render_file("preprocessing/chap2_summary_html_llm_sys.txt", ctx)
     chap_user = render_file("preprocessing/chap2_summary_html_llm_user.txt", ctx)
-    desc = chat(chap_sys, chap_user, name="prep.chap2_summary_html").strip()
-
-    # ---------- 节点 9: ABS2_check_abstract (LLM) ----------
     abs_sys = render_file("preprocessing/abs2_check_abstract_llm_sys.txt", ctx)
     abs_user = render_file("preprocessing/abs2_check_abstract_llm_user.txt", ctx)
-    abstract_2 = chat(abs_sys, abs_user, name="prep.abs2_check_abstract").strip()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_desc = pool.submit(chat, chap_sys, chap_user, name="prep.chap2_summary_html")
+        f_abs = pool.submit(chat, abs_sys, abs_user, name="prep.abs2_check_abstract")
+        desc = f_desc.result().strip()
+        abstract_2 = f_abs.result().strip()
 
     # ---------- 节点 10: summary2_composer (plugin) ----------
     composed = summary2_composer(code=current_code, desc=desc, processed_df=processed_df)

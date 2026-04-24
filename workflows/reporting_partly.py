@@ -165,21 +165,6 @@ def run_reporting_partly_workflow(
         print(f"[REPORT][SECTION {idx+1}] HAS_FIG_IN_FILLED =", "[FIG:" in filled)
         print(f"[REPORT][SECTION {idx+1}] FILLED_PREVIEW =", filled[:300])
 
-        # ---------- writer_validator ----------
-        validator_ctx = {
-            **section_ctx,
-            "content": filled,
-            "history_content": build_history_context(history_parts_for_prompt, max_chars=1200),
-        }
-        v_sys = render_file("reporting_partly/writer_validator_llm_sys.txt", validator_ctx)
-        v_user = render_file("reporting_partly/writer_validator_llm_user.txt", validator_ctx)
-        _ = chat(
-            v_sys,
-            v_user,
-            name=f"report_partly.validator.{idx+1}",
-            temperature=0.3,
-        ).strip()
-
         # 最终正文优先用 filled，再退回 content
         final_part = filled or content
         final_part = normalize_part(final_part)

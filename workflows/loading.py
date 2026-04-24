@@ -16,6 +16,7 @@ Loading workflow 本地实现。
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from core.llm_client import chat
@@ -37,7 +38,6 @@ def run_loading_workflow(
 ) -> dict[str, Any]:
     # ---------- Condition: loading_auto ----------
     if not loading_auto:
-        # Coze 里的 Code 节点会兜底：输出空的 summary_1 结构和空 abstract_1
         return {
             "summary_1": {"title": "", "desc": "", "df": ""},
             "abstract_1": "",
@@ -54,27 +54,26 @@ def run_loading_workflow(
         "ref_context": ref_context or "（无参考资料）",
     }
 
-    # ---------- 节点 1: do_data_description ----------
-    # 生成数据含义描述（desc）—— 既给下游 CHAP1_summary_html，也给最终摘要
+    # 三个 LLM call 都只依赖 ctx 中的原始元信息，互不依赖 → 全并行
     desc_sys = render_file("loading/do_data_description__llm_sys.txt", ctx)
     desc_user = render_file("loading/do_data_description__llm_user.txt", ctx)
-    description = chat(desc_sys, desc_user, name="loading.do_data_description")
-
-    # ---------- 节点 2: CHAP1_summary_html （章节正文） ----------
     chap_sys = render_file("loading/chap1_summary_html_llm_sys.txt", ctx)
     chap_user = render_file("loading/chap1_summary_html_llm_user.txt", ctx)
-    chap_desc = chat(chap_sys, chap_user, name="loading.chap1_summary_html")
-
-    # ---------- 节点 3: ABS1_check_abstract （一段式摘要） ----------
     abs_sys = render_file("loading/abs1_check_abstract_llm_sys.txt", ctx)
     abs_user = render_file("loading/abs1_check_abstract_llm_user.txt", ctx)
-    abstract_1 = chat(abs_sys, abs_user, name="loading.abs1_check_abstract").strip()
 
-    # ---------- 节点 4: summary1_composer ----------
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_desc = pool.submit(chat, desc_sys, desc_user, name="loading.do_data_description")
+        f_chap = pool.submit(chat, chap_sys, chap_user, name="loading.chap1_summary_html")
+        f_abs = pool.submit(chat, abs_sys, abs_user, name="loading.abs1_check_abstract")
+        description = f_desc.result()
+        chap_desc = f_chap.result()
+        abstract_1 = f_abs.result().strip()
+
+    # ---------- summary1_composer ----------
     composed = summary1_composer(desc=chap_desc, head_dict_str=head_dict_str)
     summary_1 = composed["summary_1"]
 
-    # ---------- 节点 5: 终极兜底 Code（防 None） ----------
     return {
         "summary_1": {
             "title": summary_1.get("title") or "数据概览与数据含义分析",
@@ -82,7 +81,6 @@ def run_loading_workflow(
             "df": summary_1.get("df") or "",
         },
         "abstract_1": abstract_1 or "",
-        # 额外暴露一下，方便下游页面展示
         "_description": description,
     }
 

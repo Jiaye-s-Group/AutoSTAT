@@ -24,6 +24,25 @@ from workflows._plugins import (
 
 MAX_FIX_ATTEMPTS = 5
 BATCH_CONCURRENCY = 10
+MAX_VIS_TITLE_CHARS = 20
+VAGUE_VIS_TITLES = {
+    "变量关系与分布特征",
+    "变量关系",
+    "分布特征",
+    "比较关系",
+    "变化趋势",
+    "关系",
+    "分布",
+    "比较",
+    "趋势",
+    "数据可视化",
+    "可视化结果",
+    "结果图",
+    "比较图",
+    "分析图",
+    "数据展示",
+    "模型表现",
+}
 
 
 def _sanitize_visualization_code(code: str) -> str:
@@ -69,24 +88,21 @@ def _sanitize_visualization_code(code: str) -> str:
         return code
 
 
-def run_visualizing_workflow(
+def _build_ctx(
     *,
     data: str,
     shape0: int,
     shape1: int,
     cols: list,
     def_head: str,
-    vis_auto: bool = True,
     color: str = "",
     user_input: str = "",
     add_preference: str = "",
     preference_selected: str = "",
     ref_context: str = "",
 ) -> dict[str, Any]:
-    if not vis_auto:
-        return _empty_result()
-
-    ctx: dict[str, Any] = {
+    """构造 visualizing workflow 公共上下文。"""
+    return {
         "data": data,
         "shape_0": shape0,
         "shape_1": shape1,
@@ -102,6 +118,32 @@ def run_visualizing_workflow(
         "ref_context": ref_context or "（无参考资料）",
     }
 
+
+def run_visualizing_phase1(
+    *,
+    data: str,
+    shape0: int,
+    shape1: int,
+    cols: list,
+    def_head: str,
+    vis_auto: bool = True,
+    color: str = "",
+    user_input: str = "",
+    add_preference: str = "",
+    preference_selected: str = "",
+    ref_context: str = "",
+) -> dict[str, Any]:
+    """Phase 1: 生成 visual_recommendation + refined_suggestions，快速返回给前端展示。"""
+    if not vis_auto:
+        return {"visual_recommendatio": "", "refined_suggestions": "", "_ctx": {}}
+
+    ctx = _build_ctx(
+        data=data, shape0=shape0, shape1=shape1, cols=cols,
+        def_head=def_head, color=color, user_input=user_input,
+        add_preference=add_preference, preference_selected=preference_selected,
+        ref_context=ref_context,
+    )
+
     vr_sys = render_file("visualizing/sec3_get_visual_recommendation_llm_sys.txt", ctx)
     vr_user = render_file("visualizing/sec3_get_visual_recommendation_llm_user.txt", ctx)
     visual_recommendatio = chat(
@@ -114,6 +156,23 @@ def run_visualizing_workflow(
     rs_user = render_file("visualizing/sec3_refine_suggestions_llm_user.txt", ctx)
     refined_suggestions = chat(rs_sys, rs_user, name="viz.refine_suggestions").strip()
     ctx["refined_suggestions"] = refined_suggestions
+
+    return {
+        "visual_recommendatio": visual_recommendatio,
+        "refined_suggestions": refined_suggestions,
+        "_ctx": ctx,
+    }
+
+
+def run_visualizing_phase2(
+    *,
+    ctx: dict[str, Any],
+    data: str,
+    cols: list,
+    def_head: str,
+) -> dict[str, Any]:
+    """Phase 2: 代码生成 + 验证修复 + 图表分析。依赖 phase1 产出的 ctx。"""
+    visual_recommendatio = ctx.get("visual_recommendatio", "")
 
     cg_sys = render_file("visualizing/sec3_code_generation_llm_sys.txt", ctx)
     cg_user = render_file("visualizing/sec3_code_generation_llm_user.txt", ctx)
@@ -177,23 +236,39 @@ def run_visualizing_workflow(
     cols_wo_id = _filter_id_columns(cols)
     dtype_info = to_str(def_head)
 
-    pack_data_list = _batch_run(
-        fig_task_list,
-        lambda item: _desc_fig_single(item, dtype_info, ctx),
-        concurrency=BATCH_CONCURRENCY,
-    )
-    title_results = _batch_run(
-        pack_data_list,
-        lambda item: _generate_title_single(item, cols_wo_id, ctx),
-        concurrency=BATCH_CONCURRENCY,
-    )
-    tu_title = [item.strip() if isinstance(item, str) else "" for item in title_results]
+    # 每张图独立并行：desc → (title ‖ summary)
+    def _process_single_fig(item: dict) -> dict[str, Any]:
+        pack = _desc_fig_single(item, dtype_info, ctx)
+        with ThreadPoolExecutor(max_workers=2) as inner_pool:
+            title_fut = inner_pool.submit(
+                _generate_title_single, pack, cols_wo_id, ctx
+            )
+            summary_fut = inner_pool.submit(
+                _summary_fig_single, pack, cols_wo_id, ctx
+            )
+            title = title_fut.result()
+            summary = summary_fut.result()
+        return {"title": title, "summary": summary}
 
-    aggregate_results = _batch_run(
-        pack_data_list,
-        lambda item: _summary_fig_single(item, cols_wo_id, ctx),
+    fig_results = _batch_run(
+        fig_task_list,
+        _process_single_fig,
         concurrency=BATCH_CONCURRENCY,
     )
+
+    tu_title = []
+    aggregate_results = []
+    for r in fig_results:
+        if isinstance(r, dict):
+            tu_title.append(
+                r.get("title", "").strip() if isinstance(r.get("title"), str) else ""
+            )
+            aggregate_results.append(
+                r.get("summary", {}) if isinstance(r.get("summary"), dict) else {}
+            )
+        else:
+            tu_title.append("")
+            aggregate_results.append({})
 
     full = sec3_check_full(analysis_list=aggregate_results)["full"]
 
@@ -211,6 +286,37 @@ def run_visualizing_workflow(
         "final_code": final_code,
         "tu_title": tu_title,
     }
+
+
+def run_visualizing_workflow(
+    *,
+    data: str,
+    shape0: int,
+    shape1: int,
+    cols: list,
+    def_head: str,
+    vis_auto: bool = True,
+    color: str = "",
+    user_input: str = "",
+    add_preference: str = "",
+    preference_selected: str = "",
+    ref_context: str = "",
+) -> dict[str, Any]:
+    """完整执行（兼容旧调用方式，顺序执行 phase1 + phase2）。"""
+    if not vis_auto:
+        return _empty_result()
+
+    p1 = run_visualizing_phase1(
+        data=data, shape0=shape0, shape1=shape1, cols=cols,
+        def_head=def_head, vis_auto=vis_auto, color=color,
+        user_input=user_input, add_preference=add_preference,
+        preference_selected=preference_selected, ref_context=ref_context,
+    )
+    ctx = p1["_ctx"]
+    if not ctx:
+        return _empty_result()
+
+    return run_visualizing_phase2(ctx=ctx, data=data, cols=cols, def_head=def_head)
 
 
 def _desc_fig_single(
@@ -289,11 +395,18 @@ def _generate_title_single(
     if _is_usable_chinese_title(polished_title):
         return polished_title
 
-    fallback = _normalize_academic_title(_fallback_title_from_desc(desc))
+    fallback = _normalize_academic_title(
+        _fallback_title_from_context(
+            desc=desc,
+            raw_title=raw_title,
+            fig_meta=fig_meta,
+            cols_wo_id=cols_wo_id,
+        )
+    )
     if _is_usable_chinese_title(fallback):
         return fallback
 
-    return "变量关系与分布特征"
+    return "主要变量分布"
 
 
 def _summary_fig_single(
@@ -420,6 +533,22 @@ def _normalize_academic_title(title: str) -> str:
     for pattern in chart_word_patterns:
         text = re.sub(pattern, "", text, flags=re.IGNORECASE)
 
+    compression_pairs = {
+        "的分布特征及异常值分析": "分布特征",
+        "分布特征及异常值分析": "分布特征",
+        "的分布情况": "分布",
+        "分布情况": "分布",
+        "变化趋势分析": "变化趋势",
+        "比较分析": "比较",
+        "关系分析": "关系",
+        "分布分析": "分布",
+        "及异常值分析": "",
+        "异常值分析": "",
+    }
+    for src, dst in compression_pairs.items():
+        text = text.replace(src, dst)
+    text = re.sub(r"的(分布|关系|比较|变化趋势|趋势|特征)", r"\1", text)
+
     english_map = {
         "relationship between": "关系",
         "relationship": "关系",
@@ -441,22 +570,60 @@ def _normalize_academic_title(title: str) -> str:
         text = lowered
 
     text = re.sub(r"\s+", " ", text).strip()
-    return text.strip("，,。.;；:：")
+    text = text.strip("，,。.;；:：")
+    return _limit_title_length(text)
 
 
 def _contains_ascii_letters(text: str) -> bool:
     return any(("a" <= ch.lower() <= "z") for ch in text)
 
 
+def _limit_title_length(title: str) -> str:
+    text = _parse_single_title(title)
+    if not text:
+        return ""
+
+    text = re.sub(r"\s+", "", text).strip("，,。.;；:：")
+    if len(text) <= MAX_VIS_TITLE_CHARS:
+        return text
+
+    removable_suffixes = (
+        "综合分析",
+        "特征分析",
+        "趋势分析",
+        "对比分析",
+        "比较分析",
+        "及异常值",
+        "分析",
+        "特征",
+        "趋势",
+    )
+    for suffix in removable_suffixes:
+        if text.endswith(suffix) and len(text) - len(suffix) >= 2:
+            text = text[: -len(suffix)]
+            if len(text) <= MAX_VIS_TITLE_CHARS:
+                return text
+
+    return text[:MAX_VIS_TITLE_CHARS].strip("，,。.;；:：")
+
+
+def _is_vague_visualization_title(title: str) -> bool:
+    text = re.sub(r"[\s，,。.;；:：]+", "", _parse_single_title(title))
+    if not text:
+        return True
+    return text in VAGUE_VIS_TITLES
+
+
 def _is_usable_chinese_title(title: str) -> bool:
     if not title:
         return False
-    if _contains_ascii_letters(title):
+    if _contains_ascii_letters(title) and not re.search(r"[\u4e00-\u9fff]", title):
+        return False
+    if len(title) > MAX_VIS_TITLE_CHARS:
         return False
     if len(title) < 2:
         return False
-    banned = {"结果图", "比较图", "分析图", "数据展示", "模型表现", "可视化结果"}
-    return title not in banned
+    return not _is_vague_visualization_title(title)
 
 
 def _polish_title_to_chinese(
@@ -475,6 +642,8 @@ def _polish_title_to_chinese(
         "你是一名学术论文图表标题润色专家。"
         "请将候选标题改写为统一中文、正式、准确、简洁的论文图标题。"
         "不要解释，不要保留中英文混杂，不要把图类型词作为标题主体。"
+        "标题必须不超过20个汉字或中文字符，且必须包含具体变量、指标、对象或组别。"
+        "禁止输出“变量关系与分布特征”“变量关系”“分布特征”等泛化标题。"
         "如果候选标题不合格，请依据图表信息直接重写。"
     )
     user_prompt = (
@@ -492,7 +661,7 @@ def _polish_title_to_chinese(
         f"图表描述：{desc}\n"
         f"图表类型：{'，'.join(fig_meta.get('chart_types', []))}\n"
         f"图表 JSON 摘要：{fig[:2500]}\n\n"
-        "只输出一个最终中文标题。"
+        "只输出一个最终中文标题，不超过20个字。"
     )
     try:
         rewritten = chat(
@@ -503,14 +672,80 @@ def _polish_title_to_chinese(
         ).strip()
     except Exception:
         return ""
-    return _parse_single_title(rewritten)
+    return _limit_title_length(_parse_single_title(rewritten))
 
 
-def _fallback_title_from_desc(desc: str) -> str:
-    text = _parse_single_title(desc)
-    if not text:
-        return "变量关系与分布特征"
-    return text[:40].strip("，,。.;；:：")
+def _fallback_title_from_context(
+    *,
+    desc: str,
+    raw_title: str,
+    fig_meta: dict[str, Any],
+    cols_wo_id: list,
+) -> str:
+    source_candidates = [
+        fig_meta.get("existing_title", ""),
+        raw_title,
+        desc,
+    ]
+    for candidate in source_candidates:
+        title = _normalize_academic_title(candidate)
+        if title and not _is_vague_visualization_title(title):
+            return title
+
+    x_axis = _clean_title_token(fig_meta.get("x_axis_title", ""))
+    y_axis = _clean_title_token(fig_meta.get("y_axis_title", ""))
+    legend = _clean_title_token(fig_meta.get("legend_title", ""))
+    trace_names = [_clean_title_token(name) for name in fig_meta.get("trace_names", [])]
+    chart_types = [str(item).lower() for item in fig_meta.get("chart_types", [])]
+
+    if _has_chart_type(chart_types, ("box", "histogram", "violin")):
+        variable = y_axis or x_axis or _first_meaningful_token(cols_wo_id)
+        if variable:
+            return f"{variable}分布特征"
+
+    if _has_chart_type(chart_types, ("scatter",)):
+        if x_axis and y_axis:
+            return f"{x_axis}与{y_axis}关系"
+
+    if _has_chart_type(chart_types, ("bar", "pie")):
+        metric = y_axis or _first_meaningful_token(trace_names) or _first_meaningful_token(cols_wo_id)
+        group = x_axis or legend
+        if group and metric and group != metric:
+            return f"{group}{metric}比较"
+        if metric:
+            return f"{metric}比较"
+
+    if _has_chart_type(chart_types, ("line",)):
+        variable = y_axis or _first_meaningful_token(cols_wo_id)
+        if variable:
+            return f"{variable}变化趋势"
+
+    variable = y_axis or x_axis or _first_meaningful_token(cols_wo_id)
+    if variable:
+        return f"{variable}分布"
+    return "主要变量分布"
+
+
+def _clean_title_token(value: Any) -> str:
+    text = _normalize_academic_title(to_str(value))
+    if not text or _is_vague_visualization_title(text):
+        return ""
+    return text
+
+
+def _first_meaningful_token(values: Any) -> str:
+    if not isinstance(values, list):
+        values = [values]
+    generic_tokens = {"id", "index", "count", "value", "variable", "class", "类别", "数量", "计数", "变量", "数值"}
+    for value in values:
+        text = _clean_title_token(value)
+        if text and text.lower() not in generic_tokens:
+            return text
+    return ""
+
+
+def _has_chart_type(chart_types: list[str], needles: tuple[str, ...]) -> bool:
+    return any(any(needle in chart_type for needle in needles) for chart_type in chart_types)
 
 
 def _extract_figure_metadata(fig: str) -> dict[str, Any]:

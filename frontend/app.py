@@ -236,7 +236,7 @@ class VisualizationAgent(BaseAgent):
     def save_error(self, error):
         self.error = None
 
-    def add_fig(self, fig, desc=None, base_fig=None):
+    def add_fig(self, fig, desc=None, base_fig=None, title=None):
         if base_fig is None:
             if hasattr(fig, "to_json"):
                 try:
@@ -245,7 +245,10 @@ class VisualizationAgent(BaseAgent):
                     base_fig = fig
             else:
                 base_fig = fig
-        self.fig_desc_list.append({"fig": fig, "base_fig": base_fig, "desc": desc})
+        item = {"fig": fig, "base_fig": base_fig, "desc": desc}
+        if title is not None:
+            item["title"] = title
+        self.fig_desc_list.append(item)
 
     def code_generation(self, df_head, suggest):
         return ""

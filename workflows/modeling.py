@@ -28,6 +28,7 @@ Modeling workflow 本地实现。
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from core.llm_client import chat
@@ -46,12 +47,11 @@ from workflows._plugins import (
 MAX_FIX_ATTEMPTS = 5
 
 
-def run_modeling_workflow(
+def _build_modeling_ctx(
     *,
     data: str,
     df_head: str,
     columns: list,
-    modeling_auto: bool = True,
     target: str = "",
     train_code: str = "",
     user_input: str = "",
@@ -60,23 +60,8 @@ def run_modeling_workflow(
     preference_selected: str = "",
     ref_context: str = "",
 ) -> dict[str, Any]:
-    # ---------- Condition: modeling_auto ----------
-    if not modeling_auto:
-        return {
-            "summary_4": {
-                "title": "",
-                "desc": "",
-                "result": "",
-                "code": "",
-                "table_title": "",
-                "table_markdown": "",
-                "table_html": "",
-            },
-            "abstract_4": "",
-            "model_suggestion": "",
-        }
-
-    ctx: dict[str, Any] = {
+    """构造 modeling workflow 公共上下文。"""
+    return {
         "data": data,
         "df_head": df_head,
         "columns": columns,
@@ -91,20 +76,72 @@ def run_modeling_workflow(
         "ref_context": ref_context or "（无参考资料）",
     }
 
-    # ---------- 节点 1: Sec4_get_model_suggestion ----------
+
+def _empty_modeling_result() -> dict[str, Any]:
+    return {
+        "summary_4": {
+            "title": "", "desc": "", "result": "", "code": "",
+            "table_title": "", "table_markdown": "", "table_html": "",
+        },
+        "abstract_4": "",
+        "model_suggestion": "",
+    }
+
+
+def run_modeling_phase1(
+    *,
+    data: str,
+    df_head: str,
+    columns: list,
+    modeling_auto: bool = True,
+    target: str = "",
+    train_code: str = "",
+    user_input: str = "",
+    user_prompt: str = "",
+    add_preference: str = "",
+    preference_selected: str = "",
+    ref_context: str = "",
+) -> dict[str, Any]:
+    """Phase 1: 生成 model_suggestion + refined_suggestions，快速返回给前端展示。"""
+    if not modeling_auto:
+        return {"model_suggestion": "", "refined_suggestions": "", "_ctx": {}}
+
+    ctx = _build_modeling_ctx(
+        data=data, df_head=df_head, columns=columns, target=target,
+        train_code=train_code, user_input=user_input, user_prompt=user_prompt,
+        add_preference=add_preference, preference_selected=preference_selected,
+        ref_context=ref_context,
+    )
+
     sug_sys = render_file("modeling/sec4_get_model_suggestion_llm_sys.txt", ctx)
     sug_user = render_file("modeling/sec4_get_model_suggestion_llm_user.txt", ctx)
     model_suggestion = chat(sug_sys, sug_user, name="model.get_suggestion").strip()
     ctx["model_suggestion"] = model_suggestion
 
-    # ---------- 节点 2: Sec4_refine_suggestion ----------
     ref_sys = render_file("modeling/sec4_refine_suggestion_llm_sys.txt", ctx)
     ref_user = render_file("modeling/sec4_refine_suggestion_llm_user.txt", ctx)
     refined_suggestions = chat(ref_sys, ref_user, name="model.refine").strip()
     ctx["refined_suggestions"] = refined_suggestions
-    ctx["refine_suggestion"] = refined_suggestions  # Coze 里的字段名
+    ctx["refine_suggestion"] = refined_suggestions
 
-    # ---------- 节点 3: RAG ----------
+    return {
+        "model_suggestion": model_suggestion,
+        "refined_suggestions": refined_suggestions,
+        "_ctx": ctx,
+    }
+
+
+def run_modeling_phase2(
+    *,
+    ctx: dict[str, Any],
+    data: str,
+    df_head: str,
+) -> dict[str, Any]:
+    """Phase 2: RAG + 代码生成 + 验证修复 + 结果格式化 + 摘要。依赖 phase1 产出的 ctx。"""
+    model_suggestion = ctx.get("model_suggestion", "")
+    refined_suggestions = ctx.get("refined_suggestions", "")
+
+    # ---------- RAG ----------
     q_sys = render_file("modeling/get_query_llm_sys.txt", ctx)
     q_user = render_file("modeling/get_query_llm_user.txt", ctx)
     rag_query = chat(q_sys, q_user, name="model.get_query", temperature=0).strip()
@@ -112,13 +149,13 @@ def run_modeling_workflow(
     recall_results = retrieve(rag_query, top_k=3)
     ctx["knowledge_results"] = format_recall(output_list=recall_results)["knowledge_results"]
 
-    # ---------- 节点 4: sec4_code_generation ----------
+    # ---------- 代码生成 ----------
     cg_sys = render_file("modeling/sec4_code_generation_llm_sys.txt", ctx)
     cg_user = render_file("modeling/sec4_code_generation_llm_user.txt", ctx)
     generated_code = chat(cg_sys, cg_user, name="model.code_generation").strip()
     generated_code = _unwrap_code_block(generated_code)
 
-    # ---------- 节点 5: Loop (训练代码自愈，最多 5 次) ----------
+    # ---------- 修复循环 ----------
     current_code = generated_code
     success = False
     last_error = ""
@@ -137,7 +174,6 @@ def run_modeling_workflow(
         if attempt >= MAX_FIX_ATTEMPTS - 1:
             break
 
-        # ---------- 节点 5.x: sec4_code_fixed LLM ----------
         fix_ctx = {
             **ctx,
             "code": current_code,
@@ -156,23 +192,19 @@ def run_modeling_workflow(
 
     final_code = current_code
 
-    # 失败兜底
     if not success:
         return {
             "summary_4": {
                 "title": "建模分析",
                 "desc": f"建模代码执行失败：{last_error[:500]}",
-                "result": "",
-                "code": final_code,
-                "table_title": "",
-                "table_markdown": "",
-                "table_html": "",
+                "result": "", "code": final_code,
+                "table_title": "", "table_markdown": "", "table_html": "",
             },
             "abstract_4": f"建模代码执行失败：{last_error[:200]}",
             "model_suggestion": model_suggestion,
         }
 
-    # ---------- 节点 6: sec4_result_format_prompt ----------
+    # ---------- 结果格式化 ----------
     ctx["final_code"] = final_code
     ctx["modeling_code"] = final_code
     ctx["result_json"] = final_result_json
@@ -192,21 +224,20 @@ def run_modeling_workflow(
     result_format = chat(rfp_sys, rfp_user, name="model.result_format").strip()
     ctx["result_format"] = result_format
 
-    # ---------- 节点 7: Sec4_summary_html ----------
+    # ---------- 章节正文 + 摘要 并行 ----------
     sh_sys = render_file("modeling/sec4_summary_html_llm_sys.txt", ctx)
     sh_user = render_file("modeling/sec4_summary_html_llm_user.txt", ctx)
-    desc = chat(sh_sys, sh_user, name="model.summary_html").strip()
-
-    # ---------- 节点 8: Sec4_check_abstract ----------
     ab_sys = render_file("modeling/sec4_check_abstract_llm_sys.txt", ctx)
     ab_user = render_file("modeling/sec4_check_abstract_llm_user.txt", ctx)
-    abstract_4 = chat(ab_sys, ab_user, name="model.check_abstract").strip()
 
-    # ---------- 节点 9: sec4_composer ----------
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_desc = pool.submit(chat, sh_sys, sh_user, name="model.summary_html")
+        f_abs = pool.submit(chat, ab_sys, ab_user, name="model.check_abstract")
+        desc = f_desc.result().strip()
+        abstract_4 = f_abs.result().strip()
+
     composed = sec4_composer(
-        code=final_code,
-        desc=desc,
-        result=result_format,
+        code=final_code, desc=desc, result=result_format,
         table_title=table_bundle.get("title", ""),
         table_markdown=table_bundle.get("markdown_table", ""),
         table_html=table_bundle.get("html_table", ""),
@@ -216,11 +247,42 @@ def run_modeling_workflow(
         "summary_4": composed["summary_4"],
         "abstract_4": abstract_4,
         "model_suggestion": model_suggestion,
-        # 额外信息
         "_refined_suggestions": refined_suggestions,
         "_final_code": final_code,
         "_fix_attempts": attempt + 1 if success else MAX_FIX_ATTEMPTS,
     }
+
+
+def run_modeling_workflow(
+    *,
+    data: str,
+    df_head: str,
+    columns: list,
+    modeling_auto: bool = True,
+    target: str = "",
+    train_code: str = "",
+    user_input: str = "",
+    user_prompt: str = "",
+    add_preference: str = "",
+    preference_selected: str = "",
+    ref_context: str = "",
+) -> dict[str, Any]:
+    """完整执行（兼容旧调用方式，顺序执行 phase1 + phase2）。"""
+    if not modeling_auto:
+        return _empty_modeling_result()
+
+    p1 = run_modeling_phase1(
+        data=data, df_head=df_head, columns=columns,
+        modeling_auto=modeling_auto, target=target, train_code=train_code,
+        user_input=user_input, user_prompt=user_prompt,
+        add_preference=add_preference, preference_selected=preference_selected,
+        ref_context=ref_context,
+    )
+    ctx = p1.get("_ctx")
+    if not ctx:
+        return _empty_modeling_result()
+
+    return run_modeling_phase2(ctx=ctx, data=data, df_head=df_head)
 
 
 # ===================================================================

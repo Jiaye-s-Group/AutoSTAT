@@ -299,10 +299,9 @@ def _normalize_visualization_workflow_result(result: Any) -> dict[str, Any] | No
 
 
 def call_coze_workflow_visualization(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """本地化版本：改走本地 Visualizing workflow。"""
+    """本地化版本：改走本地 Visualizing workflow（完整执行，兼容旧路径）。"""
     from utils.local_workflow_bridge import call_visualizing_bridge
 
-    # 补齐本地 workflow 可能需要的偏好字段
     inputs = dict(inputs)
     inputs.setdefault("add_preference", st.session_state.get("add_preference") or "")
     inputs.setdefault("preference_selected", st.session_state.get("preference_selected") or "")
@@ -318,15 +317,53 @@ def call_coze_workflow_visualization(inputs: dict[str, Any]) -> dict[str, Any] |
     return normalized
 
 
+def _call_visualization_phase1(inputs: dict[str, Any]) -> dict[str, Any] | None:
+    """Phase 1: 仅生成 suggestion，快速返回给前端展示。"""
+    from utils.local_workflow_bridge import call_visualizing_phase1_bridge
+
+    inputs = dict(inputs)
+    inputs.setdefault("add_preference", st.session_state.get("add_preference") or "")
+    inputs.setdefault("preference_selected", st.session_state.get("preference_selected") or "")
+    return call_visualizing_phase1_bridge(inputs)
+
+
+def _call_visualization_phase2(inputs: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """Phase 2: 代码生成 + 验证 + 分析。"""
+    from utils.local_workflow_bridge import call_visualizing_phase2_bridge
+
+    inputs = dict(inputs)
+    inputs.setdefault("add_preference", st.session_state.get("add_preference") or "")
+    inputs.setdefault("preference_selected", st.session_state.get("preference_selected") or "")
+
+    result = call_visualizing_phase2_bridge(inputs, ctx)
+    if result is None:
+        return None
+
+    normalized = _normalize_visualization_workflow_result(result)
+    if normalized is None:
+        st.error("可视化代码生成阶段返回结构异常。")
+        return None
+    return normalized
+
+
 def vis_result(agent) -> None:
     fig_desc_list = agent.load_fig()
     total = len(fig_desc_list)
     if total == 0:
         return
 
-    title_items = _normalize_visualization_titles(st.session_state.get("tu_title"))
-    if len(title_items) < total:
-        title_items.extend([""] * (total - len(title_items)))
+    # Build title list: prefer per-figure bundled title (set during execution),
+    # fall back to positional tu_title from session_state.
+    raw_tu_titles = _normalize_visualization_titles(st.session_state.get("tu_title"))
+    title_items: list[str] = []
+    for i, item in enumerate(fig_desc_list):
+        bundled = item.get("title", "").strip() if isinstance(item, dict) else ""
+        if bundled:
+            title_items.append(bundled)
+        elif i < len(raw_tu_titles):
+            title_items.append(raw_tu_titles[i])
+        else:
+            title_items.append("")
     show_analysis = st.session_state.get("viz_desc_switch", False)
     current_page_key = "viz_current_page"
 
@@ -480,15 +517,12 @@ def _clear_visualization_workflow_state(agent) -> None:
     agent.save_fig([])
     agent.finish_auto_task = False
     _clear_visualization_title_inputs()
-    st.session_state.pop("viz_workflow_result", None)
-    st.session_state.pop("viz_suggestion", None)
-    st.session_state.pop("tu_title", None)
-    st.session_state.pop("full", None)
-    st.session_state.pop("abstract_3", None)
-    st.session_state.pop("summary_3", None)
-    st.session_state.pop("visual_recommendatio", None)
-    st.session_state.pop("final_code", None)
-    st.session_state.pop("viz_desc_switch", None)
+    for key in (
+        "viz_workflow_result", "viz_suggestion", "tu_title", "full",
+        "abstract_3", "summary_3", "visual_recommendatio", "final_code",
+        "viz_desc_switch", "_viz_phase1_ctx", "_viz_phase2_inputs", "_viz_phase2_pending",
+    ):
+        st.session_state.pop(key, None)
 
 
 def _reset_visualization_outputs(agent) -> None:
@@ -499,17 +533,13 @@ def _reset_visualization_outputs(agent) -> None:
     agent.save_fig([])
     agent.finish_auto_task = False
     _clear_visualization_title_inputs()
-    st.session_state.pop("viz_workflow_result", None)
-    st.session_state.pop("viz_suggestion", None)
-    st.session_state.pop("tu_title", None)
-    st.session_state.pop("full", None)
-    st.session_state.pop("abstract_3", None)
-    st.session_state.pop("summary_3", None)
-    st.session_state.pop("visual_recommendatio", None)
-    st.session_state.pop("final_code", None)
-    st.session_state.pop("viz_desc_switch", None)
-    st.session_state.pop("viz_current_page", None)
-    st.session_state.pop("viz_pagination", None)
+    for key in (
+        "viz_workflow_result", "viz_suggestion", "tu_title", "full",
+        "abstract_3", "summary_3", "visual_recommendatio", "final_code",
+        "viz_desc_switch", "viz_current_page", "viz_pagination",
+        "_viz_phase1_ctx", "_viz_phase2_inputs", "_viz_phase2_pending",
+    ):
+        st.session_state.pop(key, None)
 
 
 def _request_visualization_recommendation(agent, source_data: Any, user_input: str) -> None:
@@ -525,35 +555,54 @@ def _request_visualization_recommendation(agent, source_data: Any, user_input: s
         st.error("无法从当前可用数据构造可视化工作流输入，请检查预处理结果或原始上传数据是否可解析。")
         return
 
-    with st.spinner("正在生成可视化推荐，预计需要 2-3 分钟，请耐心等待..."):
-        workflow_result = call_coze_workflow_visualization(inputs)
+    # ── Phase 1: 快速获取 suggestion 并展示 ──────────────────────
+    with st.spinner("正在生成可视化推荐方案..."):
+        phase1_result = _call_visualization_phase1(inputs)
+
+    if not phase1_result:
+        return
+
+    visual_recommendatio = phase1_result.get("visual_recommendatio", "")
+    phase1_ctx = phase1_result.get("_ctx", {})
+
+    # 先把 suggestion 写入 session_state，让前端立刻可以显示
+    st.session_state.visual_recommendatio = visual_recommendatio
+    st.session_state.viz_suggestion = visual_recommendatio
+    agent.save_suggestion(visual_recommendatio)
+
+    # 缓存 phase1 上下文和 inputs，供 phase2 使用
+    st.session_state._viz_phase1_ctx = phase1_ctx
+    st.session_state._viz_phase2_inputs = inputs
+    st.session_state._viz_phase2_pending = True
+
+    agent.add_memory({"role": "assistant", "content": visual_recommendatio})
+    st.rerun()
+
+
+def _continue_visualization_phase2(agent) -> None:
+    """在 suggestion 已展示的前提下，继续执行 phase2（代码生成 + 图表分析）。"""
+    phase1_ctx = st.session_state.pop("_viz_phase1_ctx", None)
+    inputs = st.session_state.pop("_viz_phase2_inputs", None)
+    st.session_state.pop("_viz_phase2_pending", None)
+
+    if not phase1_ctx or not inputs:
+        return
+
+    with st.spinner("可视化建议已生成，正在生成代码与图表分析..."):
+        workflow_result = _call_visualization_phase2(inputs, phase1_ctx)
 
     if not workflow_result:
         return
 
     tu_title = _normalize_visualization_titles(workflow_result.get("tu_title", ""))
-    full = workflow_result.get("full")
-    abstract_3 = workflow_result.get("abstract_3")
-    summary_3 = workflow_result.get("summary_3")
-    visual_recommendatio = workflow_result.get("visual_recommendatio", "")
-    final_code = workflow_result.get("final_code", "")
-
     st.session_state.viz_workflow_result = workflow_result
     st.session_state.tu_title = tu_title
-    st.session_state.full = full
-    st.session_state.abstract_3 = abstract_3
-    st.session_state.summary_3 = summary_3
-    st.session_state.visual_recommendatio = visual_recommendatio
-    st.session_state.final_code = final_code
-    st.session_state.viz_suggestion = visual_recommendatio
-    agent.save_suggestion(visual_recommendatio)
+    st.session_state.full = workflow_result.get("full")
+    st.session_state.abstract_3 = workflow_result.get("abstract_3")
+    st.session_state.summary_3 = workflow_result.get("summary_3")
+    st.session_state.final_code = workflow_result.get("final_code", "")
 
-    agent.add_memory(
-        {
-            "role": "assistant",
-            "content": workflow_result,
-        }
-    )
+    agent.add_memory({"role": "assistant", "content": workflow_result})
     agent.finish_auto()
     st.rerun()
 
@@ -611,6 +660,11 @@ def vis_chat(agent, source_data: Any, auto: bool = False):
         entry["role"] == "assistant" and isinstance(entry.get("content"), dict)
         for entry in chat_history
     )
+
+    # ── Phase 2 自动续接：suggestion 已展示，继续生成代码 ──────────
+    if st.session_state.get("_viz_phase2_pending"):
+        _continue_visualization_phase2(agent)
+        return
 
     if auto and _has_visualization_execution_result(agent) and not agent.finish_auto_task:
         agent.finish_auto()

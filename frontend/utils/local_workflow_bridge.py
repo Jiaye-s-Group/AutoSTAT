@@ -99,6 +99,57 @@ def call_visualizing_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
+def call_visualizing_phase1_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
+    """Phase 1: 仅生成 visual_recommendation + refined_suggestions，快速返回。"""
+    from workflows.visualizing import run_visualizing_phase1
+
+    try:
+        cols_val = inputs.get("cols", [])
+        if isinstance(cols_val, str):
+            try:
+                cols_val = json.loads(cols_val)
+            except Exception:
+                cols_val = [cols_val]
+        return run_visualizing_phase1(
+            data=str(inputs.get("data", "")),
+            shape0=int(inputs.get("shape0", 0) or inputs.get("shape_0", 0)),
+            shape1=int(inputs.get("shape1", 0) or inputs.get("shape_1", 0)),
+            cols=list(cols_val or []),
+            def_head=str(inputs.get("def_head", "")),
+            vis_auto=bool(inputs.get("vis_auto", True)),
+            color=str(inputs.get("color", "")),
+            user_input=str(inputs.get("user_input", "")),
+            add_preference=str(inputs.get("add_preference", "")),
+            preference_selected=str(inputs.get("preference_selected", "")),
+            ref_context=_get_ref_context(f"可视化 图表 {inputs.get('add_preference', '')}"),
+        )
+    except Exception as e:
+        _err(f"本地 Visualizing phase1 失败：{e}")
+        return None
+
+
+def call_visualizing_phase2_bridge(inputs: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """Phase 2: 代码生成 + 验证 + 图表分析，依赖 phase1 的 ctx。"""
+    from workflows.visualizing import run_visualizing_phase2
+
+    try:
+        cols_val = inputs.get("cols", [])
+        if isinstance(cols_val, str):
+            try:
+                cols_val = json.loads(cols_val)
+            except Exception:
+                cols_val = [cols_val]
+        return run_visualizing_phase2(
+            ctx=ctx,
+            data=str(inputs.get("data", "")),
+            cols=list(cols_val or []),
+            def_head=str(inputs.get("def_head", "")),
+        )
+    except Exception as e:
+        _err(f"本地 Visualizing phase2 失败：{e}")
+        return None
+
+
 def call_modeling_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
     """对应 Coze Modeling workflow (7605874583226056709)"""
     from workflows.modeling import run_modeling_workflow
@@ -125,6 +176,50 @@ def call_modeling_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
         )
     except Exception as e:
         _err(f"本地 Modeling workflow 失败：{e}")
+        return None
+
+
+def call_modeling_phase1_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
+    """Phase 1: 仅生成 model_suggestion + refined_suggestions，快速返回。"""
+    from workflows.modeling import run_modeling_phase1
+
+    try:
+        cols_val = inputs.get("columns", [])
+        if isinstance(cols_val, str):
+            try:
+                cols_val = json.loads(cols_val)
+            except Exception:
+                cols_val = [cols_val]
+        return run_modeling_phase1(
+            data=str(inputs.get("data", "")),
+            df_head=str(inputs.get("df_head", "")),
+            columns=list(cols_val or []),
+            modeling_auto=bool(inputs.get("modeling_auto", True)),
+            target=str(inputs.get("target", "")),
+            train_code=str(inputs.get("train_code", "")),
+            user_input=str(inputs.get("user_input", "")),
+            user_prompt=str(inputs.get("user_prompt", "")),
+            add_preference=str(inputs.get("add_preference", "")),
+            preference_selected=str(inputs.get("preference_selected", "")),
+            ref_context=_get_ref_context(f"建模 算法 {inputs.get('target', '')} {inputs.get('add_preference', '')}"),
+        )
+    except Exception as e:
+        _err(f"本地 Modeling phase1 失败：{e}")
+        return None
+
+
+def call_modeling_phase2_bridge(inputs: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """Phase 2: RAG + 代码生成 + 验证 + 结果分析，依赖 phase1 的 ctx。"""
+    from workflows.modeling import run_modeling_phase2
+
+    try:
+        return run_modeling_phase2(
+            ctx=ctx,
+            data=str(inputs.get("data", "")),
+            df_head=str(inputs.get("df_head", "")),
+        )
+    except Exception as e:
+        _err(f"本地 Modeling phase2 失败：{e}")
         return None
 
 
