@@ -364,7 +364,12 @@ def vis_result(agent) -> None:
             title_items.append(raw_tu_titles[i])
         else:
             title_items.append("")
-    show_analysis = st.session_state.get("viz_desc_switch", False)
+    show_analysis = bool(
+        st.session_state.get(
+            "viz_desc_switch_widget",
+            st.session_state.get("viz_desc_switch", False),
+        )
+    )
     current_page_key = "viz_current_page"
 
     if current_page_key not in st.session_state:
@@ -503,7 +508,8 @@ def vis_result(agent) -> None:
                 use_container_width=True,
             )
 
-        if show_analysis and desc is not None:
+        if show_analysis and desc:
+            st.markdown("---")
             st.write(desc)
 
 
@@ -520,7 +526,8 @@ def _clear_visualization_workflow_state(agent) -> None:
     for key in (
         "viz_workflow_result", "viz_suggestion", "tu_title", "full",
         "abstract_3", "summary_3", "visual_recommendatio", "final_code",
-        "viz_desc_switch", "_viz_phase1_ctx", "_viz_phase2_inputs", "_viz_phase2_pending",
+        "viz_desc_switch", "viz_desc_switch_widget",
+        "_viz_phase1_ctx", "_viz_phase2_inputs", "_viz_phase2_pending",
     ):
         st.session_state.pop(key, None)
 
@@ -536,7 +543,7 @@ def _reset_visualization_outputs(agent) -> None:
     for key in (
         "viz_workflow_result", "viz_suggestion", "tu_title", "full",
         "abstract_3", "summary_3", "visual_recommendatio", "final_code",
-        "viz_desc_switch", "viz_current_page", "viz_pagination",
+        "viz_desc_switch", "viz_desc_switch_widget", "viz_current_page", "viz_pagination",
         "_viz_phase1_ctx", "_viz_phase2_inputs", "_viz_phase2_pending",
     ):
         st.session_state.pop(key, None)
@@ -620,6 +627,20 @@ def _has_visualization_execution_result(agent) -> bool:
     return bool(agent.load_fig())
 
 
+def _render_visualization_chat_entry(role: str, content: Any, index: int) -> None:
+    if isinstance(content, str):
+        with st.chat_message(role):
+            st.write(content)
+        return
+
+    if isinstance(content, dict):
+        return
+
+    if isinstance(content, go.Figure):
+        with st.chat_message(role):
+            st.plotly_chart(content, use_container_width=True, key=f"chart-{index}")
+
+
 def vis_chat(agent, source_data: Any, auto: bool = False):
     with st.chat_message("assistant"):
         st.write(
@@ -641,20 +662,7 @@ def vis_chat(agent, source_data: Any, auto: bool = False):
     for idx, entry in enumerate(chat_history):
         role = entry.get("role")
         content = entry.get("content")
-
-        with st.chat_message(role):
-            if isinstance(content, str):
-                st.write(content)
-            elif isinstance(content, dict):
-                suggestion = (
-                    _stringify_content(content.get("visual_recommendatio"))
-                    or _stringify_content(content.get("abstract_3"))
-                    or _stringify_content(content.get("tu_title"))
-                )
-                if suggestion:
-                    st.write(suggestion)
-            elif isinstance(content, go.Figure):
-                st.plotly_chart(content, use_container_width=True, key=f"chart-{idx}")
+        _render_visualization_chat_entry(role, content, idx)
 
     already_generated = any(
         entry["role"] == "assistant" and isinstance(entry.get("content"), dict)

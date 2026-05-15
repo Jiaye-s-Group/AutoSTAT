@@ -272,9 +272,10 @@ def call_reporting_toc_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
 
 def call_reporting_partly_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
     """对应 Coze Reporting_partly workflow (7619618317418446901)"""
-    from workflows.reporting_partly import run_reporting_partly_workflow
+    from workflows.reporting_partly import ReportGenerationCancelled, run_reporting_partly_workflow
 
     try:
+        cancel_check = inputs.get("_report_cancel_check")
         return run_reporting_partly_workflow(
             toc_text=str(inputs.get("toc_text", "")),
             selected_full_conten=str(inputs.get("selected_full_conten", "")),
@@ -286,7 +287,10 @@ def call_reporting_partly_bridge(inputs: dict[str, Any]) -> dict[str, Any] | Non
             add_preference=str(inputs.get("add_preference", "")),
             preference_select=str(inputs.get("preference_select", "")),
             ref_context=_get_ref_context(f"报告撰写 业务背景 {inputs.get('add_preference', '')}"),
+            cancel_check=cancel_check if callable(cancel_check) else None,
         )
+    except ReportGenerationCancelled:
+        return None
     except Exception as e:
         _err(f"本地 Reporting_partly workflow 失败：{e}")
         return None

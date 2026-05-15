@@ -3,12 +3,20 @@ report_render
 
 """
 
+import json
+import os
+import shutil
 import time
 import re
 import html
 import base64
+import hashlib
 import io
+import subprocess
+import sys
+import tempfile
 import zipfile
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -66,10 +74,19 @@ REPORT_WORKFLOW_OUTPUT_FIELDS = (
     "visual_abstract",
     "coding_abstract",
 )
-FIG_PLACEHOLDER_PATTERN = r"(?<![A-Za-z0-9_])[\[\uFF3B\u3010]?\s*FIG\s*:?\s*(?:\d+)\s*[\]\uFF3D\u3011]?(?![A-Za-z0-9_])"
-FIG_PLACEHOLDER_CAPTURE_PATTERN = r"(?<![A-Za-z0-9_])[\[\uFF3B\u3010]?\s*FIG\s*:?\s*(\d+)\s*[\]\uFF3D\u3011]?(?![A-Za-z0-9_])"
+FIG_PLACEHOLDER_PATTERN = r"(?<![A-Za-z0-9_])[\[\uFF3B\u3010]?\s*FIG\s*[:\uFF1A]?\s*(?:\d+)\s*[\]\uFF3D\u3011]?(?![A-Za-z0-9_])"
+FIG_PLACEHOLDER_CAPTURE_PATTERN = r"(?<![A-Za-z0-9_])[\[\uFF3B\u3010]?\s*FIG\s*[:\uFF1A]?\s*(\d+)\s*[\]\uFF3D\u3011]?(?![A-Za-z0-9_])"
 REPORT_EXPORT_IMAGE_SCALE = 0.6
 REPORT_EXPORT_IMAGE_PERCENT = f"{REPORT_EXPORT_IMAGE_SCALE * 100:.0f}%"
+REPORT_IMAGE_EXPORT_TIMEOUT_SECONDS = 12
+REPORT_FIGURE_DATA_URI_CACHE_KEY = "report_figure_data_uri_cache"
+REPORT_GENERATION_TOKEN_KEY = "report_generation_token"
+REPORT_GENERATION_RUNNING_KEY = "report_generation_running"
+REPORT_GENERATION_PROCESS_KEY = "report_generation_process"
+REPORT_GENERATION_JOB_KEY = "report_generation_job"
+REPORT_PENDING_PREVIEW_KEY = "report_generation_pending_preview"
+
+
 def _resolve_coze_base_url(coze_url: str) -> str:
     if "api.coze.cn" in coze_url:
         return "https://api.coze.cn"
@@ -133,6 +150,32 @@ def _normalize_multiline_text(value: Any) -> str:
     if isinstance(value, str):
         return stringify_string(value).replace("\\r\\n", "\n").replace("\\n", "\n")
     return "\n".join(normalize_toc_list(value))
+
+
+def _normalize_report_format(value: Any) -> str:
+    if isinstance(value, list):
+        for item in value:
+            normalized = _normalize_report_format(item)
+            if normalized:
+                return normalized
+        return "Word"
+
+    if isinstance(value, dict):
+        for key in ("label", "value", "name", "text"):
+            if key in value:
+                normalized = _normalize_report_format(value.get(key))
+                if normalized:
+                    return normalized
+        return "Word"
+
+    text = stringify_string(value).strip().lower()
+    if "html" in text:
+        return "HTML"
+    if "pdf" in text:
+        return "PDF"
+    if "word" in text or "doc" in text:
+        return "Word"
+    return "Word"
 
 
 def _normalize_visualization_titles(raw_titles: Any) -> list[str]:
@@ -346,12 +389,101 @@ def _normalize_visual_figure(raw_figure: Any) -> go.Figure | None:
 
 
 def _figure_to_data_uri(fig: go.Figure) -> str | None:
+    fig_json = fig.to_json()
+    export_script = """
+import sys
+import plotly.io as pio
+
+json_path, png_path = sys.argv[1], sys.argv[2]
+with open(json_path, "r", encoding="utf-8") as f:
+    fig_json = f.read()
+fig = pio.from_json(fig_json)
+image_bytes = pio.to_image(fig, format="png", width=1400, height=900, scale=2)
+with open(png_path, "wb") as f:
+    f.write(image_bytes)
+"""
     try:
-        image_bytes = pio.to_image(fig, format="png", width=1400, height=900, scale=2)
+        with tempfile.TemporaryDirectory(prefix="report_fig_export_") as temp_dir:
+            json_path = f"{temp_dir}/figure.json"
+            png_path = f"{temp_dir}/figure.png"
+            with open(json_path, "w", encoding="utf-8") as f:
+                f.write(fig_json)
+            subprocess.run(
+                [sys.executable, "-c", export_script, json_path, png_path],
+                check=True,
+                capture_output=True,
+                timeout=REPORT_IMAGE_EXPORT_TIMEOUT_SECONDS,
+            )
+            with open(png_path, "rb") as f:
+                image_bytes = f.read()
         return f"data:image/png;base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    except subprocess.TimeoutExpired:
+        print(
+            f"[REPORT][FIG] pio.to_image timeout after {REPORT_IMAGE_EXPORT_TIMEOUT_SECONDS}s; skip this figure"
+        )
+        return None
     except Exception as exc:
         print("[REPORT][FIG] pio.to_image failed:", repr(exc))
         return None
+
+
+def _get_report_figure_data_uri_cache() -> dict[str, str]:
+    cache = st.session_state.get(REPORT_FIGURE_DATA_URI_CACHE_KEY)
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state[REPORT_FIGURE_DATA_URI_CACHE_KEY] = cache
+    return cache
+
+
+def _build_figure_cache_key(fig_index: int, fig: go.Figure) -> str:
+    try:
+        fig_json = fig.to_json()
+    except Exception:
+        fig_json = str(fig.to_plotly_json())
+    digest = hashlib.sha256(fig_json.encode("utf-8", errors="ignore")).hexdigest()
+    return f"{fig_index}:{digest}"
+
+
+def _get_cached_figure_data_uri(
+    fig_index: int,
+    fig: go.Figure,
+    image_uri_cache: dict[str, str],
+) -> str | None:
+    cache_key = _build_figure_cache_key(fig_index, fig)
+    image_uri = image_uri_cache.get(cache_key)
+    if image_uri:
+        return image_uri
+
+    image_uri = _figure_to_data_uri(fig)
+    if not image_uri:
+        return None
+
+    image_uri_cache[cache_key] = image_uri
+    return image_uri
+
+
+def _prune_stale_figure_cache_entries(
+    fig_desc_list: list[Any],
+    fig_indices: list[int],
+    image_uri_cache: dict[str, str],
+) -> None:
+    if not image_uri_cache or not fig_indices:
+        return
+
+    for fig_index in fig_indices:
+        prefix = f"{fig_index}:"
+        stale_keys = [key for key in image_uri_cache if key.startswith(prefix)]
+
+        current_key = ""
+        if 0 <= fig_index < len(fig_desc_list):
+            fig_item = fig_desc_list[fig_index]
+            fig = _normalize_visual_figure(fig_item.get("fig") if isinstance(fig_item, dict) else fig_item)
+            if fig is not None:
+                current_key = _build_figure_cache_key(fig_index, fig)
+
+        for cache_key in stale_keys:
+            if cache_key != current_key:
+                image_uri_cache.pop(cache_key, None)
 
 
 def _normalize_report_figure_layout(final_html: str) -> str:
@@ -369,77 +501,96 @@ def _normalize_report_figure_layout(final_html: str) -> str:
         if not figure_blocks:
             continue
 
-        new_nodes: list[Tag] = []
-        text_fragments: list[str] = []
+        before_blocks: list[Tag] = []
+        after_blocks: list[Tag] = []
+        total_text = _paragraph_text_without_figure_blocks(paragraph)
 
-        def flush_text_fragments() -> None:
-            text = re.sub(r"\s+", " ", "".join(text_fragments)).strip()
-            text_fragments.clear()
-            if not text:
-                return
+        for figure_block in figure_blocks:
+            text_before = _paragraph_text_before_node(paragraph, figure_block)
+            target_blocks = (
+                before_blocks
+                if _should_place_figure_before_paragraph(total_text, len(text_before))
+                else after_blocks
+            )
+            target_blocks.append(figure_block.extract())
 
-            paragraph_tag = soup.new_tag("p")
-            for attr_name, attr_value in paragraph.attrs.items():
-                paragraph_tag[attr_name] = attr_value
-            paragraph_tag.string = text
-            new_nodes.append(paragraph_tag)
-
-        def walk(node: Tag | NavigableString) -> None:
-            if isinstance(node, NavigableString):
-                text_fragments.append(str(node))
-                return
-
-            if not isinstance(node, Tag):
-                return
-
-            if is_figure_block(node):
-                flush_text_fragments()
-                new_nodes.append(node.extract())
-                return
-
-            if node.name in {"script", "style", "noscript"}:
-                return
-
-            if node.name == "br":
-                text_fragments.append("\n")
-                return
-
-            for child in list(node.children):
-                walk(child)
-
-        for child in list(paragraph.children):
-            walk(child)
-
-        flush_text_fragments()
-
-        if not new_nodes:
-            paragraph.decompose()
+        paragraph_text = _clean_paragraph_text(paragraph.get_text(" ", strip=True))
+        if paragraph_text:
+            paragraph.clear()
+            paragraph.string = paragraph_text
+            for block in before_blocks:
+                paragraph.insert_before(block)
+            current_node: Tag = paragraph
+            for block in after_blocks:
+                current_node.insert_after(block)
+                current_node = block
         else:
-            first_node = new_nodes[0]
-            paragraph.replace_with(first_node)
-            current_node = first_node
-            for node in new_nodes[1:]:
-                current_node.insert_after(node)
-                current_node = node
+            ordered_blocks = before_blocks + after_blocks
+            if ordered_blocks:
+                first_node = ordered_blocks[0]
+                paragraph.replace_with(first_node)
+                current_node = first_node
+                for block in ordered_blocks[1:]:
+                    current_node.insert_after(block)
+                    current_node = block
+            else:
+                paragraph.decompose()
         changed = True
 
     return str(soup) if changed else final_html
+
+
+def _clean_paragraph_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    text = re.sub(r"\s+([,.;:!?，。；：！？、])", r"\1", text)
+    text = re.sub(r"([（(【\[])\s+", r"\1", text)
+    text = re.sub(r"\s+([）)】\]])", r"\1", text)
+    return text.strip()
+
+
+def _text_length_for_figure_position(text: str) -> int:
+    return len(re.sub(r"\s+", "", str(text or "")))
+
+
+def _should_place_figure_before_paragraph(
+    paragraph_text: str,
+    raw_offset: int,
+    raw_end: int | None = None,
+) -> bool:
+    before_len = _text_length_for_figure_position(paragraph_text[:raw_offset])
+    after_start = raw_offset if raw_end is None else raw_end
+    after_len = _text_length_for_figure_position(paragraph_text[after_start:])
+    return before_len <= after_len
+
+
+def _paragraph_text_without_figure_blocks(paragraph: Tag) -> str:
+    text_parts: list[str] = []
+    for text_node in paragraph.find_all(string=True):
+        if text_node.find_parent("div", class_="report-figure-block") is not None:
+            continue
+        text_parts.append(str(text_node))
+    return "".join(text_parts)
+
+
+def _paragraph_text_before_node(paragraph: Tag, target: Tag) -> str:
+    text_parts: list[str] = []
+    for descendant in paragraph.descendants:
+        if descendant is target:
+            break
+        if isinstance(descendant, NavigableString):
+            if descendant.find_parent("div", class_="report-figure-block") is not None:
+                continue
+            text_parts.append(str(descendant))
+    return "".join(text_parts)
 
 
 def _resolve_placeholder_figure_index(raw_index: int, fig_count: int, prefer_one_based: bool) -> int | None:
     if fig_count <= 0:
         return None
 
-    candidates = [raw_index - 1, raw_index] if prefer_one_based else [raw_index, raw_index - 1]
-    seen: set[int] = set()
-
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        if 0 <= candidate < fig_count:
-            return candidate
-
+    candidate = raw_index - 1 if prefer_one_based else raw_index
+    if 0 <= candidate < fig_count:
+        return candidate
     return None
 
 
@@ -449,7 +600,7 @@ def _build_figure_block_tag(
     title_items: list[str],
     fig_index: int,
     display_number: int,
-    image_uri_cache: dict[int, str],
+    image_uri_cache: dict[str, str],
 ) -> Tag | None:
     if fig_index < 0 or fig_index >= len(fig_desc_list):
         print(f"[REPORT][FIG] fig index out of range: {fig_index}")
@@ -461,13 +612,10 @@ def _build_figure_block_tag(
         print(f"[REPORT][FIG] fig at index {fig_index} cannot be normalized")
         return None
 
-    image_uri = image_uri_cache.get(fig_index)
+    image_uri = _get_cached_figure_data_uri(fig_index, fig, image_uri_cache)
     if not image_uri:
-        image_uri = _figure_to_data_uri(fig)
-        if not image_uri:
-            print(f"[REPORT][FIG] fig at index {fig_index} cannot convert to image")
-            return None
-        image_uri_cache[fig_index] = image_uri
+        print(f"[REPORT][FIG] fig at index {fig_index} cannot convert to image")
+        return None
 
     caption_text = _build_figure_caption(display_number, fig_index, title_items)
 
@@ -494,14 +642,145 @@ def _build_figure_block_tag(
     return block
 
 
+def _replace_paragraph_placeholders_at_boundaries(
+    soup: BeautifulSoup,
+    fig_desc_list: list[Any],
+    title_items: list[str],
+    prefer_one_based: bool,
+    image_uri_cache: dict[str, str],
+    inserted_fig_indices: set[int],
+) -> int:
+    inserted_count = 0
+
+    for paragraph in list(soup.find_all("p")):
+        if paragraph.find_parent("div", class_="report-figure-block") is not None:
+            continue
+
+        text_nodes = [
+            text_node
+            for text_node in paragraph.find_all(string=True)
+            if text_node.parent is not None
+            and text_node.parent.name not in {"script", "style", "noscript"}
+            and text_node.find_parent("div", class_="report-figure-block") is None
+        ]
+        if not text_nodes:
+            continue
+
+        paragraph_text = "".join(str(text_node) for text_node in text_nodes)
+        if not re.search(FIG_PLACEHOLDER_CAPTURE_PATTERN, paragraph_text, flags=re.IGNORECASE):
+            continue
+
+        before_blocks: list[Tag] = []
+        after_blocks: list[Tag] = []
+        valid_ranges_by_node: list[tuple[NavigableString, list[tuple[int, int]]]] = []
+        offset = 0
+
+        for text_node in text_nodes:
+            text = str(text_node)
+            valid_ranges: list[tuple[int, int]] = []
+
+            for match in re.finditer(FIG_PLACEHOLDER_CAPTURE_PATTERN, text, flags=re.IGNORECASE):
+                try:
+                    raw_index = int(match.group(1))
+                except Exception:
+                    continue
+
+                fig_index = _resolve_placeholder_figure_index(raw_index, len(fig_desc_list), prefer_one_based)
+                if fig_index is None:
+                    continue
+
+                valid_ranges.append((match.start(), match.end()))
+                if fig_index in inserted_fig_indices:
+                    continue
+
+                figure_block = _build_figure_block_tag(
+                    soup=soup,
+                    fig_desc_list=fig_desc_list,
+                    title_items=title_items,
+                    fig_index=fig_index,
+                    display_number=0,
+                    image_uri_cache=image_uri_cache,
+                )
+                if figure_block is None:
+                    continue
+
+                inserted_fig_indices.add(fig_index)
+
+                target_blocks = (
+                    before_blocks
+                    if _should_place_figure_before_paragraph(
+                        paragraph_text,
+                        offset + match.start(),
+                        offset + match.end(),
+                    )
+                    else after_blocks
+                )
+                target_blocks.append(figure_block)
+                inserted_count += 1
+
+            if valid_ranges:
+                valid_ranges_by_node.append((text_node, valid_ranges))
+            offset += len(text)
+
+        if not valid_ranges_by_node:
+            continue
+
+        for text_node, ranges in valid_ranges_by_node:
+            text = str(text_node)
+            pieces: list[str] = []
+            last_end = 0
+            for start, end in ranges:
+                pieces.append(text[last_end:start])
+                last_end = end
+            pieces.append(text[last_end:])
+
+            replacement_text = "".join(pieces)
+            if replacement_text:
+                text_node.replace_with(NavigableString(replacement_text))
+            else:
+                text_node.extract()
+
+        paragraph_text_after_removal = _clean_paragraph_text(paragraph.get_text(" ", strip=True))
+        if paragraph_text_after_removal:
+            paragraph.clear()
+            paragraph.string = paragraph_text_after_removal
+            for block in before_blocks:
+                paragraph.insert_before(block)
+            current_node: Tag = paragraph
+            for block in after_blocks:
+                current_node.insert_after(block)
+                current_node = block
+        else:
+            ordered_blocks = before_blocks + after_blocks
+            if ordered_blocks:
+                first_node = ordered_blocks[0]
+                paragraph.replace_with(first_node)
+                current_node = first_node
+                for block in ordered_blocks[1:]:
+                    current_node.insert_after(block)
+                    current_node = block
+            else:
+                paragraph.decompose()
+
+    return inserted_count
+
+
 def _replace_remaining_placeholders_in_soup(
     soup: BeautifulSoup,
     fig_desc_list: list[Any],
     title_items: list[str],
     prefer_one_based: bool,
-    image_uri_cache: dict[int, str],
+    image_uri_cache: dict[str, str],
+    inserted_fig_indices: set[int],
 ) -> int:
-    inserted_count = 0
+    inserted_count = _replace_paragraph_placeholders_at_boundaries(
+        soup=soup,
+        fig_desc_list=fig_desc_list,
+        title_items=title_items,
+        prefer_one_based=prefer_one_based,
+        image_uri_cache=image_uri_cache,
+        inserted_fig_indices=inserted_fig_indices,
+    )
     text_nodes = list(soup.find_all(string=True))
 
     for text_node in text_nodes:
@@ -509,6 +788,8 @@ def _replace_remaining_placeholders_in_soup(
         if not isinstance(parent, Tag):
             continue
         if parent.name in {"script", "style", "noscript"}:
+            continue
+        if parent.find_parent("p") is not None or parent.name == "p":
             continue
         if parent.find_parent("div", class_="report-figure-block") is not None:
             continue
@@ -539,6 +820,10 @@ def _replace_remaining_placeholders_in_soup(
                 last_end = match.end()
                 continue
 
+            if fig_index in inserted_fig_indices:
+                last_end = match.end()
+                continue
+
             figure_block = _build_figure_block_tag(
                 soup=soup,
                 fig_desc_list=fig_desc_list,
@@ -550,6 +835,7 @@ def _replace_remaining_placeholders_in_soup(
             if figure_block is None:
                 replacement_nodes.append(NavigableString(match.group(0)))
             else:
+                inserted_fig_indices.add(fig_index)
                 replacement_nodes.append(figure_block)
                 inserted_count += 1
 
@@ -606,7 +892,14 @@ def _renumber_report_figure_blocks(final_html: str, title_items: list[str]) -> s
 
     soup = BeautifulSoup(final_html, "html.parser")
 
-    for display_number, figure_block in enumerate(soup.find_all("div", class_="report-figure-block"), start=1):
+    display_number = 0
+    for figure_block in list(soup.find_all("div", class_="report-figure-block")):
+        image_tag = figure_block.find("img")
+        if image_tag is None or not str(image_tag.get("src") or "").strip():
+            figure_block.decompose()
+            continue
+
+        display_number += 1
         raw_fig_index = figure_block.get("data-fig-index", "")
         try:
             fig_index = int(raw_fig_index)
@@ -614,10 +907,7 @@ def _renumber_report_figure_blocks(final_html: str, title_items: list[str]) -> s
             fig_index = -1
 
         figure_block["data-report-figure-number"] = str(display_number)
-
-        image_tag = figure_block.find("img")
-        if image_tag is not None:
-            image_tag["alt"] = f"Figure {display_number}"
+        image_tag["alt"] = f"Figure {display_number}"
 
         caption_tag = figure_block.find("div", class_="report-figure-caption")
         if caption_tag is None:
@@ -653,7 +943,19 @@ def _inject_visualizations_into_html(final_html: str) -> str:
     prefer_one_based = bool(match_numbers) and 0 not in match_numbers and max(match_numbers) <= len(fig_desc_list)
     print("[REPORT][FIG] placeholder numbering mode =", "1-based" if prefer_one_based else "0-based")
 
-    image_uri_cache: dict[int, str] = {}
+    valid_unique_fig_indices: list[int] = []
+    seen_fig_indices: set[int] = set()
+    for raw_number in match_numbers:
+        fig_index = _resolve_placeholder_figure_index(raw_number, len(fig_desc_list), prefer_one_based)
+        if fig_index is None or fig_index in seen_fig_indices:
+            continue
+        seen_fig_indices.add(fig_index)
+        valid_unique_fig_indices.append(fig_index)
+    print("[REPORT][FIG] valid unique figure refs =", valid_unique_fig_indices)
+
+    image_uri_cache = _get_report_figure_data_uri_cache()
+    _prune_stale_figure_cache_entries(fig_desc_list, valid_unique_fig_indices, image_uri_cache)
+    inserted_fig_indices: set[int] = set()
     soup = BeautifulSoup(final_html, "html.parser")
     inserted_figure_count = _replace_remaining_placeholders_in_soup(
         soup=soup,
@@ -661,11 +963,12 @@ def _inject_visualizations_into_html(final_html: str) -> str:
         title_items=title_items,
         prefer_one_based=prefer_one_based,
         image_uri_cache=image_uri_cache,
+        inserted_fig_indices=inserted_fig_indices,
     )
     injected_html = str(soup)
     injected_html = _normalize_report_figure_layout(injected_html)
-    injected_html = _renumber_report_figure_blocks(injected_html, title_items)
     injected_html = _remove_duplicate_figure_titles(injected_html)
+    injected_html = _renumber_report_figure_blocks(injected_html, title_items)
     injected_html = re.sub(FIG_PLACEHOLDER_PATTERN, "", injected_html, flags=re.IGNORECASE)
     print("[REPORT][FIG] inserted figure count =", inserted_figure_count)
     return injected_html
@@ -1210,7 +1513,7 @@ def _inject_report_title_into_html(final_html: str, report_title: str) -> str:
     return title_html + final_html
 
 
-def _prepare_downloadable_reports(report_agent) -> dict[str, Any]:
+def _prepare_downloadable_reports(report_agent, generation_token: str | None = None) -> dict[str, Any]:
     workflow_result = report_agent.load_report_workflow_result()
     html_content = report_agent.load_html()
     markdown_content = report_agent.load_markdown()
@@ -1218,7 +1521,10 @@ def _prepare_downloadable_reports(report_agent) -> dict[str, Any]:
     pdf_bytes = report_agent.load_pdf()
     pdf_export_method = report_agent.load_pdf_export_method()
 
-    if workflow_result:
+    def can_save_prepared_output() -> bool:
+        return generation_token is None or _is_current_report_generation(generation_token)
+
+    if workflow_result and not html_content:
         raw_content = extract_report_html(workflow_result)
         if raw_content:
             raw_content = raw_content.strip()
@@ -1237,9 +1543,12 @@ def _prepare_downloadable_reports(report_agent) -> dict[str, Any]:
             html_content = _finalize_report_html(html_content, report_title)
             markdown_content = html_to_markdown(html_content) if html_content else markdown_content
 
-            report_agent.save_html(html_content)
-            if markdown_content:
+            if can_save_prepared_output():
+                report_agent.save_html(html_content)
+            if markdown_content and can_save_prepared_output():
                 report_agent.save_markdown(markdown_content)
+            if can_save_prepared_output():
+                st.session_state.report_final_html = html_content
 
     if not markdown_content:
         if html_content:
@@ -1247,7 +1556,7 @@ def _prepare_downloadable_reports(report_agent) -> dict[str, Any]:
         elif workflow_result:
             markdown_content = extract_report_markdown(workflow_result) or extract_report_text(workflow_result)
 
-        if markdown_content:
+        if markdown_content and can_save_prepared_output():
             report_agent.save_markdown(markdown_content)
 
     def _count_docx_media_files(docx_content: bytes | None) -> int:
@@ -1259,7 +1568,7 @@ def _prepare_downloadable_reports(report_agent) -> dict[str, Any]:
         except Exception:
             return 0
 
-    if html_content:
+    if html_content and word_bytes is None:
         try:
             word_bytes = build_docx_from_html(html_content)
         except Exception as exc:
@@ -1268,7 +1577,7 @@ def _prepare_downloadable_reports(report_agent) -> dict[str, Any]:
 
     html_image_count = len(re.findall(r"<img\b", html_content or "", flags=re.IGNORECASE))
     docx_media_count = _count_docx_media_files(word_bytes)
-    if word_bytes is not None and html_image_count > 0 and docx_media_count < html_image_count:
+    if report_agent.load_word() is None and word_bytes is not None and html_image_count > 0 and docx_media_count < html_image_count:
         print(
             f"[REPORT][WORD] docx embedded media count mismatch: html_images={html_image_count}, docx_media={docx_media_count}; retry with markdown fallback"
         )
@@ -1284,13 +1593,13 @@ def _prepare_downloadable_reports(report_agent) -> dict[str, Any]:
     if word_bytes is None and workflow_result:
         word_bytes = extract_report_word_bytes(workflow_result)
 
-    if word_bytes is not None:
+    if word_bytes is not None and can_save_prepared_output():
         print(
             f"[REPORT][WORD] final media count = {_count_docx_media_files(word_bytes)}, html_image_count = {html_image_count}"
         )
         report_agent.save_word(word_bytes)
 
-    if pdf_bytes is not None:
+    if pdf_bytes is not None and can_save_prepared_output():
         report_agent.save_pdf(pdf_bytes)
         report_agent.save_pdf_export_method(pdf_export_method)
 
@@ -1363,6 +1672,88 @@ def _build_markdown_preview(markdown_text: str) -> str:
     return preview
 
 
+def _render_report_preview(html_content: str, markdown_content: str) -> None:
+    if (html_content or "").strip():
+        components.html(html_content, height=720, scrolling=True)
+        return
+
+    if (markdown_content or "").strip():
+        st.markdown(_build_markdown_preview(markdown_content))
+
+
+def _insert_dim_preview_style(html_content: str) -> str:
+    style_block = """
+<style>
+html, body {
+  opacity: 0.42 !important;
+  filter: grayscale(0.15) !important;
+  pointer-events: none !important;
+}
+</style>
+"""
+    head_match = re.search(r"</head\s*>", html_content or "", flags=re.IGNORECASE)
+    if head_match:
+        insert_at = head_match.start()
+        return html_content[:insert_at] + style_block + html_content[insert_at:]
+    return style_block + (html_content or "")
+
+
+def _capture_pending_report_preview(report_agent) -> None:
+    existing_preview = st.session_state.get(REPORT_PENDING_PREVIEW_KEY)
+    html_content = stringify_string(
+        report_agent.load_html()
+        or st.session_state.get("report_final_html")
+        or ""
+    )
+    markdown_content = stringify_string(
+        report_agent.load_markdown()
+        or report_agent.load_report_content()
+        or ""
+    )
+
+    if not html_content and not markdown_content:
+        workflow_result = report_agent.load_report_workflow_result()
+        raw_content = extract_report_html(workflow_result) if workflow_result else ""
+        raw_content = stringify_string(raw_content).strip()
+        if raw_content:
+            if _looks_like_html(raw_content):
+                html_content = raw_content
+            else:
+                markdown_content = raw_content
+
+    if html_content or markdown_content:
+        st.session_state[REPORT_PENDING_PREVIEW_KEY] = {
+            "html": html_content,
+            "markdown": markdown_content,
+        }
+    elif isinstance(existing_preview, dict) and (
+        existing_preview.get("html") or existing_preview.get("markdown")
+    ):
+        st.session_state[REPORT_PENDING_PREVIEW_KEY] = existing_preview
+    else:
+        st.session_state.pop(REPORT_PENDING_PREVIEW_KEY, None)
+
+
+def _clear_pending_report_preview() -> None:
+    st.session_state.pop(REPORT_PENDING_PREVIEW_KEY, None)
+
+
+def _render_pending_report_preview() -> None:
+    preview = st.session_state.get(REPORT_PENDING_PREVIEW_KEY)
+    if not isinstance(preview, dict):
+        return
+
+    html_content = stringify_string(preview.get("html")).strip()
+    markdown_content = stringify_string(preview.get("markdown")).strip()
+    if html_content:
+        components.html(_insert_dim_preview_style(html_content), height=720, scrolling=True)
+        return
+
+    if markdown_content:
+        preview_html = markdown_to_html(_build_markdown_preview(markdown_content), title="")
+        components.html(_insert_dim_preview_style(preview_html), height=720, scrolling=True)
+
+
 def _describe_pdf_export_method(pdf_export_method: str | None) -> str | None:
     if not pdf_export_method:
         return None
@@ -1394,6 +1785,7 @@ def _clear_generated_report_files(report_agent) -> None:
 
 def _clear_report_workflow_outputs(report_agent) -> None:
     _clear_generated_report_files(report_agent)
+    _clear_pending_report_preview()
     report_agent.save_report_workflow_result(None)
     report_agent.save_report(None)
     report_agent.save_report_content(None)
@@ -1416,6 +1808,35 @@ def _save_report_workflow_outputs(report_agent, workflow_result: dict[str, Any])
     for field_name in REPORT_WORKFLOW_OUTPUT_FIELDS:
         st.session_state[f"report_{field_name}"] = extracted_outputs.get(field_name)
     st.session_state.report_preference_selected = extracted_outputs.get("preference_selected")
+
+
+def _clear_active_report_outputs(report_agent) -> None:
+    _clear_generated_report_files(report_agent)
+    report_agent.save_report_workflow_result(None)
+    report_agent.save_report(None)
+    report_agent.save_report_content(None)
+
+
+def _begin_report_generation(report_agent) -> str:
+    generation_token = str(time.time_ns())
+    st.session_state[REPORT_GENERATION_TOKEN_KEY] = generation_token
+    st.session_state[REPORT_GENERATION_RUNNING_KEY] = True
+    _capture_pending_report_preview(report_agent)
+    _clear_active_report_outputs(report_agent)
+    return generation_token
+
+
+def _is_current_report_generation(generation_token: str | None) -> bool:
+    return bool(generation_token) and st.session_state.get(REPORT_GENERATION_TOKEN_KEY) == generation_token
+
+
+def _is_report_generation_cancelled(generation_token: str | None) -> bool:
+    return not _is_current_report_generation(generation_token)
+
+
+def _finish_report_generation(generation_token: str | None) -> None:
+    if _is_current_report_generation(generation_token):
+        st.session_state[REPORT_GENERATION_RUNNING_KEY] = False
 
 
 def _complete_auto_report(report_agent) -> None:
@@ -1578,10 +1999,14 @@ def _build_word_report_inputs(report_agent) -> dict[str, Any]:
     if not current_coding_abstract:
         current_coding_abstract = stringify_string(st.session_state.get("report_coding_abstract"))
 
+    current_selected_full_content = stringify_string(
+        st.session_state.get("full") or st.session_state.get("report_selected_full_conten")
+    )
+
     return {
         "toc_text": _normalize_multiline_text(report_agent.load_outline()),
         "title": "",
-        "selected_full_conten": stringify_string(st.session_state.get("report_selected_full_conten")),
+        "selected_full_conten": current_selected_full_content,
         "preference_selected": stringify_string(st.session_state.get("report_preference_selected")),
         "add_preference": stringify_string(st.session_state.get("report_add_preference")),
         "load_abstract": stringify_string(st.session_state.get("report_load_abstract")),
@@ -1589,6 +2014,296 @@ def _build_word_report_inputs(report_agent) -> dict[str, Any]:
         "visual_abstract": stringify_string(st.session_state.get("report_visual_abstract")),
         "coding_abstract": current_coding_abstract,
     }
+
+
+def _report_repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _get_report_worker_ref_context(inputs: dict[str, Any]) -> str:
+    retriever = st.session_state.get("ref_retriever")
+    if retriever is None:
+        return ""
+
+    is_empty = getattr(retriever, "is_empty", False)
+    if callable(is_empty):
+        try:
+            is_empty = is_empty()
+        except Exception:
+            is_empty = False
+    if is_empty:
+        return ""
+
+    try:
+        return retriever.retrieve_and_format(
+            f"报告撰写 业务背景 {inputs.get('add_preference', '')}",
+            top_k=3,
+        )
+    except Exception as exc:
+        print("[REPORT][JOB] reference retrieval failed:", repr(exc))
+        return ""
+
+
+def _build_report_worker_payload(report_agent) -> dict[str, Any]:
+    inputs = _build_word_report_inputs(report_agent)
+    inputs.setdefault("add_preference", st.session_state.get("add_preference") or "")
+    inputs.setdefault("preference_select", st.session_state.get("preference_selected") or "")
+    inputs["ref_context"] = _get_report_worker_ref_context(inputs)
+
+    return {
+        "inputs": inputs,
+        "llm_config": {
+            "api_key": st.session_state.get("llm_api_key") or os.getenv("OPENAI_API_KEY", ""),
+            "base_url": st.session_state.get("llm_base_url") or os.getenv("OPENAI_BASE_URL", ""),
+            "model": st.session_state.get("llm_model") or os.getenv("OPENAI_MODEL", ""),
+        },
+    }
+
+
+def _cleanup_report_job_files(job: dict[str, Any] | None) -> None:
+    if not isinstance(job, dict):
+        return
+
+    work_dir = job.get("work_dir")
+    if not work_dir:
+        return
+
+    try:
+        work_path = Path(str(work_dir)).resolve()
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        if temp_root not in (work_path, *work_path.parents):
+            print("[REPORT][JOB] skip cleanup outside temp dir:", work_path)
+            return
+        if not work_path.name.startswith("autostat_report_"):
+            print("[REPORT][JOB] skip cleanup for unexpected temp dir:", work_path)
+            return
+        shutil.rmtree(work_path, ignore_errors=True)
+    except Exception as exc:
+        print("[REPORT][JOB] cleanup failed:", repr(exc))
+
+
+def _terminate_report_generation_process() -> None:
+    job = st.session_state.get(REPORT_GENERATION_JOB_KEY)
+    process = st.session_state.get(REPORT_GENERATION_PROCESS_KEY)
+    if process is None and isinstance(job, dict):
+        process = job.get("process")
+
+    poll = getattr(process, "poll", None)
+    if callable(poll):
+        try:
+            if process.poll() is None:
+                print(f"[REPORT][JOB] terminate previous report process pid={getattr(process, 'pid', None)}")
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+        except Exception as exc:
+            print("[REPORT][JOB] terminate failed:", repr(exc))
+
+    if isinstance(job, dict):
+        _cleanup_report_job_files(job)
+        token = job.get("token")
+        if token and _is_current_report_generation(token):
+            st.session_state[REPORT_GENERATION_RUNNING_KEY] = False
+
+    st.session_state.pop(REPORT_GENERATION_PROCESS_KEY, None)
+    st.session_state.pop(REPORT_GENERATION_JOB_KEY, None)
+
+
+def _start_report_generation_process(report_agent, action: str) -> bool:
+    _terminate_report_generation_process()
+    generation_token = _begin_report_generation(report_agent)
+
+    work_dir = tempfile.mkdtemp(prefix="autostat_report_")
+    input_path = os.path.join(work_dir, "input.json")
+    output_path = os.path.join(work_dir, "output.json")
+    payload = _build_report_worker_payload(report_agent)
+
+    try:
+        with open(input_path, "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False)
+
+        env = os.environ.copy()
+        llm_config = payload.get("llm_config") if isinstance(payload.get("llm_config"), dict) else {}
+        if llm_config.get("api_key"):
+            env["OPENAI_API_KEY"] = str(llm_config["api_key"])
+        if llm_config.get("base_url"):
+            env["OPENAI_BASE_URL"] = str(llm_config["base_url"])
+        if llm_config.get("model"):
+            env["OPENAI_MODEL"] = str(llm_config["model"])
+
+        process = subprocess.Popen(
+            [sys.executable, "-m", "workflows.reporting_partly_worker", input_path, output_path],
+            cwd=str(_report_repo_root()),
+            env=env,
+        )
+    except Exception as exc:
+        _cleanup_report_job_files({"work_dir": work_dir})
+        _finish_report_generation(generation_token)
+        st.error(f"报告生成进程启动失败：{exc}")
+        return False
+
+    job = {
+        "token": generation_token,
+        "action": action,
+        "work_dir": work_dir,
+        "input_path": input_path,
+        "output_path": output_path,
+        "pid": process.pid,
+        "started_at": time.time(),
+        "process": process,
+    }
+    st.session_state[REPORT_GENERATION_PROCESS_KEY] = process
+    st.session_state[REPORT_GENERATION_JOB_KEY] = job
+    st.session_state[REPORT_GENERATION_RUNNING_KEY] = True
+    print(f"[REPORT][JOB] started report process pid={process.pid}")
+    return True
+
+
+def _read_report_worker_output(job: dict[str, Any]) -> dict[str, Any] | None:
+    output_path = job.get("output_path")
+    if not output_path or not os.path.exists(str(output_path)):
+        return None
+    try:
+        with open(str(output_path), "r", encoding="utf-8") as file:
+            payload = json.load(file)
+        return payload if isinstance(payload, dict) else None
+    except Exception as exc:
+        return {"ok": False, "error": f"报告生成结果读取失败：{exc}"}
+
+
+def _save_formatted_report_result(
+    report_agent,
+    action: str,
+    workflow_result: dict[str, Any],
+    generation_token: str | None,
+) -> bool:
+    status_placeholder = st.empty()
+    raw_content = extract_report_html(workflow_result)
+    if not raw_content:
+        status_placeholder.empty()
+        st.error("Word 报告工作流未返回 `final_html`。")
+        return False
+
+    raw_content = raw_content.strip()
+    report_title = _extract_report_title(workflow_result)
+    if report_title and _is_current_report_generation(generation_token):
+        st.session_state.report_title = report_title
+
+    if _looks_like_html(raw_content):
+        html_content = raw_content
+        markdown_content = html_to_markdown(html_content)
+    else:
+        markdown_content = raw_content
+        markdown_content = _deduplicate_report_html_blocks(markdown_content)
+        html_content = markdown_to_html(markdown_content, title="")
+
+    if _is_report_generation_cancelled(generation_token):
+        return False
+
+    html_content = _finalize_report_html(html_content, report_title)
+    markdown_content = html_to_markdown(html_content) if html_content else markdown_content
+
+    if _is_report_generation_cancelled(generation_token):
+        return False
+
+    _clear_generated_report_files(report_agent)
+
+    if _is_report_generation_cancelled(generation_token):
+        return False
+
+    report_agent.save_report_workflow_result(workflow_result)
+    report_agent.save_report(workflow_result)
+    report_agent.save_report_content(markdown_content)
+    report_agent.save_markdown(markdown_content)
+    report_agent.save_html(html_content)
+
+    status_placeholder.info("正在生成报告文件，请稍后。")
+    downloadable_reports = _prepare_downloadable_reports(report_agent, generation_token=generation_token)
+
+    if _is_report_generation_cancelled(generation_token):
+        return False
+
+    if action == "Word" and downloadable_reports.get("word") is None:
+        status_placeholder.empty()
+        st.error("Word 报告内容已生成，但 Word 文件转换失败，请重试或切换为 HTML 报告。")
+        return False
+
+    st.session_state.report_final_html = html_content
+    _clear_pending_report_preview()
+    status_placeholder.empty()
+    return True
+
+
+def _poll_report_generation_job(report_agent, action: str) -> str:
+    job = st.session_state.get(REPORT_GENERATION_JOB_KEY)
+    if not isinstance(job, dict):
+        return "idle"
+
+    process = st.session_state.get(REPORT_GENERATION_PROCESS_KEY) or job.get("process")
+    poll = getattr(process, "poll", None)
+    token = job.get("token")
+    if not token or not _is_current_report_generation(token):
+        _terminate_report_generation_process()
+        return "idle"
+
+    if not callable(poll):
+        _cleanup_report_job_files(job)
+        st.session_state.pop(REPORT_GENERATION_PROCESS_KEY, None)
+        st.session_state.pop(REPORT_GENERATION_JOB_KEY, None)
+        _finish_report_generation(token)
+        st.error("报告生成进程状态丢失，请重新生成。")
+        return "failed"
+
+    return_code = process.poll()
+    if return_code is None:
+        st.info(f"正在生成{action}报告，请耐心等待")
+        st.session_state[REPORT_GENERATION_RUNNING_KEY] = True
+        return "running"
+
+    worker_payload = _read_report_worker_output(job)
+    _cleanup_report_job_files(job)
+    st.session_state.pop(REPORT_GENERATION_PROCESS_KEY, None)
+    st.session_state.pop(REPORT_GENERATION_JOB_KEY, None)
+
+    if _is_report_generation_cancelled(token):
+        return "idle"
+
+    if not worker_payload:
+        _finish_report_generation(token)
+        st.error(f"报告生成进程已退出（code={return_code}），但没有返回可用结果。")
+        return "failed"
+
+    if not worker_payload.get("ok"):
+        _finish_report_generation(token)
+        error_message = worker_payload.get("error") or "未知错误"
+        st.error(f"报告生成失败：{error_message}")
+        traceback_text = stringify_string(worker_payload.get("traceback"))
+        if traceback_text:
+            print("[REPORT][JOB] worker traceback:\n", traceback_text)
+        return "failed"
+
+    workflow_result = _merge_report_workflow_results([worker_payload.get("result")])
+    if workflow_result is None:
+        _finish_report_generation(token)
+        st.error("Word 报告生成失败，未解析到有效输出，请重新生成。")
+        return "failed"
+
+    success = _save_formatted_report_result(report_agent, action, workflow_result, token)
+    _finish_report_generation(token)
+    if success:
+        st.success(f"{action} 报告已生成，已在下方展示。")
+        return "complete"
+    return "failed"
+
+
+def _is_report_generation_job_running() -> bool:
+    job = st.session_state.get(REPORT_GENERATION_JOB_KEY)
+    process = st.session_state.get(REPORT_GENERATION_PROCESS_KEY)
+    poll = getattr(process, "poll", None)
+    return isinstance(job, dict) and callable(poll) and process.poll() is None
 
 
 def call_coze_workflow_report_stream(inputs: dict[str, Any]) -> dict[str, Any] | None:
@@ -1617,17 +2332,26 @@ def call_coze_workflow_report_stream(inputs: dict[str, Any]) -> dict[str, Any] |
     return None
 
 
-def call_coze_workflow_word_stream(inputs: dict[str, Any]) -> dict[str, Any] | None:
+def call_coze_workflow_word_stream(
+    inputs: dict[str, Any],
+    status_placeholder: Any | None = None,
+    clear_on_success: bool = True,
+    generation_token: str | None = None,
+) -> dict[str, Any] | None:
     """本地化版本：调用本地 Reporting_partly workflow。"""
     from utils.local_workflow_bridge import call_reporting_partly_bridge
 
-    status_placeholder = st.empty()
+    if status_placeholder is None:
+        status_placeholder = st.empty()
     status_placeholder.info("正在生成报告，请稍后。")
 
     inputs = dict(inputs)
     inputs.setdefault("add_preference", st.session_state.get("add_preference") or "")
     # report workflow 字段名是 preference_select
     inputs.setdefault("preference_select", st.session_state.get("preference_selected") or "")
+
+    if generation_token is not None:
+        inputs["_report_cancel_check"] = lambda: _is_report_generation_cancelled(generation_token)
 
     result = call_reporting_partly_bridge(inputs)
     if result is None:
@@ -1636,7 +2360,8 @@ def call_coze_workflow_word_stream(inputs: dict[str, Any]) -> dict[str, Any] | N
 
     merged_result = _merge_report_workflow_results([result])
     if merged_result is not None:
-        status_placeholder.empty()
+        if clear_on_success:
+            status_placeholder.empty()
         return merged_result
 
     status_placeholder.empty()
@@ -1645,18 +2370,35 @@ def call_coze_workflow_word_stream(inputs: dict[str, Any]) -> dict[str, Any] | N
 
 
 def _generate_formatted_report(report_agent, action: str) -> None:
-    workflow_result = call_coze_workflow_word_stream(_build_word_report_inputs(report_agent))
+    if _start_report_generation_process(report_agent, action):
+        st.info(f"正在生成{action}报告，请耐心等待")
+    return
+
+    generation_token = _begin_report_generation(report_agent)
+    status_placeholder = st.empty()
+    workflow_result = call_coze_workflow_word_stream(
+        _build_word_report_inputs(report_agent),
+        status_placeholder=status_placeholder,
+        clear_on_success=False,
+        generation_token=generation_token,
+    )
     if not workflow_result:
+        _finish_report_generation(generation_token)
+        return
+
+    if _is_report_generation_cancelled(generation_token):
         return
 
     raw_content = extract_report_html(workflow_result)
     if not raw_content:
+        status_placeholder.empty()
         st.error("Word 报告工作流未返回 `final_html`。")
+        _finish_report_generation(generation_token)
         return
 
     raw_content = raw_content.strip()
     report_title = _extract_report_title(workflow_result)
-    if report_title:
+    if report_title and _is_current_report_generation(generation_token):
         st.session_state.report_title = report_title
 
     if _looks_like_html(raw_content):
@@ -1667,10 +2409,19 @@ def _generate_formatted_report(report_agent, action: str) -> None:
         markdown_content = _deduplicate_report_html_blocks(markdown_content)
         html_content = markdown_to_html(markdown_content, title="")
 
+    if _is_report_generation_cancelled(generation_token):
+        return
+
     html_content = _finalize_report_html(html_content, report_title)
     markdown_content = html_to_markdown(html_content) if html_content else markdown_content
 
+    if _is_report_generation_cancelled(generation_token):
+        return
+
     _clear_generated_report_files(report_agent)
+
+    if _is_report_generation_cancelled(generation_token):
+        return
 
     report_agent.save_report_workflow_result(workflow_result)
     report_agent.save_report(workflow_result)
@@ -1678,9 +2429,23 @@ def _generate_formatted_report(report_agent, action: str) -> None:
     report_agent.save_markdown(markdown_content)
     report_agent.save_html(html_content)
 
-    _prepare_downloadable_reports(report_agent)
+    status_placeholder.info("正在生成报告，请稍后。")
+    downloadable_reports = _prepare_downloadable_reports(report_agent, generation_token=generation_token)
+
+    if _is_report_generation_cancelled(generation_token):
+        return
+
+    if action == "Word" and downloadable_reports.get("word") is None:
+        status_placeholder.empty()
+        st.error("Word 报告内容已生成，但 Word 文件转换失败，请重试或切换为 HTML 报告。")
+        _finish_report_generation(generation_token)
+        return
+
     st.session_state.report_final_html = html_content
+    _clear_pending_report_preview()
+    status_placeholder.empty()
     st.success(f"{action} 报告已生成，已在下侧展示。")
+    _finish_report_generation(generation_token)
     
 
 def _normalize_report_block_for_dedup(text: str) -> str:
@@ -1743,7 +2508,7 @@ def report_basic_info(load_agent, report_agent, auto: bool) -> None:
     )
     if auto:
         report_format = "Word"
-    report_agent.save_report_format(report_format)
+    report_agent.save_report_format(_normalize_report_format(report_format))
 
     user_input = st.text_input("报告生成要求", "默认")
     report_agent.save_user_input(user_input)
@@ -1777,7 +2542,7 @@ def report_basic_info(load_agent, report_agent, auto: bool) -> None:
         report_agent.save_outline(toc_text)
         if auto:
             st.rerun()
-        st.success("目录已生成，已在下侧显示目录文本。")
+        st.success("目录已生成，已在右侧显示文本。")
 
 
 def report_outline(report_agent) -> None:
@@ -1798,19 +2563,22 @@ def report_outline(report_agent) -> None:
 
 
 def report_save(report_agent, auto: bool) -> None:
-    action = report_agent.load_report_format()
+    action = _normalize_report_format(report_agent.load_report_format())
+    report_agent.save_report_format(action)
     visualization_agent = st.session_state.get("visualization_agent")
+    job_state = _poll_report_generation_job(report_agent, action)
 
     outline_generated = _has_generated_outline(report_agent)
     report_generated = _has_generated_word_report(report_agent)
-    not_generate = outline_generated and not report_generated
+    not_generate = outline_generated and not report_generated and job_state != "running"
 
     if auto and report_generated and not report_agent.finish_auto_task:
         _complete_auto_report(report_agent)
         st.rerun()
 
-    if st.button(f"生成 {action} 报告") or (auto and not_generate):
-        if st.session_state.get("report_selected_full_conten") is None:
+    generate_clicked = st.button(f"生成 {action} 报告")
+    if generate_clicked or (auto and not_generate):
+        if st.session_state.get("report_selected_full_conten") is None and st.session_state.get("full") is None:
             st.warning("请先点击“生成目录”获取新 workflow 输出。")
             return
 
@@ -1820,7 +2588,7 @@ def report_save(report_agent, auto: bool) -> None:
         _generate_formatted_report(report_agent, action)
 
         if auto:
-            current_action = report_agent.load_report_format()
+            current_action = _normalize_report_format(report_agent.load_report_format())
             generated = (
                 report_agent.load_html() is not None
                 if current_action in {"Word", "HTML", "PDF"}
@@ -1832,7 +2600,14 @@ def report_save(report_agent, auto: bool) -> None:
 
 
 def report_execution(report_agent) -> None:
-    action = report_agent.load_report_format()
+    action = _normalize_report_format(report_agent.load_report_format())
+    report_agent.save_report_format(action)
+    if _is_report_generation_job_running():
+        _render_pending_report_preview()
+        time.sleep(1)
+        st.rerun()
+        return
+
     downloadable_reports = _prepare_downloadable_reports(report_agent)
     if action == "PDF":
         downloadable_reports = _ensure_pdf_download_ready(report_agent, downloadable_reports)
@@ -1848,10 +2623,7 @@ def report_execution(report_agent) -> None:
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             disabled=downloadable_reports["word"] is None,
         )
-        if html_content:
-            components.html(html_content, height=720, scrolling=True)
-        elif markdown_content:
-            st.markdown(markdown_content)
+        _render_report_preview(html_content, markdown_content)
         return
 
     if action == "HTML":
@@ -1862,10 +2634,7 @@ def report_execution(report_agent) -> None:
             mime="text/html",
             disabled=not bool(html_content),
         )
-        if html_content:
-            components.html(html_content, height=720, scrolling=True)
-        elif markdown_content:
-            st.markdown(markdown_content)
+        _render_report_preview(html_content, markdown_content)
         return
 
     if action == "PDF":
@@ -1877,10 +2646,10 @@ def report_execution(report_agent) -> None:
             disabled=downloadable_reports["pdf"] is None,
         )
 
-        if html_content:
-            components.html(html_content, height=720, scrolling=True)
-        elif markdown_content:
-            st.markdown(markdown_content)
+        _render_report_preview(html_content, markdown_content)
+        return
+
+    _render_report_preview(html_content, markdown_content)
             
 
 if __name__ == "__main__":

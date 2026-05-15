@@ -792,6 +792,36 @@ def run_app():
             }
             _PRESET_NAMES = list(_PRESETS.keys())
 
+            def _clean_llm_value(value) -> str:
+                return str(value or "").strip()
+
+            def _make_llm_signature(provider, api_key, base_url, model_name) -> tuple[str, str, str, str]:
+                return (
+                    _clean_llm_value(provider),
+                    _clean_llm_value(api_key),
+                    _clean_llm_value(base_url),
+                    _clean_llm_value(model_name),
+                )
+
+            def _sync_llm_env(api_key: str, base_url: str, model_name: str) -> None:
+                env_values = {
+                    "OPENAI_API_KEY": api_key,
+                    "OPENAI_BASE_URL": base_url,
+                    "OPENAI_MODEL": model_name,
+                }
+                for env_key, env_value in env_values.items():
+                    if env_value:
+                        os.environ[env_key] = env_value
+                    else:
+                        os.environ.pop(env_key, None)
+
+            def _reset_llm_runtime() -> None:
+                try:
+                    from core.llm_client import LLMClient
+                    LLMClient._instance = None
+                except Exception:
+                    pass
+
             # ---- session 初始化 ----
             if "llm_provider" not in st.session_state:
                 st.session_state.llm_provider = "自定义"
@@ -802,7 +832,31 @@ def run_app():
             if "llm_model" not in st.session_state:
                 st.session_state.llm_model = os.getenv("OPENAI_MODEL", "")
             if "llm_configured" not in st.session_state:
-                st.session_state.llm_configured = bool(st.session_state.llm_api_key)
+                st.session_state.llm_configured = all(
+                    _make_llm_signature(
+                        st.session_state.llm_provider,
+                        st.session_state.llm_api_key,
+                        st.session_state.llm_base_url,
+                        st.session_state.llm_model,
+                    )[1:]
+                )
+            if "llm_connection_signature" not in st.session_state:
+                st.session_state.llm_connection_signature = (
+                    _make_llm_signature(
+                        st.session_state.llm_provider,
+                        st.session_state.llm_api_key,
+                        st.session_state.llm_base_url,
+                        st.session_state.llm_model,
+                    )
+                    if st.session_state.llm_configured
+                    else None
+                )
+            if "llm_key_input" not in st.session_state:
+                st.session_state.llm_key_input = st.session_state.llm_api_key
+            if "llm_url_input" not in st.session_state:
+                st.session_state.llm_url_input = st.session_state.llm_base_url
+            if "llm_model_input" not in st.session_state:
+                st.session_state.llm_model_input = st.session_state.llm_model
 
             # ---- 快捷预设 ----
             preset_choice = st.selectbox(
@@ -818,61 +872,82 @@ def run_app():
             if preset_choice != st.session_state.llm_provider:
                 st.session_state.llm_provider = preset_choice
                 p = _PRESETS[preset_choice]
-                if p["base_url"]:
-                    st.session_state.llm_base_url = p["base_url"]
-                if p["model"]:
-                    st.session_state.llm_model = p["model"]
+                st.session_state.llm_api_key = ""
+                st.session_state.llm_key_input = ""
+                st.session_state.llm_base_url = p["base_url"]
+                st.session_state.llm_url_input = p["base_url"]
+                st.session_state.llm_model = p["model"]
+                st.session_state.llm_model_input = p["model"]
+                st.session_state.llm_configured = False
+                st.session_state.llm_connection_signature = None
 
             # ---- 三个核心字段（始终显示，始终可编辑） ----
             api_key = st.text_input(
                 "API Key",
-                value=st.session_state.llm_api_key,
                 type="password",
                 placeholder="sk-xxxxxxxxxxxxxxxx",
                 key="llm_key_input",
             )
             base_url = st.text_input(
                 "Base URL",
-                value=st.session_state.llm_base_url,
                 placeholder="https://api.openai.com/v1",
                 key="llm_url_input",
             )
             model_name = st.text_input(
                 "Model",
-                value=st.session_state.llm_model,
                 placeholder="gpt-4o / deepseek-chat / qwen-plus ...",
                 key="llm_model_input",
             )
 
             # ---- 保存 & 测试 ----
             if st.button("💾 保存并连接", use_container_width=True, key="llm_save_btn"):
-                st.session_state.llm_api_key = api_key
-                st.session_state.llm_base_url = base_url
-                st.session_state.llm_model = model_name
+                api_key_clean = _clean_llm_value(api_key)
+                base_url_clean = _clean_llm_value(base_url)
+                model_name_clean = _clean_llm_value(model_name)
+
+                st.session_state.llm_api_key = api_key_clean
+                st.session_state.llm_base_url = base_url_clean
+                st.session_state.llm_model = model_name_clean
                 st.session_state.llm_provider = preset_choice
 
-                if api_key and base_url and model_name:
+                if api_key_clean and base_url_clean and model_name_clean:
                     try:
-                        os.environ["OPENAI_API_KEY"] = api_key
-                        os.environ["OPENAI_BASE_URL"] = base_url
-                        os.environ["OPENAI_MODEL"] = model_name
+                        _sync_llm_env(api_key_clean, base_url_clean, model_name_clean)
                         from core.llm_client import LLMClient
                         LLMClient.reconfigure(
-                            base_url=base_url,
-                            api_key=api_key,
-                            model=model_name,
+                            base_url=base_url_clean,
+                            api_key=api_key_clean,
+                            model=model_name_clean,
                         )
                         st.session_state.llm_configured = True
+                        st.session_state.llm_connection_signature = _make_llm_signature(
+                            preset_choice,
+                            api_key_clean,
+                            base_url_clean,
+                            model_name_clean,
+                        )
                         st.success("✅ 连接成功！")
                     except Exception as exc:
                         st.session_state.llm_configured = False
+                        st.session_state.llm_connection_signature = None
                         st.error(f"连接失败：{exc}")
                 else:
+                    _sync_llm_env(api_key_clean, base_url_clean, model_name_clean)
+                    _reset_llm_runtime()
                     st.session_state.llm_configured = False
+                    st.session_state.llm_connection_signature = None
                     st.warning("请填写 API Key、Base URL 和 Model 三项。")
 
             # ---- 状态指示 ----
-            if st.session_state.llm_configured and st.session_state.llm_api_key:
+            current_llm_signature = _make_llm_signature(preset_choice, api_key, base_url, model_name)
+            current_llm_complete = all(current_llm_signature[1:])
+            current_llm_connected = (
+                st.session_state.llm_configured
+                and current_llm_complete
+                and st.session_state.llm_connection_signature == current_llm_signature
+            )
+
+            if current_llm_connected:
                 display_model = st.session_state.llm_model or "未知模型"
                 display_url = st.session_state.llm_base_url or ""
                 # 从 URL 提取简短标识
@@ -886,7 +961,7 @@ def run_app():
                 )
             else:
                 st.markdown(
-                    '<div class="llm-status llm-warn">⚠️ 未配置 API 密钥，请在上方填写后保存</div>',
+                    '<div class="llm-status llm-warn">⚠️ 未连接，请填写完整配置后保存</div>',
                     unsafe_allow_html=True,
                 )
 

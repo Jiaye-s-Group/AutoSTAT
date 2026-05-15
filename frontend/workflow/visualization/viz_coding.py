@@ -230,11 +230,17 @@ def vis_execution(agent, auto = False):
             language="python",
             auto_update=True
         )
+    if "viz_desc_switch" not in st.session_state:
+        st.session_state["viz_desc_switch"] = False
+    if "viz_desc_switch_widget" not in st.session_state:
+        st.session_state["viz_desc_switch_widget"] = st.session_state["viz_desc_switch"]
     desc_switch = sac.switch(
         label='附加分析',
-        value=st.session_state.get("viz_desc_switch", False),
-        key="viz_desc_switch",
+        key="viz_desc_switch_widget",
         off_label='Off',
+    )
+    st.session_state["viz_desc_switch"] = bool(
+        st.session_state.get("viz_desc_switch_widget", desc_switch)
     )
     if code is not None:
         not_executed = agent.load_fig() == []

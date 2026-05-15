@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 from core.llm_client import chat
 from core.prompt_template import render_file
@@ -25,6 +25,29 @@ from workflow.report.report_content_utils import (
     build_history_context,
     truncate_text,
 )
+
+FIG_PLACEHOLDER_CAPTURE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])[\[\uFF3B\u3010]?\s*FIG\s*[:\uFF1A]?\s*(\d+)\s*[\]\uFF3D\u3011]?(?![A-Za-z0-9_])",
+    flags=re.IGNORECASE,
+)
+
+
+class ReportGenerationCancelled(RuntimeError):
+    """Raised when a newer report generation supersedes this workflow."""
+
+
+def _is_report_cancelled(cancel_check: Callable[[], bool] | None) -> bool:
+    if cancel_check is None:
+        return False
+    try:
+        return bool(cancel_check())
+    except Exception:
+        return False
+
+
+def _raise_if_report_cancelled(cancel_check: Callable[[], bool] | None) -> None:
+    if _is_report_cancelled(cancel_check):
+        raise ReportGenerationCancelled()
 
 
 def _clean_report_title(raw_title: Any) -> str:
@@ -79,6 +102,281 @@ def _clean_report_title(raw_title: Any) -> str:
     return text.strip()
 
 
+def _extract_fig_numbers_from_text(text: Any) -> list[int]:
+    figures: list[int] = []
+    seen: set[int] = set()
+    for match in FIG_PLACEHOLDER_CAPTURE_RE.finditer(str(text or "")):
+        try:
+            figure = int(match.group(1))
+        except Exception:
+            continue
+        if figure not in seen:
+            seen.add(figure)
+            figures.append(figure)
+    return figures
+
+
+def _coerce_figures(value: Any) -> list[int]:
+    figures: list[int] = []
+    seen: set[int] = set()
+
+    def add(raw: Any) -> None:
+        if raw is None:
+            return
+        if isinstance(raw, bool):
+            return
+        if isinstance(raw, int):
+            candidates = [raw]
+        elif isinstance(raw, float) and raw.is_integer():
+            candidates = [int(raw)]
+        elif isinstance(raw, str):
+            candidates = _extract_fig_numbers_from_text(raw)
+            if not candidates:
+                candidates = [int(item) for item in re.findall(r"\d+", raw)]
+        elif isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                add(item)
+            return
+        else:
+            return
+
+        for candidate in candidates:
+            if candidate < 0 or candidate in seen:
+                continue
+            seen.add(candidate)
+            figures.append(candidate)
+
+    add(value)
+    return figures
+
+
+def _section_figures(section: Any) -> list[int]:
+    if not isinstance(section, dict):
+        return []
+
+    for key in ("figures", "figs", "figure", "图片", "图号"):
+        figures = _coerce_figures(section.get(key))
+        if figures:
+            return figures
+    return []
+
+
+def _toc_has_figures(toc_list: list) -> bool:
+    return any(_section_figures(section) for section in toc_list)
+
+
+def _normalize_toc_figures(toc_list: list) -> list:
+    normalized: list[Any] = []
+    for section in toc_list:
+        if not isinstance(section, dict):
+            normalized.append(section)
+            continue
+        section_copy = dict(section)
+        section_copy["figures"] = _section_figures(section_copy)
+        normalized.append(section_copy)
+    return normalized
+
+
+def _merge_toc_figures(toc_list: list, source_toc_list: list) -> list:
+    if not toc_list or not source_toc_list:
+        return _normalize_toc_figures(toc_list)
+
+    merged: list[Any] = []
+    for index, section in enumerate(toc_list):
+        source_section = source_toc_list[index] if index < len(source_toc_list) else None
+        source_figures = _section_figures(source_section)
+
+        if isinstance(section, dict):
+            section_copy = dict(section)
+            if not _section_figures(section_copy) and source_figures:
+                section_copy["figures"] = source_figures
+            else:
+                section_copy["figures"] = _section_figures(section_copy)
+            merged.append(section_copy)
+            continue
+
+        if source_figures and isinstance(source_section, dict):
+            merged.append(dict(source_section))
+        else:
+            merged.append(section)
+
+    return merged
+
+
+def _parse_toc_text(toc_text: str) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = []
+    for raw_line in str(toc_text or "").replace("\\r\\n", "\n").replace("\\n", "\n").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        line = re.sub(r"^\s*#{1,6}\s*", "", line)
+        line = re.sub(r"^[\s\-\*•]+", "", line).strip()
+        match = re.match(r"^(\d+(?:[\.．]\d+)*)(?:[\.．、]|\s+)?\s*(.*)$", line)
+        if not match:
+            continue
+
+        num = match.group(1).replace("．", ".").strip()
+        remainder = match.group(2).strip()
+        outline = ""
+
+        outline_match = re.search(r"[（(]([^()（）]*)[）)]\s*$", remainder)
+        if outline_match:
+            outline = outline_match.group(1).strip()
+            title = remainder[: outline_match.start()].strip()
+        else:
+            title = remainder.strip()
+
+        title = sanitize_section_heading_text(title)
+        if not title:
+            continue
+
+        sections.append(
+            {
+                "num": num,
+                "title": title,
+                "level": num.count(".") + 1,
+                "outline": outline,
+                "figures": [],
+            }
+        )
+
+    return sections
+
+
+def _section_identity(section: Any) -> tuple[str, str]:
+    if isinstance(section, dict):
+        num = str(section.get("num", "")).strip()
+        title = sanitize_section_heading_text(section.get("title", ""))
+        return num, normalize_for_dedup(title)
+
+    text = sanitize_section_heading_text(section)
+    match = re.match(r"^(\d+(?:[\.．]\d+)*)\s+(.+)$", text)
+    if match:
+        return match.group(1).replace("．", ".").strip(), normalize_for_dedup(match.group(2))
+    return "", normalize_for_dedup(text)
+
+
+def _merge_toc_with_authoritative_order(primary_toc: list, authoritative_toc: list) -> list:
+    if not authoritative_toc:
+        return primary_toc
+    if not primary_toc:
+        return authoritative_toc
+
+    by_num: dict[str, Any] = {}
+    by_title: dict[str, Any] = {}
+    used_ids: set[int] = set()
+
+    for section in primary_toc:
+        num, title_key = _section_identity(section)
+        if num:
+            by_num.setdefault(num, section)
+        if title_key:
+            by_title.setdefault(title_key, section)
+
+    merged: list[Any] = []
+    for fallback_section in authoritative_toc:
+        num, title_key = _section_identity(fallback_section)
+        matched = by_num.get(num) if num else None
+        if matched is None and title_key:
+            matched = by_title.get(title_key)
+
+        if isinstance(fallback_section, dict):
+            section_out = dict(fallback_section)
+            if isinstance(matched, dict):
+                used_ids.add(id(matched))
+                for key, value in matched.items():
+                    if key in {"num", "title", "level", "outline"} and section_out.get(key):
+                        continue
+                    section_out[key] = value
+                for key in ("num", "title", "level", "outline"):
+                    if fallback_section.get(key):
+                        section_out[key] = fallback_section[key]
+            elif matched is not None:
+                used_ids.add(id(matched))
+            merged.append(section_out)
+        else:
+            if matched is not None:
+                used_ids.add(id(matched))
+                merged.append(matched)
+            else:
+                merged.append(fallback_section)
+
+    for section in primary_toc:
+        if id(section) not in used_ids:
+            merged.append(section)
+
+    return merged
+
+
+def _ensure_visual_fig_placeholders(text: str) -> str:
+    text = normalize_part(text or "")
+    if not text or _extract_fig_numbers_from_text(text):
+        return text
+
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
+    if not blocks:
+        return text
+
+    return "\n\n".join(f"[FIG:{index}] {block}" for index, block in enumerate(blocks))
+
+
+def _contains_all_figures(text: str, figures: list[int]) -> bool:
+    present = set(_extract_fig_numbers_from_text(text))
+    return all(figure in present for figure in figures)
+
+
+def _dedupe_required_figures(text: str, figures: list[int]) -> str:
+    if not text or not figures:
+        return text
+
+    expected = set(figures)
+    seen: set[int] = set()
+
+    def replace(match: re.Match[str]) -> str:
+        try:
+            figure = int(match.group(1))
+        except Exception:
+            return match.group(0)
+        if figure not in expected:
+            return match.group(0)
+        if figure in seen:
+            return ""
+        seen.add(figure)
+        return f"[FIG:{figure}]"
+
+    return FIG_PLACEHOLDER_CAPTURE_RE.sub(replace, text)
+
+
+def _preserve_required_figures(primary: str, fallback: str, section: Any) -> str:
+    figures = _section_figures(section)
+    primary = normalize_part(primary)
+    fallback = normalize_part(fallback)
+    if not figures:
+        return primary
+
+    if _contains_all_figures(primary, figures):
+        return normalize_part(_dedupe_required_figures(primary, figures))
+
+    if fallback and _contains_all_figures(fallback, figures):
+        return normalize_part(_dedupe_required_figures(fallback, figures))
+
+    base = primary or fallback
+    present = set(_extract_fig_numbers_from_text(base))
+    missing = [figure for figure in figures if figure not in present]
+    if not missing:
+        return normalize_part(_dedupe_required_figures(base, figures))
+
+    suffix = " ".join(f"[FIG:{figure}]" for figure in missing)
+    if not base:
+        return suffix
+
+    base = base.rstrip()
+    if not re.search(r"[。！？!?\.]$", base):
+        base += "。"
+    return normalize_part(_dedupe_required_figures(f"{base} {suffix}", figures))
+
+
 def run_reporting_partly_workflow(
     *,
     toc_text: str,
@@ -91,12 +389,15 @@ def run_reporting_partly_workflow(
     add_preference: str = "",
     preference_select: str = "",
     ref_context: str = "",
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
+    selected_full_conten = _ensure_visual_fig_placeholders(selected_full_conten or "")
+    authoritative_toc = _parse_toc_text(toc_text)
     ctx: dict[str, Any] = {
         "toc_text": toc_text or "",
         "toc_md": toc_text or "",
-        "selected_full_conten": selected_full_conten or "",
-        "selected_full_contents_vis": selected_full_conten or "",
+        "selected_full_conten": selected_full_conten,
+        "selected_full_contents_vis": selected_full_conten,
         "load_abstract": load_abstract or "",
         "preproc_abstract": preproc_abstract or "",
         "visual_abstract": visual_abstract or "",
@@ -109,19 +410,29 @@ def run_reporting_partly_workflow(
     }
 
     # ---------- 节点 1: selected_photo_update_toc ----------
+    _raise_if_report_cancelled(cancel_check)
     sp_sys = render_file("reporting_partly/selected_photo_update_toc_llm_sys.txt", ctx)
     sp_user = render_file("reporting_partly/selected_photo_update_toc_llm_user.txt", ctx)
     toc_list_raw = chat(sp_sys, sp_user, name="report_partly.select_photo").strip()
+    _raise_if_report_cancelled(cancel_check)
     toc_list = _parse_toc_list(toc_list_raw)
+    toc_list = _merge_toc_with_authoritative_order(toc_list, authoritative_toc)
+    toc_list = _normalize_toc_figures(toc_list)
     ctx["toc_list"] = toc_list
 
     # ---------- 节点 2: update_toc_with_relevant_sections ----------
+    _raise_if_report_cancelled(cancel_check)
     up_sys = render_file("reporting_partly/update_toc_with_relevant_sections_llm_sys.txt", ctx)
     up_user = render_file("reporting_partly/update_toc_with_relevant_sections_llm_user.txt", ctx)
     toc_final_raw = chat(up_sys, up_user, name="report_partly.update_toc").strip()
+    _raise_if_report_cancelled(cancel_check)
     toc_list_final = _parse_toc_list(toc_final_raw)
+    toc_list_final = _merge_toc_figures(toc_list_final, toc_list)
+    toc_list_final = _merge_toc_with_authoritative_order(toc_list_final, toc_list or authoritative_toc)
 
     if not toc_list_final:
+        toc_list_final = toc_list
+    elif _toc_has_figures(toc_list) and not _toc_has_figures(toc_list_final):
         toc_list_final = toc_list
 
     if not toc_list_final:
@@ -134,6 +445,7 @@ def run_reporting_partly_workflow(
     history_parts_for_prompt: list[str] = []
 
     for idx, section in enumerate(toc_list_final):
+        _raise_if_report_cancelled(cancel_check)
         section_ctx: dict[str, Any] = {
             **ctx,
             "t": section,
@@ -150,32 +462,41 @@ def run_reporting_partly_workflow(
         w_sys = render_file("reporting_partly/writer_llm_sys.txt", section_ctx)
         w_user = render_file("reporting_partly/writer_llm_user.txt", section_ctx)
         content = chat(w_sys, w_user, name=f"report_partly.writer.{idx+1}").strip()
+        _raise_if_report_cancelled(cancel_check)
         content = _unwrap_code_block(content)
         content = normalize_part(content)
+        content = _preserve_required_figures(content, "", section)
         section_ctx["content"] = content
 
         # ---------- fill_report ----------
         f_sys = render_file("reporting_partly/fill_report_llm_sys.txt", section_ctx)
         f_user = render_file("reporting_partly/fill_report_llm_user.txt", section_ctx)
         filled = chat(f_sys, f_user, name=f"report_partly.fill.{idx+1}").strip()
+        _raise_if_report_cancelled(cancel_check)
         filled = _unwrap_code_block(filled)
         filled = normalize_part(filled)
+        filled = _preserve_required_figures(filled, content, section)
 
         # debug：检查图号在哪一层还存在
-        print(f"[REPORT][SECTION {idx+1}] HAS_FIG_IN_FILLED =", "[FIG:" in filled)
+        print(f"[REPORT][SECTION {idx+1}] HAS_FIG_IN_FILLED =", bool(_extract_fig_numbers_from_text(filled)))
         print(f"[REPORT][SECTION {idx+1}] FILLED_PREVIEW =", filled[:300])
 
         # 最终正文优先用 filled，再退回 content
         final_part = filled or content
         final_part = normalize_part(final_part)
+        final_part = _preserve_required_figures(final_part, content, section)
 
-        print(f"[REPORT][SECTION {idx+1}] HAS_FIG_IN_FINAL =", "[FIG:" in final_part)
+        print(f"[REPORT][SECTION {idx+1}] HAS_FIG_IN_FINAL =", bool(_extract_fig_numbers_from_text(final_part)))
 
         # 关键修复：去掉模型自己写在正文开头的章节标题，最终统一以目录标题为准
+        original_final_part = final_part
         final_part = _strip_redundant_heading(final_part, section)
         final_part = normalize_part(final_part)
+        if original_final_part and not final_part:
+            final_part = original_final_part
+        final_part = _preserve_required_figures(final_part, original_final_part, section)
 
-        dedup_key = normalize_for_dedup(final_part or _extract_section_title(section))
+        dedup_key = normalize_for_dedup(_extract_section_title(section))
         if dedup_key in seen_parts:
             continue
 
@@ -194,10 +515,12 @@ def run_reporting_partly_workflow(
 
     # ---------- title_maker ----------
     # 只生成 title 字段返回，不再把 title 注入正文，避免前端额外装饰
+    _raise_if_report_cancelled(cancel_check)
     title_ctx = {**ctx, "final_html": final_html}
     t_sys = render_file("reporting_partly/title_maker_llm_sys.txt", title_ctx)
     t_user = render_file("reporting_partly/title_maker_llm_user.txt", title_ctx)
     title = _clean_report_title(chat(t_sys, t_user, name="report_partly.title", temperature=0.3))
+    _raise_if_report_cancelled(cancel_check)
 
     return {
         "final_html": final_html,
@@ -303,9 +626,7 @@ def _strip_redundant_heading(text: str, section: Any) -> str:
     first_non_empty_idx = next((i for i, line in enumerate(lines) if line.strip()), None)
     if first_non_empty_idx is not None:
         first_line_norm = _normalize_heading_text(lines[first_non_empty_idx])
-        if _starts_with_markdown_heading(lines[first_non_empty_idx]) or (
-            expected_title_norm and first_line_norm == expected_title_norm
-        ):
+        if expected_title_norm and first_line_norm == expected_title_norm:
             del lines[first_non_empty_idx]
 
     # 取前两条非空行看看是否重复
