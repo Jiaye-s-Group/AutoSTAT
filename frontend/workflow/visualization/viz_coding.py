@@ -1,4 +1,3 @@
-import time
 import traceback
 
 import numpy as np
@@ -11,8 +10,14 @@ from stqdm import stqdm
 from streamlit_ace import st_ace
 import streamlit_antd_components as sac
 
-from utils.sanitize_code import sanitize_code, sanitize_visualization_code
+from utils.sanitize_code import sanitize_visualization_code
 from workflow.visualization.viz_color import apply_palette_to_figure
+
+
+def _show_execution_error(message: str, error_text: str) -> None:
+    st.error(message)
+    if error_text:
+        st.code(error_text, language="text")
 
 
 def _load_workflow_visualization_code(agent) -> bool:
@@ -93,17 +98,6 @@ def _normalize_figure(fig):
     return None
 
 
-def _regenerate_visualization_code(agent, df, suggest, rerun=True) -> None:
-    if not _load_workflow_visualization_code(agent):
-        _warn_missing_workflow_visualization_code()
-        return
-
-    st.chat_message("assistant").write("训练脚本已更新！请重新运行代码！")
-    agent.add_memory({"role": "assistant", "content": "训练脚本已更新！请重新运行代码！"})
-    if rerun:
-        st.rerun()
-
-
 def generate_visualization_code_once(agent) -> bool:
     return _load_workflow_visualization_code(agent)
 
@@ -131,14 +125,24 @@ def execute_visualization_code_once(agent, code_override=None) -> bool:
             exec(code, exec_ns)
     except Exception:
         error_text = traceback.format_exc()
-        st.error("当前代码出现执行错误，请点击清除可视化分析，重新生成可视化推荐。")
         agent.save_error(error_text)
+        _show_execution_error(
+            "当前代码出现执行错误，请点击清除可视化分析，重新生成可视化推荐。",
+            error_text,
+        )
         return False
 
     fig_dict = exec_ns.get("fig_dict")
     if not fig_dict or not isinstance(fig_dict, dict):
-        st.error("可视化脚本未产出有效的 `fig_dict`，请先前往可视化页面检查代码。")
-        agent.save_error("fig_dict missing or invalid")
+        error_text = (
+            "可视化脚本执行完成，但未产出有效的 `fig_dict`。\n"
+            "请确保代码中创建 `fig_dict`，且其类型为 dict，例如：fig_dict = {'fig_1': fig}。"
+        )
+        agent.save_error(error_text)
+        _show_execution_error(
+            "可视化脚本未产出有效的 `fig_dict`，请先前往可视化页面检查代码。",
+            error_text,
+        )
         return False
 
     summary_3 = st.session_state.get("summary_3")
@@ -252,14 +256,25 @@ def vis_execution(agent, auto = False):
             try:
                 with st.spinner("正在运行可视化脚本..."):
                     exec(code, exec_ns)
-            except Exception as exc:
-                agent.save_error(traceback.format_exc())
-                st.error("当前代码出现执行错误，请点击清除可视化分析，重新生成可视化推荐。")
+            except Exception:
+                error_text = traceback.format_exc()
+                agent.save_error(error_text)
+                _show_execution_error(
+                    "当前代码出现执行错误，请点击清除可视化分析，重新生成可视化推荐。",
+                    error_text,
+                )
             else:
                 fig_dict = exec_ns.get("fig_dict")
                 if not fig_dict or not isinstance(fig_dict, dict):
-                    agent.save_error(traceback.format_exc())
-                    st.error("当前代码出现执行错误，请点击清除可视化分析，重新生成可视化推荐。")
+                    error_text = (
+                        "可视化脚本执行完成，但未产出有效的 `fig_dict`。\n"
+                        "请确保代码中创建 `fig_dict`，且其类型为 dict，例如：fig_dict = {'fig_1': fig}。"
+                    )
+                    agent.save_error(error_text)
+                    _show_execution_error(
+                        "当前代码出现执行错误，请点击清除可视化分析，重新生成可视化推荐。",
+                        error_text,
+                    )
                 else:
                     summary_3 = st.session_state.get("summary_3")
                     fig_analysis_items = _summary_3_fig_analysis(summary_3)

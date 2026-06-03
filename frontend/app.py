@@ -3,15 +3,10 @@ import streamlit as st
 import warnings
 from utils.coze_runtime import (
     ensure_coze_session_defaults,
-    COZE_REGION_OPTIONS,
-    COZE_REGION_TO_URL,
-    get_coze_auth_ui_state,
-    get_coze_oauth_authorize_url,
     handle_coze_oauth_callback,
-    load_coze_oauth_config,
-    reset_coze_auth,
 )
 from utils.page_paths import asset_file, page_file
+from utils.resizable_cards import inject_resizable_card_resizer
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
@@ -70,13 +65,13 @@ class BaseAgent:
         self.memory = []
 
     def save_error(self, error):
-        self.error = None
+        self.error = error
 
     def save_inference_error(self, error):
-        self.error = None
+        self.error = error
 
     def load_error(self):
-        return None
+        return self.error
     
     def finish_auto(self):
         self.finish_auto_task = True
@@ -188,7 +183,7 @@ class DataPreprocessAgent(BaseAgent):
         pass
     
     def save_error(self, error):
-        self.error = None
+        self.error = error
     
     def code_generation(self, df_head, suggest):
         return "# 预处理代码示例\nimport pandas as pd\nimport numpy as np\nfrom sklearn.preprocessing import StandardScaler\n\n# 复制数据\nprocess_df = df.copy()\n\n# 标准化数值特征\nnumeric_cols = process_df.select_dtypes(include=['int64', 'float64']).columns\nscaler = StandardScaler()\nprocess_df[numeric_cols] = scaler.fit_transform(process_df[numeric_cols])\n\n# 处理缺失值\nprocess_df = process_df.fillna(process_df.mean())"
@@ -234,7 +229,7 @@ class VisualizationAgent(BaseAgent):
         return self.color
 
     def save_error(self, error):
-        self.error = None
+        self.error = error
 
     def add_fig(self, fig, desc=None, base_fig=None, title=None):
         if base_fig is None:
@@ -346,10 +341,10 @@ class ModelingCodingAgent(BaseAgent):
         self.best_model_gz_bytes = best_model_gz_bytes
 
     def save_error(self, error):
-        self.error = None
+        self.error = error
 
     def load_error(self):
-        return None
+        return self.error
 
     def result_format_prompt(self, result_json):
         return f"```json\n{result_json}\n```"
@@ -608,9 +603,7 @@ def run_app():
     """渲染 Streamlit 应用程序主入口"""
     init_session_state()
     handle_coze_oauth_callback()
-
-    def _reset_coze_auth() -> None:
-        reset_coze_auth()
+    inject_resizable_card_resizer()
 
     def _reset_auto_agent_flags() -> None:
         for agent_key in (

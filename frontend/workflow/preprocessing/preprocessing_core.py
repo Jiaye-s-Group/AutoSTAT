@@ -20,6 +20,12 @@ from streamlit_ace import st_ace
 from utils.sanitize_code import sanitize_code
 
 
+def _show_execution_error(message: str, error_text: str) -> None:
+    st.error(message)
+    if error_text:
+        st.code(error_text, language="text")
+
+
 def prep_meta_execution(agent, code, df, auto=False):
     if not st.session_state.get("prep_code_visible") or code is None:
         return None
@@ -65,14 +71,19 @@ def prep_meta_execution(agent, code, df, auto=False):
                 with st.spinner("正在运行预处理脚本..."):
                     exec(code, exec_ns)
             except Exception:
-                st.error("出现报错，正在重新调用 LLM 生成调试后的代码。")
-                st.text(traceback.format_exc())
+                error_text = traceback.format_exc()
+                agent.save_error(error_text)
+                _show_execution_error(
+                    "出现报错，正在重新调用 LLM 生成调试后的代码。",
+                    error_text,
+                )
                 prep_code_gen(agent, debug=True)
             else:
                 process_df = exec_ns.get("process_df")
                 if process_df is None:
                     message = "脚本未写入 `process_df`。请重新生成代码，并确保脚本末尾为 `process_df` 赋值。"
-                    st.error(message)
+                    agent.save_error(message)
+                    _show_execution_error(message, message)
                     prep_code_gen(agent, debug=True)
                 else:
                     if not isinstance(process_df, pd.DataFrame):
@@ -83,7 +94,8 @@ def prep_meta_execution(agent, code, df, auto=False):
                                 f"期望 pandas.DataFrame 或 numpy.ndarray，收到 {type(process_df)}。"
                                 "请重新生成代码。"
                             )
-                            st.error(message)
+                            agent.save_error(message)
+                            _show_execution_error(message, message)
                             prep_code_gen(agent, debug=True)
                             return None
 

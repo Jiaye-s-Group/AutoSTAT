@@ -1,15 +1,12 @@
 import json
-import time
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import requests
 import streamlit as st
 import streamlit_antd_components as sac
 from streamlit_ace import st_ace
 
-from utils.coze_runtime import resolve_coze_runtime
 from utils.page_paths import page_file
 from utils.sanitize_code import sanitize_code
 from workflow.modeling.model_training import (
@@ -17,16 +14,6 @@ from workflow.modeling.model_training import (
     train_download_model,
     train_execution,
 )
-
-COZE_SPACE_ID = "7594748927577554949"
-WORKFLOW_ID = "7605874583226056709"
-BOT_ID = "7595403958269575173"
-DEFAULT_COZE_URL = "https://api.coze.com/v1/workflow/run"
-CONNECT_TIMEOUT_SECONDS = 30
-WORKFLOW_TIMEOUT_SECONDS = 600
-MAX_WORKFLOW_RETRIES = 3
-RETRY_BACKOFF_SECONDS = 8
-
 
 def _maybe_json_loads(value: Any) -> Any:
     if not isinstance(value, str):
@@ -70,14 +57,6 @@ def _find_nested_field(data: Any, field_name: str) -> Any:
             if nested is not None:
                 return nested
 
-    return None
-
-
-def _find_first_nested_field(data: Any, field_names: list[str]) -> Any:
-    for field_name in field_names:
-        value = _find_nested_field(data, field_name)
-        if value is not None:
-            return value
     return None
 
 
@@ -267,25 +246,6 @@ def _normalize_modeling_workflow_result(result: Any) -> dict[str, Any] | None:
     normalized["abstract_4"] = _stringify_content(abstract_value)
     normalized["model_suggestion"] = _stringify_content(model_suggestion)
     return normalized
-
-
-def _extract_modeling_suggestion(workflow_result: dict[str, Any]) -> str:
-    suggestion = workflow_result.get("model_suggestion", "")
-    if suggestion:
-        return suggestion
-
-    summary_4 = workflow_result.get("summary_4")
-    if isinstance(summary_4, dict):
-        summary_desc = _find_first_nested_field(summary_4, ["desc", "title"])
-        summary_desc = _stringify_content(summary_desc)
-        if summary_desc:
-            return summary_desc
-
-    abstract_4 = workflow_result.get("abstract_4", "")
-    if abstract_4:
-        return abstract_4
-
-    return ""
 
 
 def _extract_summary_4_result() -> Any:

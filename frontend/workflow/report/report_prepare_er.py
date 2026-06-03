@@ -1,18 +1,7 @@
 import ast
-import io
-import re
-from io import BytesIO
 
 import streamlit as st
-from tqdm import tqdm
 from stqdm import stqdm
-from docx import Document
-from docx.oxml.ns import qn
-from docx.shared import Inches
-from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-import plotly.express as px
-import plotly.io as pio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from utils.sanitize_code import sanitize_code

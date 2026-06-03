@@ -27,6 +27,12 @@ from sklearn.preprocessing import StandardScaler
 from utils.sanitize_code import sanitize_code, to_json_serializable
 
 
+def _show_execution_error(message: str, error_text: str) -> None:
+    st.error(message)
+    if error_text:
+        st.code(error_text, language="text")
+
+
 def _update_modeling_summary_state(agent, code: str, formatted: str, table_bundle: dict[str, Any]) -> None:
     current_summary = st.session_state.get("summary_4") or st.session_state.get("modeling_summary_4")
     if isinstance(current_summary, dict):
@@ -62,7 +68,7 @@ def _build_modeling_result_summary(
 
 def _load_workflow_modeling_code(agent, workflow_code: str) -> None:
     agent.save_code(workflow_code)
-    message = "建模代码已从工作流结果回填，请在下方重新执行。"
+    message = "建模代码已生成，请点击下方执行。"
     st.chat_message("assistant").write(message)
     agent.add_memory({"role": "assistant", "content": message})
 
@@ -227,14 +233,23 @@ def train_execution(agent):
             with _temporary_quiet_lightgbm():
                 exec(code, exec_ns)
     except Exception:
-        st.error("出现报错，请重新生成调试后的建模代码。")
-        st.text(traceback.format_exc())
+        error_text = traceback.format_exc()
+        agent.save_error(error_text)
+        _show_execution_error(
+            "出现报错，请重新生成调试后的建模代码。",
+            error_text,
+        )
         modeling_code_gen(agent, debug=True)
         return
 
     result_dict = exec_ns.get("result_dict")
     if result_dict is None:
-        st.error("脚本未写入 `result_dict`。请确保脚本末尾赋值 `result_dict`。")
+        error_text = "脚本执行完成，但未写入 `result_dict`。请确保脚本末尾赋值 `result_dict = {...}`。"
+        agent.save_error(error_text)
+        _show_execution_error(
+            "脚本未写入 `result_dict`。请确保脚本末尾赋值 `result_dict`。",
+            error_text,
+        )
         return
 
     artifacts = result_dict.get("artifacts", {})

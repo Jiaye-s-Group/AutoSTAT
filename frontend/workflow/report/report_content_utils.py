@@ -4,6 +4,7 @@ import html
 import io
 import json
 import re
+import unicodedata
 from typing import Any
 
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -27,11 +28,43 @@ WORD_EXPORT_MUTED_COLOR = RGBColor(107, 114, 128)
 WORD_EXPORT_CODE_BACKGROUND = "F5F7FA"
 WORD_EXPORT_QUOTE_BACKGROUND = "F8FAFC"
 FIG_PLACEHOLDER_CORE_PATTERN = r"[\[\uFF3B\u3010]?\s*FIG\s*[:\uFF1A]?\s*\d+\s*[\]\uFF3D\u3011]?"
+FIG_PLACEHOLDER_CAPTURE_PATTERN = r"(?<![A-Za-z0-9_])[\[\uFF3B\u3010]?\s*FIG\s*[:\uFF1A]?\s*(\d+)\s*[\]\uFF3D\u3011]?(?![A-Za-z0-9_])"
 FIG_PLACEHOLDER_PATTERN = rf"(?<![A-Za-z0-9_]){FIG_PLACEHOLDER_CORE_PATTERN}(?![A-Za-z0-9_])"
 FIG_TRAILING_PUNCTUATION_PATTERN = re.compile(
     rf"(?<![A-Za-z0-9_])(?P<placeholders>{FIG_PLACEHOLDER_CORE_PATTERN}(?:\s*{FIG_PLACEHOLDER_CORE_PATTERN})*)(?![A-Za-z0-9_])(?P<spacing>\s*)(?P<punctuation>[\u3002\uFF01\uFF1F\uFF1B\uFF0C\u3001\uFF1A]+)",
     flags=re.IGNORECASE,
 )
+FIG_NUMBER_TOKEN_PATTERN = r"[0-9０-９零〇一二两三四五六七八九十百千①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]+"
+FIG_LABEL_PATTERN = r"(?:[FfＦｆ][IiＩｉ][GgＧｇ](?:\.|ure)?|[Ff][Ii][Gg](?:\.|ure)?|图表|图片|插图|图)"
+FIG_REFERENCE_CAPTURE_RE = re.compile(
+    rf"(?<![A-Za-z0-9_])[\[\uFF3B\u3010(（]?\s*"
+    rf"{FIG_LABEL_PATTERN}\s*(?:[:：#＃.\-—_ ]\s*)?"
+    rf"(?P<num>{FIG_NUMBER_TOKEN_PATTERN})\s*[\]\uFF3D\u3011)）]?"
+    rf"(?![A-Za-z0-9_])",
+    flags=re.IGNORECASE,
+)
+FIG_REVERSE_REFERENCE_CAPTURE_RE = re.compile(
+    rf"(?<![A-Za-z0-9_])[\[\uFF3B\u3010(（]?\s*第\s*"
+    rf"(?P<num>{FIG_NUMBER_TOKEN_PATTERN})\s*(?:张|幅|个|份)?\s*"
+    rf"(?:图表|图片|插图|图)\s*[\]\uFF3D\u3011)）]?"
+    rf"(?![A-Za-z0-9_])",
+    flags=re.IGNORECASE,
+)
+FIG_PLACEHOLDER_CAPTURE_RE = re.compile(FIG_PLACEHOLDER_CAPTURE_PATTERN, flags=re.IGNORECASE)
+CHINESE_NUMERAL_VALUES = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
 INLINE_HEADING_BODY_STARTERS = (
     "本章",
     "本节",
@@ -195,6 +228,99 @@ def extract_report_word_bytes(result: Any) -> bytes | None:
         return None
 
 
+def _parse_chinese_figure_number(text: str) -> int | None:
+    if not text:
+        return None
+
+    total = 0
+    section = 0
+    current = 0
+    seen = False
+    unit_map = {"十": 10, "百": 100, "千": 1000}
+
+    for char in text:
+        if char in CHINESE_NUMERAL_VALUES:
+            current = CHINESE_NUMERAL_VALUES[char]
+            seen = True
+            continue
+
+        unit = unit_map.get(char)
+        if unit is None:
+            return None
+
+        if current == 0:
+            current = 1
+        section += current * unit
+        current = 0
+        seen = True
+
+    if not seen:
+        return None
+
+    total += section + current
+    return total
+
+
+def _parse_figure_number_token(value: Any) -> int | None:
+    token = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not token:
+        return None
+
+    if token.isdigit():
+        return int(token)
+
+    try:
+        numeric = unicodedata.numeric(token)
+        if float(numeric).is_integer():
+            return int(numeric)
+    except (TypeError, ValueError):
+        pass
+
+    return _parse_chinese_figure_number(token)
+
+
+def normalize_figure_placeholders(text: str) -> str:
+    """
+    兼容中文模型常见图引用写法，并统一为 [FIG:n]。
+    支持：图1、图表1、图片1、插图1、第1张图、Figure 1、Fig. 1、FIG-1、FIG#1、
+    全角 FIG/数字、中文数字和圈号数字等。
+    """
+    if not isinstance(text, str) or not text:
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        number = _parse_figure_number_token(match.group("num"))
+        if number is None:
+            return match.group(0)
+        return f"[FIG:{number}]"
+
+    normalized = FIG_REVERSE_REFERENCE_CAPTURE_RE.sub(replace, text)
+    normalized = FIG_REFERENCE_CAPTURE_RE.sub(replace, normalized)
+    return normalized
+
+
+def remove_figure_placeholders(text: str) -> str:
+    """Remove standardized and Chinese-compatible figure placeholders from prose."""
+    if not isinstance(text, str) or not text:
+        return text
+
+    normalized = normalize_figure_placeholders(text)
+    cue_words = r"(?:(?:另|并)?(?:如|见|参见|详见|参考|根据|结合|从))?"
+    suffix_words = r"(?:所示|可见|可以看出|显示|展示)?"
+    phrase_pattern = re.compile(
+        rf"{cue_words}\s*{FIG_PLACEHOLDER_CAPTURE_PATTERN}\s*{suffix_words}\s*[，,、:：；;]?",
+        flags=re.IGNORECASE,
+    )
+    normalized = phrase_pattern.sub("", normalized)
+    normalized = FIG_PLACEHOLDER_CAPTURE_RE.sub("", normalized)
+    normalized = re.sub(r"\s+([，,。.!！?？；;：:、])", r"\1", normalized)
+    normalized = re.sub(r"[，,、；;：:]\s*([。.!！?？])", r"\1", normalized)
+    normalized = re.sub(r"([（(【\[])\s+([）)】\]])", "", normalized)
+    normalized = re.sub(r"[ \t]{2,}", " ", normalized)
+    normalized = re.sub(r"\n[ \t]+", "\n", normalized)
+    return normalized.strip()
+
+
 def normalize_trailing_punctuation_before_figure_placeholder(text: str) -> str:
     if not isinstance(text, str) or not text.strip():
         return text
@@ -203,13 +329,6 @@ def normalize_trailing_punctuation_before_figure_placeholder(text: str) -> str:
         lambda match: f"{match.group('punctuation')}{match.group('spacing')}{match.group('placeholders')}",
         text,
     )
-
-
-def _extract_markdown_heading_text(text: str) -> str | None:
-    parsed_heading = _parse_markdown_heading_line(text)
-    if parsed_heading is None:
-        return None
-    return parsed_heading[0]
 
 
 def _split_inline_heading_content(text: str) -> tuple[str, str | None]:
@@ -794,15 +913,6 @@ def _set_paragraph_bottom_border(paragraph, color: str = "5B7DB1", size: str = "
     p_pr.append(p_bdr)
 
 
-def _set_cell_shading(cell, fill: str) -> None:
-    tc_pr = cell._tc.get_or_add_tcPr()
-    shd = OxmlElement("w:shd")
-    shd.set(qn("w:val"), "clear")
-    shd.set(qn("w:color"), "auto")
-    shd.set(qn("w:fill"), fill)
-    tc_pr.append(shd)
-
-
 def _set_table_borders(
     table,
     *,
@@ -1259,70 +1369,6 @@ def markdown_to_html(markdown_text: str, title: str = "") -> str:
     轻量 Markdown -> HTML：
     - 不生成目录
     - 不生成 aside
-    - 不做额外封面装饰
-    - 只保留正文结构，供 report_render 再做注图与统一样式
-    """
-    body_parts: list[str] = []
-    in_ul = False
-
-    def close_list() -> None:
-        nonlocal in_ul
-        if in_ul:
-            body_parts.append("</ul>")
-            in_ul = False
-
-    for raw_line in markdown_text.splitlines():
-        line = raw_line.rstrip()
-        stripped = line.strip()
-
-        if not stripped:
-            close_list()
-            continue
-
-        heading_match = re.match(r"^(#{1,6})\s+(.*)$", stripped)
-        if heading_match:
-            close_list()
-            level = len(heading_match.group(1))
-            text = html.escape(heading_match.group(2).strip())
-            body_parts.append(f"<h{level}>{text}</h{level}>")
-            continue
-
-        bullet_match = re.match(r"^[-*]\s+(.*)$", stripped)
-        if bullet_match:
-            if not in_ul:
-                body_parts.append("<ul>")
-                in_ul = True
-            body_parts.append(f"<li>{html.escape(bullet_match.group(1).strip())}</li>")
-            continue
-
-        close_list()
-        # 注意：这里故意保留 [FIG:x] 原样文本，后续 _inject_visualizations_into_html 会替换
-        body_parts.append(f"<p>{html.escape(stripped)}</p>")
-
-    close_list()
-    body_html = "\n".join(body_parts)
-
-    page_title = html.escape(title or "")
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{page_title}</title>
-</head>
-<body>
-  <main class="report-body">
-    {body_html}
-  </main>
-</body>
-</html>"""
-
-
-def markdown_to_html(markdown_text: str, title: str = "") -> str:
-    """
-    轻量 Markdown -> HTML：
-    - 不生成目录
-    - 不生成 aside
     - 只保留正文结构，交给 report_render 补充导出样式
     """
     body_parts: list[str] = []
@@ -1406,78 +1452,6 @@ def markdown_to_html(markdown_text: str, title: str = "") -> str:
   </main>
 </body>
 </html>"""
-
-
-def build_docx_from_markdown(markdown_text: str) -> bytes:
-    markdown_text = normalize_trailing_punctuation_before_figure_placeholder(markdown_text)
-
-    doc = Document()
-    _configure_doc_style(doc)
-    state = {"has_title": False}
-    code_lines: list[str] = []
-    in_code_block = False
-
-    for raw_line in markdown_text.splitlines():
-        line = raw_line.rstrip()
-        stripped_line = line.strip()
-
-        if stripped_line.startswith("```"):
-            if in_code_block:
-                _add_code_block(doc, "\n".join(code_lines))
-                code_lines = []
-                in_code_block = False
-            else:
-                in_code_block = True
-            continue
-
-        if in_code_block:
-            code_lines.append(line)
-            continue
-
-        if not stripped_line:
-            continue
-
-        parsed_segments = _split_markdown_heading_lines(stripped_line)
-        if parsed_segments:
-            for line_kind, line_text in parsed_segments:
-                if line_kind == "heading":
-                    _add_heading_paragraph(doc, line_text, level=1, state=state)
-                else:
-                    _add_body_paragraph(doc, line_text)
-            continue
-
-        ordered_match = re.match(r"^\d+\.\s+(.*)$", stripped_line)
-        if ordered_match:
-            _add_list_item(doc, ordered_match.group(1).strip(), ordered=True)
-            continue
-
-        bullet_match = re.match(r"^[-*]\s+(.*)$", stripped_line)
-        if bullet_match:
-            _add_list_item(doc, bullet_match.group(1).strip(), ordered=False)
-            continue
-
-        quote_match = re.match(r"^>\s?(.*)$", stripped_line)
-        if quote_match:
-            _add_quote_block(doc, quote_match.group(1).strip())
-            continue
-
-        image_match = re.match(r"^!\[([^\]]*)\]\((.+)\)$", stripped_line)
-        if image_match:
-            image_buffer = _decode_data_image_uri(image_match.group(2).strip())
-            if image_buffer is not None:
-                caption_text = image_match.group(1).strip() or None
-                _add_docx_image(doc, image_buffer, caption_text=caption_text)
-            continue
-
-        _add_body_paragraph(doc, stripped_line)
-
-    if in_code_block and code_lines:
-        _add_code_block(doc, "\n".join(code_lines))
-
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer.getvalue()
 
 
 def build_docx_from_markdown(markdown_text: str) -> bytes:
@@ -1594,11 +1568,243 @@ def truncate_text(value: Any, max_chars: int = 4000) -> str:
     return text[:max_chars] + "\n\n...[内容过长，已截断]"
 
 
+VISUAL_TOC_MAX_TOPICS = 12
+VISUAL_TOC_ANALYSES_PER_TOPIC = 3
+VISUAL_TOC_ITEM_ANALYSIS_CHARS = 260
+VISUAL_TOC_TOPIC_ANALYSIS_CHARS = 700
+
+
+def _single_line_text(value: Any, max_chars: int) -> str:
+    text = stringify_string(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "...[截断]"
+
+
+def _plotly_title_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        text = value.get("text") or value.get("title") or value.get("name")
+        if isinstance(text, dict):
+            return _plotly_title_text(text)
+        if text is not None:
+            return str(text).strip()
+    return ""
+
+
+def _extract_plotly_metadata(fig_value: Any) -> dict[str, Any]:
+    fig = maybe_json_loads(fig_value)
+    if not isinstance(fig, dict):
+        return {}
+
+    layout = fig.get("layout") if isinstance(fig.get("layout"), dict) else {}
+    data = fig.get("data") if isinstance(fig.get("data"), list) else []
+
+    trace_names: list[str] = []
+    trace_types: list[str] = []
+    for trace in data:
+        if not isinstance(trace, dict):
+            continue
+        trace_name = str(trace.get("name", "")).strip()
+        trace_type = str(trace.get("type", "")).strip()
+        if trace_name and trace_name not in trace_names:
+            trace_names.append(trace_name)
+        if trace_type and trace_type not in trace_types:
+            trace_types.append(trace_type)
+
+    return {
+        "title": _plotly_title_text(layout.get("title")),
+        "x_axis": _plotly_title_text((layout.get("xaxis") or {}).get("title") if isinstance(layout.get("xaxis"), dict) else ""),
+        "y_axis": _plotly_title_text((layout.get("yaxis") or {}).get("title") if isinstance(layout.get("yaxis"), dict) else ""),
+        "legend": _plotly_title_text((layout.get("legend") or {}).get("title") if isinstance(layout.get("legend"), dict) else ""),
+        "trace_names": trace_names[:8],
+        "trace_types": trace_types[:4],
+    }
+
+
+def _clean_visual_topic_token(value: Any, max_chars: int = 36) -> str:
+    text = stringify_string(value)
+    text = html.unescape(text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" ：:，,。.;；、-_/\\|")
+    text = re.sub(r"^(?:图表|图中|该图|可视化结果|结果|数据显示)(?:展示|显示|反映|呈现)?(?:了)?", "", text)
+    text = re.sub(
+        r"(?:频率)?(?:分布)?(?:直方图|柱状图|条形图|折线图|散点图|箱线图|热力图|饼图|雷达图|图表|可视化|分析)$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = text.strip(" 的：:，,。.;；、-_/\\|")
+
+    generic_terms = {
+        "id", "index", "idx", "count", "value", "variable",
+        "图表", "数据", "变量", "字段", "数值", "样本", "类别",
+        "分布", "关系", "趋势", "比较", "分析", "主要变量", "整体数据",
+    }
+    if not text or text.lower() in generic_terms:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip()
+
+
+def _visual_theme_from_text(text: str, trace_types: list[str] | None = None) -> str:
+    source = text.lower()
+    chart_types = " ".join(trace_types or []).lower()
+    combined = f"{source} {chart_types}"
+
+    theme_rules = (
+        ("模型结果", ("模型", "准确率", "auc", "rmse", "mae", "重要性", "预测", "classification", "regression")),
+        ("变量关系", ("相关", "关系", "影响", "关联", "scatter", "heatmap", "corr")),
+        ("变化趋势", ("趋势", "变化", "时间", "日期", "月份", "年份", "line")),
+        ("分组比较", ("比较", "对比", "差异", "分组", "类别", "bar", "pie")),
+        ("分布特征", ("分布", "集中", "离散", "异常", "箱线", "直方", "histogram", "box", "violin")),
+    )
+    for theme, keywords in theme_rules:
+        if any(keyword in combined for keyword in keywords):
+            return theme
+    return "综合特征"
+
+
+def _topic_from_analysis_text(analysis: str) -> str:
+    relation_match = re.search(
+        r"([\u4e00-\u9fffA-Za-z0-9_]{2,20}?)(?:与|和|及|、)([\u4e00-\u9fffA-Za-z0-9_]{2,20}?)(?:之间)?(?:的)?(?:关系|相关|差异|比较|对比)",
+        analysis,
+        flags=re.IGNORECASE,
+    )
+    if relation_match:
+        topic = _clean_visual_topic_token(f"{relation_match.group(1)}与{relation_match.group(2)}")
+        if topic:
+            return topic
+
+    trend_match = re.search(
+        r"([\u4e00-\u9fffA-Za-z0-9_]{2,24}?)(?:随|在|按)([\u4e00-\u9fffA-Za-z0-9_]{1,12}?)(?:变化|呈现|呈|上升|下降|波动|趋势)",
+        analysis,
+        flags=re.IGNORECASE,
+    )
+    if trend_match:
+        topic = _clean_visual_topic_token(f"{trend_match.group(1)}随{trend_match.group(2)}")
+        if topic:
+            return topic
+
+    patterns = (
+        r"([A-Za-z_][A-Za-z0-9_]*(?:\s*(?:与|和|及|、|,|and|vs\.?)\s*[A-Za-z_][A-Za-z0-9_]*)+)",
+        r"([\u4e00-\u9fffA-Za-z0-9_]{2,30}?)(?:的)?(?:分布|趋势|变化|差异|占比|相关|关系|重要性|表现)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, analysis, flags=re.IGNORECASE)
+        if match:
+            topic = _clean_visual_topic_token(match.group(1))
+            if topic:
+                return topic
+
+    first_sentence = re.split(r"[。！？!?；;\n]", analysis, maxsplit=1)[0]
+    return _clean_visual_topic_token(first_sentence, max_chars=28)
+
+
+def _visual_topic_from_fig_item(item: Any, index: int) -> tuple[str, str, str]:
+    analysis = ""
+    metadata: dict[str, Any] = {}
+
+    if isinstance(item, dict):
+        analysis = stringify_string(item.get("analysis") or item.get("desc") or "")
+        metadata = _extract_plotly_metadata(item.get("fig"))
+    else:
+        analysis = stringify_string(item)
+
+    x_axis = _clean_visual_topic_token(metadata.get("x_axis"))
+    y_axis = _clean_visual_topic_token(metadata.get("y_axis"))
+    title = _clean_visual_topic_token(metadata.get("title"))
+    legend = _clean_visual_topic_token(metadata.get("legend"))
+    trace_names = []
+    for name in metadata.get("trace_names", []):
+        clean_name = _clean_visual_topic_token(name)
+        if clean_name:
+            trace_names.append(clean_name)
+
+    if x_axis and y_axis and x_axis.lower() != y_axis.lower():
+        topic = f"{x_axis}与{y_axis}"
+    else:
+        topic = y_axis or x_axis or title or legend
+        if not topic and trace_names:
+            topic = "、".join(trace_names[:3])
+        if not topic:
+            topic = _topic_from_analysis_text(analysis)
+        if not topic:
+            topic = f"图表{index + 1}"
+
+    theme_source = " ".join(
+        [
+            analysis,
+            stringify_string(metadata.get("title")),
+            stringify_string(metadata.get("trace_types")),
+        ]
+    )
+    theme = _visual_theme_from_text(theme_source, metadata.get("trace_types"))
+    return topic, theme, analysis
+
+
+def _compress_fig_analysis_for_toc(fig_analysis: list[Any]) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+
+    for index, item in enumerate(fig_analysis):
+        topic, theme, analysis = _visual_topic_from_fig_item(item, index)
+        key = re.sub(r"\s+", "", topic).lower()
+        if key not in groups:
+            groups[key] = {
+                "topic": topic,
+                "themes": [],
+                "figure_count": 0,
+                "analyses": [],
+            }
+
+        group = groups[key]
+        if theme and theme not in group["themes"]:
+            group["themes"].append(theme)
+        group["figure_count"] += 1
+        if analysis and len(group["analyses"]) < VISUAL_TOC_ANALYSES_PER_TOPIC:
+            group["analyses"].append(_single_line_text(analysis, VISUAL_TOC_ITEM_ANALYSIS_CHARS))
+
+    topics = list(groups.values())
+    if len(topics) > VISUAL_TOC_MAX_TOPICS:
+        kept_topics = topics[: VISUAL_TOC_MAX_TOPICS - 1]
+        overflow_topics = topics[VISUAL_TOC_MAX_TOPICS - 1 :]
+        kept_topics.append(
+            {
+                "topic": "其他可视化主题",
+                "themes": ["补充发现"],
+                "figure_count": sum(int(topic.get("figure_count", 0)) for topic in overflow_topics),
+                "analyses": [
+                    "还覆盖以下主题："
+                    + _single_line_text("、".join(str(topic.get("topic", "")) for topic in overflow_topics), 600)
+                ],
+            }
+        )
+        topics = kept_topics
+
+    compressed: list[dict[str, Any]] = []
+    for topic in topics:
+        analyses = [text for text in topic.get("analyses", []) if text]
+        analysis_text = "；".join(analyses)
+        compressed.append(
+            {
+                "topic": topic.get("topic", ""),
+                "theme": "、".join(topic.get("themes", [])),
+                "figure_count": topic.get("figure_count", 0),
+                "analysis": _single_line_text(analysis_text, VISUAL_TOC_TOPIC_ANALYSIS_CHARS),
+            }
+        )
+
+    return compressed
+
+
 def shrink_summary_for_toc(summary: Any) -> dict[str, Any]:
     """
     给 Reporting_toc 用的 summary 瘦身版：
     - 保留 title / desc / result / df / processed_df 的短文本
-    - fig_analysis 只保留前 3 个 analysis
+    - fig_analysis 会先按变量/主题聚合，再保留压缩后的主题摘要
     - 丢掉大 code / 大 full / 超长内容
     """
     if not isinstance(summary, dict):
@@ -1623,15 +1829,8 @@ def shrink_summary_for_toc(summary: Any) -> dict[str, Any]:
 
     fig_analysis = summary.get("fig_analysis")
     if isinstance(fig_analysis, list) and fig_analysis:
-        shrunk_figs = []
-        for item in fig_analysis[:3]:
-            if isinstance(item, dict):
-                shrunk_figs.append({
-                    "analysis": truncate_text(item.get("analysis"), 400)
-                })
-            else:
-                shrunk_figs.append(truncate_text(item, 400))
-        out["fig_analysis"] = shrunk_figs
+        out["figure_count"] = len(fig_analysis)
+        out["fig_analysis"] = _compress_fig_analysis_for_toc(fig_analysis)
 
     return out
 

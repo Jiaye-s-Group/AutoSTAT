@@ -11,9 +11,6 @@ from typing import Any
 
 import streamlit as st
 
-import pandas as pd
-
-
 def _err(msg: str) -> None:
     st.error(msg)
 

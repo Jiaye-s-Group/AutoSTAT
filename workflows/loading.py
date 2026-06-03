@@ -88,7 +88,6 @@ def run_loading_workflow(
 # ---------- CLI 测试入口 ----------
 
 if __name__ == "__main__":
-    import json
     import sys
 
     import pandas as pd

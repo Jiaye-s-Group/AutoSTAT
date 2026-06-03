@@ -1,23 +1,15 @@
 import os
 import json
-import requests
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 import streamlit_antd_components as sac
 
-from utils.coze_runtime import resolve_coze_runtime
 from utils.page_paths import page_file
 from workflow.dataloading.dataloading_core import process_complex_data, load_concat_file, PathFileWrapper
 
 # --- Coze 工作流配置 ---
-COZE_SPACE_ID = "7594748927577554949"
-WORKFLOW_ID = "7598094351072526389"
-BOT_ID = "7595403958269575173"
-DEFAULT_COZE_URL = "https://api.coze.com/v1/workflow/run"
-
-
 def _maybe_json_loads(value: Any) -> Any:
     if not isinstance(value, str):
         return value

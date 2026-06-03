@@ -21,7 +21,6 @@ from workflows.visualizing import run_visualizing_workflow
 from workflows.modeling import run_modeling_workflow
 from workflows.reporting_toc import run_reporting_toc_workflow
 from workflows.reporting_partly import run_reporting_partly_workflow
-from workflows._plugins import df_to_meta
 
 
 def run_autostat(

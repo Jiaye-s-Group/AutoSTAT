@@ -3,22 +3,12 @@ import json
 from typing import Any
 
 import pandas as pd
-import requests
 import streamlit as st
 
-from utils.coze_runtime import resolve_coze_runtime
 from utils.page_paths import page_file
 from workflow.preprocessing.preprocessing_core import prep_code_gen, prep_meta_execution
 
 # Coze intl workflow config.
-COZE_SPACE_ID = "7594748927577554949"
-WORKFLOW_ID = "7604840478119706677"
-BOT_ID = "7595403958269575173"
-DEFAULT_COZE_URL = "https://api.coze.com/v1/workflow/run"
-CONNECT_TIMEOUT_SECONDS = 30
-WORKFLOW_TIMEOUT_SECONDS = 600
-
-
 def _maybe_json_loads(value: Any) -> Any:
     if not isinstance(value, str):
         return value

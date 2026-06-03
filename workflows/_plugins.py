@@ -10,20 +10,16 @@ Plugin 的 pluginName 分为几组:
 """
 from __future__ import annotations
 
-import io
 import json
 import re
 import subprocess
 import sys
-import tempfile
 import textwrap
-import traceback
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from core.workflow_runner import to_str, to_json_str, safe_object
+from core.workflow_runner import to_str
 
 
 # ===================================================================
@@ -160,11 +156,21 @@ def sec3_check_full(*, analysis_list: list) -> dict[str, Any]:
     if not isinstance(analysis_list, list):
         return {"full": ""}
     parts = []
-    for item in analysis_list:
+    fig_pattern = re.compile(
+        r"(?<![A-Za-z0-9_])[\[\uFF3B\u3010]?\s*FIG\s*[:\uFF1A]?\s*\d+\s*[\]\uFF3D\u3011]?(?![A-Za-z0-9_])",
+        flags=re.IGNORECASE,
+    )
+    for index, item in enumerate(analysis_list):
         if isinstance(item, dict):
-            parts.append(to_str(item.get("analysis", "")))
+            text = to_str(item.get("analysis", ""))
         elif isinstance(item, str):
-            parts.append(item)
+            text = item
+        else:
+            text = ""
+        text = text.strip()
+        if text and not fig_pattern.search(text):
+            text = f"[FIG:{index}] {text}"
+        parts.append(text)
     full = "\n\n".join(p for p in parts if p)
     return {"full": full}
 
@@ -282,16 +288,11 @@ except Exception as e:
     traceback.print_exc(file=sys.stderr)
     sys.exit(2)
 
-# 约定：用户代码处理后的结果在 process_df / processed_df / df 里任一
-_out = None
-for _cand in ("process_df", "processed_df", "df"):
-    _v = locals().get(_cand)
-    if isinstance(_v, pd.DataFrame):
-        _out = _v
-        break
-if _out is None:
+# 约定：用户代码处理后的结果必须写入 process_df，与前端执行器保持一致
+_out = locals().get("process_df")
+if not isinstance(_out, pd.DataFrame):
     print("__AUTOSTAT_ERROR__", file=sys.stderr)
-    print("代码中未定义 process_df / processed_df / df", file=sys.stderr)
+    print("代码必须定义 pandas.DataFrame 类型的 process_df", file=sys.stderr)
     sys.exit(3)
 
 print(json.dumps({
@@ -311,9 +312,9 @@ def code_runner(
     preprocessing/138975
     在子进程里执行 LLM 生成的预处理代码。隔离 + 超时。
 
-    用户代码约定（Coze 那边也是同样约定）：
+    用户代码约定：
         - 输入变量名 df（pandas.DataFrame）
-        - 处理后结果放到 process_df 或 processed_df（或直接复用 df）
+        - 处理后结果必须放到 process_df，与前端执行器保持一致
     """
     user_code = to_str(code).strip()
     if not user_code:

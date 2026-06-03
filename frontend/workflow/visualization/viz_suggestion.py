@@ -1,6 +1,3 @@
-import streamlit as st
-
-
 def vis_button_suggest(agent):
     """
     按钮路径：调用 LLM 获取结构化的可视化推荐（JSON）。

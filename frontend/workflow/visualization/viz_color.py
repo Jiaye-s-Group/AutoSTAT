@@ -794,10 +794,6 @@ def _histogram_boundary_shapes(trace):
     ]
 
 
-def _trace_axis_ref(trace, axis_name):
-    return getattr(trace, axis_name, axis_name[0])
-
-
 def _to_list(values):
     if values is None:
         return None

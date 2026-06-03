@@ -6,22 +6,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 import plotly.io as pio
-import requests
 import streamlit as st
 import streamlit_antd_components as sac
 
-from utils.coze_runtime import resolve_coze_runtime
 from utils.page_paths import page_file
 from workflow.visualization.viz_coding import vis_code_gen, vis_execution
 from workflow.visualization.viz_color import apply_palette_to_figure, vis_palette
-
-COZE_SPACE_ID = "7594748927577554949"
-WORKFLOW_ID = "7628850702967930885"
-BOT_ID = "7595403958269575173"
-DEFAULT_COZE_URL = "https://api.coze.com/v1/workflow/run"
-CONNECT_TIMEOUT_SECONDS = 30
-WORKFLOW_TIMEOUT_SECONDS = 600
-
 
 def _maybe_json_loads(value: Any) -> Any:
     if not isinstance(value, str):
@@ -612,15 +602,6 @@ def _continue_visualization_phase2(agent) -> None:
     agent.add_memory({"role": "assistant", "content": workflow_result})
     agent.finish_auto()
     st.rerun()
-
-
-def _has_visualization_result(agent) -> bool:
-    suggestion = (
-        st.session_state.get("visual_recommendatio")
-        or st.session_state.get("viz_suggestion")
-        or agent.load_suggestion()
-    )
-    return bool(suggestion)
 
 
 def _has_visualization_execution_result(agent) -> bool:

@@ -40,7 +40,6 @@ from core.rag_retriever import retrieve
 from core.workflow_runner import to_str
 from workflows._plugins import (
     format_recall,
-    code_runner,
     sec4_composer,
 )
 
@@ -293,7 +292,7 @@ def run_modeling_workflow(
 def _run_modeling_code(*, code: str, data: str, timeout_seconds: int = 300) -> dict[str, Any]:
     """
     执行建模训练代码。
-    约定用户代码会往 stdout 打印 JSON（如 {"accuracy": 0.95}），并设置 result 变量。
+    约定用户代码必须设置 result_dict 变量，与前端执行器保持一致。
     """
     import json
     import subprocess
@@ -311,7 +310,6 @@ import numpy as np
 _RECORDS = json.loads(sys.stdin.read())
 df = pd.DataFrame(_RECORDS)
 
-result = {}
 try:
 __USER_CODE__
 except Exception as e:
@@ -319,19 +317,12 @@ except Exception as e:
     traceback.print_exc(file=sys.stderr)
     sys.exit(2)
 
-# 收集 result 变量
-# 兼容工作流脚本返回 result_dict，以及旧版 result / result_json。
-_result_candidates = (
-    locals().get("result_dict"),
-    locals().get("result_json"),
-    locals().get("result"),
-)
-_out = next((item for item in _result_candidates if item is not None), {})
+# 收集 result_dict 变量。后端 runner 与前端训练执行器保持同一输出协议。
+_out = locals().get("result_dict")
 if not isinstance(_out, dict):
-    try:
-        _out = {"value": str(_out)}
-    except Exception:
-        _out = {}
+    print("__AUTOSTAT_ERROR__", file=sys.stderr)
+    print("代码必须定义 dict 类型的 result_dict", file=sys.stderr)
+    sys.exit(3)
 
 # 把 numpy / pandas 类型变成原生 JSON 友好类型
 def _clean(o):
