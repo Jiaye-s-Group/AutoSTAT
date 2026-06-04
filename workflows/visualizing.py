@@ -80,7 +80,20 @@ def _sanitize_visualization_code(code: str) -> str:
                 return None
             return self.generic_visit(node)
 
+    class _FixPlotlyExpressArgs(ast.NodeTransformer):
+        def visit_Call(self, node):
+            self.generic_visit(node)
+            for keyword in node.keywords:
+                if (
+                    keyword.arg == "marginal"
+                    and isinstance(keyword.value, ast.Constant)
+                    and str(keyword.value.value).lower() == "kde"
+                ):
+                    keyword.value = ast.Constant(value="rug")
+            return node
+
     sanitized_tree = _DropDfReassign().visit(tree)
+    sanitized_tree = _FixPlotlyExpressArgs().visit(sanitized_tree)
     ast.fix_missing_locations(sanitized_tree)
     try:
         return ast.unparse(sanitized_tree).strip()
@@ -190,12 +203,17 @@ def run_visualizing_phase2(
             break
 
         last_error = validate.get("error_msg", "")
+        # 截断长字段，防止 prompt 超出 LLM 上下文窗口
+        MAX_ERR_CHARS = 8000
+        MAX_CODE_CHARS = 30000
+        _err_trunc = last_error[-MAX_ERR_CHARS:] if len(last_error) > MAX_ERR_CHARS else last_error
+        _code_trunc = current_code[:MAX_CODE_CHARS] if len(current_code) > MAX_CODE_CHARS else current_code
         fix_ctx = {
             **ctx,
-            "code": current_code,
-            "code_vis": current_code,
-            "error_msg": last_error,
-            "error": last_error,
+            "code": _code_trunc,
+            "code_vis": _code_trunc,
+            "error_msg": _err_trunc,
+            "error": _err_trunc,
         }
         fix_sys = render_file("visualizing/sec3_fixed_code_llm_sys.txt", fix_ctx)
         fix_user = render_file("visualizing/sec3_fixed_code_llm_user.txt", fix_ctx)

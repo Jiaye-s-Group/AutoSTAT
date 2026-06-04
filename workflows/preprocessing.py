@@ -144,12 +144,17 @@ def run_preprocessing_workflow(
             break
 
         # ---------- 节点 6.x: Code_Fixer LLM ----------
+        # 截断长字段，防止 prompt 超出 LLM 上下文窗口
+        MAX_ERR_CHARS = 8000
+        MAX_CODE_CHARS = 30000
+        _err_trunc = last_error[-MAX_ERR_CHARS:] if len(last_error) > MAX_ERR_CHARS else last_error
+        _code_trunc = current_code[:MAX_CODE_CHARS] if len(current_code) > MAX_CODE_CHARS else current_code
         fix_ctx = {
             **ctx,
-            "code": current_code,
-            "code_prep": current_code,
-            "error": last_error,
-            "error_msg": last_error,
+            "code": _code_trunc,
+            "code_prep": _code_trunc,
+            "error": _err_trunc,
+            "error_msg": _err_trunc,
         }
         fix_sys = render_file("preprocessing/code_fixer_llm_sys.txt", fix_ctx)
         fix_user = render_file("preprocessing/code_fixer_llm_user.txt", fix_ctx)
