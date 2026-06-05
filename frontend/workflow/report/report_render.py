@@ -599,6 +599,7 @@ def _build_figure_block_tag(
 
     return block
 
+
 def _replace_paragraph_placeholders_at_boundaries(
     soup: BeautifulSoup,
     fig_desc_list: list[Any],
@@ -1570,75 +1571,6 @@ def _prepare_downloadable_reports(report_agent, generation_token: str | None = N
     }
 
 
-def _refresh_markdown_from_html(report_agent, html_content: str) -> str:
-    markdown_content = html_to_markdown(html_content) if html_content else ""
-    if markdown_content:
-        report_agent.save_markdown(markdown_content)
-    return markdown_content
-
-
-def _ensure_pdf_download_ready(report_agent, downloadable_reports: dict[str, Any]) -> dict[str, Any]:
-    if downloadable_reports.get("pdf") is not None:
-        return downloadable_reports
-
-    word_bytes = downloadable_reports.get("word")
-    html_content = downloadable_reports.get("html")
-    if not word_bytes and not html_content:
-        return downloadable_reports
-
-    try:
-        with st.spinner("正在生成 PDF 报告..."):
-            pdf_bytes, pdf_export_method = convert_report_to_pdf_bytes(
-                word_bytes=word_bytes,
-                html_content=html_content,
-            )
-    except Exception as exc:
-        print("[REPORT][PDF] convert_report_to_pdf_bytes failed:", repr(exc))
-        return downloadable_reports
-
-    downloadable_reports["pdf"] = pdf_bytes
-    downloadable_reports["pdf_export_method"] = pdf_export_method
-    report_agent.save_pdf(pdf_bytes)
-    report_agent.save_pdf_export_method(pdf_export_method)
-    return downloadable_reports
-
-
-def _build_markdown_preview(markdown_text: str) -> str:
-    preview = re.sub(
-        r"^\s*!\[[^\]]*\]\((?:data:image/[^)]+|embedded-image)\)\s*$",
-        "",
-        markdown_text,
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
-    preview = re.sub(
-        r"!\[([^\]]*)\]\(data:image/[^)]+\)",
-        lambda match: f"![{match.group(1) or '图表'}](embedded-image)",
-        preview,
-        flags=re.IGNORECASE,
-    )
-    preview = re.sub(
-        r"(?:!\[[^\]]*\]\(embedded-image\)\s*){2,}",
-        "[图表已嵌入，预览中省略重复图片占位]\n\n",
-        preview,
-        flags=re.IGNORECASE,
-    )
-    preview = re.sub(r"\n{3,}", "\n\n", preview).strip()
-    if not preview:
-        preview = "[正文预览为空，下载的 Markdown 文件中仍包含完整图表内容]"
-    if len(preview) > 60000:
-        preview = preview[:60000].rstrip() + "\n\n...[预览已截断，下载文件中仍保留完整内容]"
-    return preview
-
-
-def _render_report_preview(html_content: str, markdown_content: str) -> None:
-    if (html_content or "").strip():
-        components.html(html_content, height=720, scrolling=True)
-        return
-
-    if (markdown_content or "").strip():
-        st.markdown(_build_markdown_preview(markdown_content))
-
-
 def _ensure_pdf_download_ready(report_agent, downloadable_reports: dict[str, Any]) -> dict[str, Any]:
     if downloadable_reports.get("pdf") is not None:
         return downloadable_reports
@@ -1790,18 +1722,24 @@ def _clear_report_workflow_outputs(report_agent) -> None:
     report_agent.save_report(None)
     report_agent.save_report_content(None)
 
+    for field_name in REPORT_WORKFLOW_OUTPUT_FIELDS:
+        st.session_state.pop(f"report_{field_name}", None)
 
-def _begin_report_generation(report_agent) -> str:
-    generation_token = str(time.time_ns())
-    st.session_state[REPORT_GENERATION_TOKEN_KEY] = generation_token
-    st.session_state[REPORT_GENERATION_RUNNING_KEY] = True
-    _capture_pending_report_preview(report_agent)
-    _clear_active_report_outputs(report_agent)
-    return generation_token
+    st.session_state.pop("report_workflow_outputs", None)
+    st.session_state.pop("report_preference_selected", None)
 
 
-def _is_current_report_generation(generation_token: str | None) -> bool:
-    return bool(generation_token) and st.session_state.get(REPORT_GENERATION_TOKEN_KEY) == generation_token
+def _save_report_workflow_outputs(report_agent, workflow_result: dict[str, Any]) -> None:
+    extracted_outputs = _extract_report_workflow_outputs(workflow_result)
+
+    report_agent.save_report_workflow_result(workflow_result)
+    report_agent.save_report(workflow_result)
+    report_agent.save_report_content(None)
+
+    st.session_state.report_workflow_outputs = extracted_outputs
+    for field_name in REPORT_WORKFLOW_OUTPUT_FIELDS:
+        st.session_state[f"report_{field_name}"] = extracted_outputs.get(field_name)
+    st.session_state.report_preference_selected = extracted_outputs.get("preference_selected")
 
 
 def _clear_active_report_outputs(report_agent) -> None:
@@ -1826,112 +1764,6 @@ def _is_current_report_generation(generation_token: str | None) -> bool:
 
 def _is_report_generation_cancelled(generation_token: str | None) -> bool:
     return not _is_current_report_generation(generation_token)
-
-
-def _finish_report_generation(generation_token: str | None) -> None:
-    if _is_current_report_generation(generation_token):
-        st.session_state[REPORT_GENERATION_RUNNING_KEY] = False
-
-
-def _complete_auto_report(report_agent) -> None:
-    report_agent.finish_auto()
-    st.session_state.auto_mode = False
-
-    planner = st.session_state.get("planner_agent")
-    if planner is not None:
-        planner.finish_report_auto()
-
-
-def _has_report_prerequisites() -> bool:
-    return bool(
-        st.session_state.get("summary_1")
-        and st.session_state.get("summary_2")
-        and st.session_state.get("summary_3")
-        and st.session_state.get("summary_4")
-    )
-
-
-def _has_usable_visualization_source(source: Any) -> bool:
-    if source is None:
-        return False
-
-    if isinstance(source, pd.DataFrame):
-        return not source.empty
-
-    if isinstance(source, np.ndarray):
-        return source.size > 0
-
-    if isinstance(source, str):
-        return bool(source.strip())
-
-    if isinstance(source, (list, dict)):
-        return bool(source)
-
-    return True
-
-
-def _source_to_visualization_dataframe(source: Any) -> pd.DataFrame | None:
-    if isinstance(source, pd.DataFrame):
-        return source.copy()
-
-    if isinstance(source, np.ndarray):
-        return pd.DataFrame(source)
-
-    if isinstance(source, str):
-        parsed = maybe_json_loads(source)
-        if isinstance(parsed, str):
-            return None
-        source = parsed
-
-    if isinstance(source, list):
-        try:
-            return pd.DataFrame(source)
-        except Exception:
-            return None
-
-    return None
-
-
-def _resolve_visualization_dataframe_for_report(preproc_agent, load_agent) -> pd.DataFrame | None:
-    processed_df = preproc_agent.load_processed_df()
-    if _has_usable_visualization_source(processed_df):
-        return _source_to_visualization_dataframe(processed_df)
-
-    summary_2 = st.session_state.get("summary_2")
-    if isinstance(summary_2, dict):
-        summary_processed_df = summary_2.get("processed_df")
-        if _has_usable_visualization_source(summary_processed_df):
-            return _source_to_visualization_dataframe(summary_processed_df)
-
-    cached_processed_df = st.session_state.get("prep_result_from_summary_2")
-    if _has_usable_visualization_source(cached_processed_df):
-        return _source_to_visualization_dataframe(cached_processed_df)
-
-    raw_df = load_agent.load_df()
-    if _has_usable_visualization_source(raw_df):
-        return _source_to_visualization_dataframe(raw_df)
-
-    return None
-
-
-def _has_generated_outline(report_agent) -> bool:
-    return bool(normalize_toc_list(report_agent.load_outline()))
-
-
-def _has_generated_word_report(report_agent) -> bool:
-    return bool(report_agent.load_report_content() or report_agent.load_html() or report_agent.load_word())
-
-
-def _has_visualization_recommendation(visualization_agent) -> bool:
-    if visualization_agent is None:
-        return False
-
-    suggestion = (
-        st.session_state.get("visual_recommendatio")
-        or st.session_state.get("viz_suggestion")
-        or visualization_agent.load_suggestion()
-    )
-    return bool(stringify_string(suggestion))
 
 
 def _finish_report_generation(generation_token: str | None) -> None:
@@ -2562,33 +2394,10 @@ def call_coze_workflow_report_stream(inputs: dict[str, Any]) -> dict[str, Any] |
     """本地化版本：调用本地 Reporting_toc workflow。"""
     from utils.local_workflow_bridge import call_reporting_toc_bridge
 
+    status_placeholder = st.empty()
+    status_placeholder.info("正在生成目录，请稍后。")
 
-def _get_report_worker_ref_context(inputs: dict[str, Any]) -> str:
-    retriever = st.session_state.get("ref_retriever")
-    if retriever is None:
-        return ""
-
-    is_empty = getattr(retriever, "is_empty", False)
-    if callable(is_empty):
-        try:
-            is_empty = is_empty()
-        except Exception:
-            is_empty = False
-    if is_empty:
-        return ""
-
-    try:
-        return retriever.retrieve_and_format(
-            f"报告撰写 业务背景 {inputs.get('add_preference', '')}",
-            top_k=3,
-        )
-    except Exception as exc:
-        print("[REPORT][JOB] reference retrieval failed:", repr(exc))
-        return ""
-
-
-def _build_report_worker_payload(report_agent) -> dict[str, Any]:
-    inputs = _build_word_report_inputs(report_agent)
+    inputs = dict(inputs)
     inputs.setdefault("add_preference", st.session_state.get("add_preference") or "")
     inputs.setdefault("preference_selected", st.session_state.get("preference_selected") or "")
 
@@ -2624,7 +2433,6 @@ def call_coze_workflow_word_stream(
     inputs.setdefault("add_preference", st.session_state.get("add_preference") or "")
     # report workflow 字段名是 preference_select
     inputs.setdefault("preference_select", st.session_state.get("preference_selected") or "")
-    inputs["ref_context"] = _get_report_worker_ref_context(inputs)
 
     if generation_token is not None:
         inputs["_report_cancel_check"] = lambda: _is_report_generation_cancelled(generation_token)
@@ -2665,123 +2473,6 @@ def _generate_formatted_report(report_agent, action: str) -> None:
     if _is_report_generation_cancelled(generation_token):
         return
 
-    work_dir = job.get("work_dir")
-    if not work_dir:
-        return
-
-    try:
-        work_path = Path(str(work_dir)).resolve()
-        temp_root = Path(tempfile.gettempdir()).resolve()
-        if temp_root not in (work_path, *work_path.parents):
-            print("[REPORT][JOB] skip cleanup outside temp dir:", work_path)
-            return
-        if not work_path.name.startswith("autostat_report_"):
-            print("[REPORT][JOB] skip cleanup for unexpected temp dir:", work_path)
-            return
-        shutil.rmtree(work_path, ignore_errors=True)
-    except Exception as exc:
-        print("[REPORT][JOB] cleanup failed:", repr(exc))
-
-
-def _terminate_report_generation_process() -> None:
-    job = st.session_state.get(REPORT_GENERATION_JOB_KEY)
-    process = st.session_state.get(REPORT_GENERATION_PROCESS_KEY)
-    if process is None and isinstance(job, dict):
-        process = job.get("process")
-
-    poll = getattr(process, "poll", None)
-    if callable(poll):
-        try:
-            if process.poll() is None:
-                print(f"[REPORT][JOB] terminate previous report process pid={getattr(process, 'pid', None)}")
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=3)
-        except Exception as exc:
-            print("[REPORT][JOB] terminate failed:", repr(exc))
-
-    if isinstance(job, dict):
-        _cleanup_report_job_files(job)
-        token = job.get("token")
-        if token and _is_current_report_generation(token):
-            st.session_state[REPORT_GENERATION_RUNNING_KEY] = False
-
-    st.session_state.pop(REPORT_GENERATION_PROCESS_KEY, None)
-    st.session_state.pop(REPORT_GENERATION_JOB_KEY, None)
-
-
-def _start_report_generation_process(report_agent, action: str) -> bool:
-    _terminate_report_generation_process()
-    generation_token = _begin_report_generation(report_agent)
-
-    work_dir = tempfile.mkdtemp(prefix="autostat_report_")
-    input_path = os.path.join(work_dir, "input.json")
-    output_path = os.path.join(work_dir, "output.json")
-    payload = _build_report_worker_payload(report_agent)
-
-    try:
-        with open(input_path, "w", encoding="utf-8") as file:
-            json.dump(payload, file, ensure_ascii=False)
-
-        env = os.environ.copy()
-        llm_config = payload.get("llm_config") if isinstance(payload.get("llm_config"), dict) else {}
-        if llm_config.get("api_key"):
-            env["OPENAI_API_KEY"] = str(llm_config["api_key"])
-        if llm_config.get("base_url"):
-            env["OPENAI_BASE_URL"] = str(llm_config["base_url"])
-        if llm_config.get("model"):
-            env["OPENAI_MODEL"] = str(llm_config["model"])
-
-        process = subprocess.Popen(
-            [sys.executable, "-m", "workflows.reporting_partly_worker", input_path, output_path],
-            cwd=str(_report_repo_root()),
-            env=env,
-        )
-    except Exception as exc:
-        _cleanup_report_job_files({"work_dir": work_dir})
-        _finish_report_generation(generation_token)
-        st.error(f"报告生成进程启动失败：{exc}")
-        return False
-
-    job = {
-        "token": generation_token,
-        "action": action,
-        "work_dir": work_dir,
-        "input_path": input_path,
-        "output_path": output_path,
-        "pid": process.pid,
-        "started_at": time.time(),
-        "process": process,
-    }
-    st.session_state[REPORT_GENERATION_PROCESS_KEY] = process
-    st.session_state[REPORT_GENERATION_JOB_KEY] = job
-    st.session_state[REPORT_GENERATION_RUNNING_KEY] = True
-    print(f"[REPORT][JOB] started report process pid={process.pid}")
-    return True
-
-
-def _read_report_worker_output(job: dict[str, Any]) -> dict[str, Any] | None:
-    output_path = job.get("output_path")
-    if not output_path or not os.path.exists(str(output_path)):
-        return None
-    try:
-        with open(str(output_path), "r", encoding="utf-8") as file:
-            payload = json.load(file)
-        return payload if isinstance(payload, dict) else None
-    except Exception as exc:
-        return {"ok": False, "error": f"报告生成结果读取失败：{exc}"}
-
-
-def _save_formatted_report_result(
-    report_agent,
-    action: str,
-    workflow_result: dict[str, Any],
-    generation_token: str | None,
-) -> bool:
-    status_placeholder = st.empty()
     raw_content = extract_report_html(workflow_result)
     if not raw_content:
         status_placeholder.empty()
