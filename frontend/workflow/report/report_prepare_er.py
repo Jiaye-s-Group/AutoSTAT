@@ -49,9 +49,7 @@ def report_prepare(agents, parallel=True, max_workers=4):
         for i in stqdm(range(len(agents) - 1)):
             agent_abstracts[i] = agents[i].check_abstract()
 
-    # === 更新 toc 的 FIG 列表 ===
-    selected_full_contents_vis = agents[2].check_full()
-    toc = report_agent.selected_photo_update_toc(toc, selected_full_contents_vis)
+    # 图文匹配由本地 reporting_partly workflow 统一处理；旧准备路径不再分配 figures。
     toc = sanitize_code(toc)
     # print(toc)
     try:

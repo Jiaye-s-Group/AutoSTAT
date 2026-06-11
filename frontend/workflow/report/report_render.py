@@ -899,7 +899,8 @@ def _inject_visualizations_into_html(final_html: str) -> str:
     print("[REPORT][FIG] placeholders found in html =", matches)
 
     match_numbers = [int(item) for item in matches if str(item).isdigit()]
-    prefer_one_based = bool(match_numbers) and 0 not in match_numbers and max(match_numbers) <= len(fig_desc_list)
+    # [FIG:i] uses zero-based visualization indices.
+    prefer_one_based = False
     print("[REPORT][FIG] placeholder numbering mode =", "1-based" if prefer_one_based else "0-based")
 
     valid_unique_fig_indices: list[int] = []
@@ -1419,11 +1420,21 @@ def _normalize_markdown_headings_in_html(final_html: str) -> str:
 
         replacement_nodes: list[Tag] = []
         for line in lines:
+            heading_match = re.match(r"^(#{1,6})[ \t\u3000]*(.*)$", line)
+            if heading_match:
+                heading_level = len(heading_match.group(1))
+                heading_text = heading_match.group(2).strip()
+                if heading_text:
+                    heading_tag = soup.new_tag(f"h{heading_level}")
+                    heading_tag.string = heading_text
+                    replacement_nodes.append(heading_tag)
+                    continue
+
             parsed_segments = _split_markdown_heading_lines(line)
             if parsed_segments:
                 for line_kind, line_text in parsed_segments:
                     if line_kind == "heading":
-                        heading_tag = soup.new_tag("h1")
+                        heading_tag = soup.new_tag("h2")
                         heading_tag.string = line_text
                         replacement_nodes.append(heading_tag)
                     else:
@@ -1435,7 +1446,7 @@ def _normalize_markdown_headings_in_html(final_html: str) -> str:
                 paragraph_tag.string = line
                 replacement_nodes.append(paragraph_tag)
 
-        if not replacement_nodes or not any(node.name == "h1" for node in replacement_nodes):
+        if not replacement_nodes or not any(re.match(r"^h[1-6]$", node.name or "") for node in replacement_nodes):
             continue
 
         first_node = replacement_nodes[0]

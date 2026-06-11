@@ -94,7 +94,7 @@ def run_reporting_toc_workflow(
     toc_raw = chat(t_sys, t_user, name="report_toc.generate_toc").strip()
 
     # ---------- 节点 3: 规整目录 + 补齐"结论" ----------
-    toc_text = _normalize_toc(toc_raw)
+    toc_text = _normalize_toc(toc_raw, visual_summary=ctx.get("visual_summary"))
 
     return {
         "toc_text": toc_text,
@@ -111,7 +111,109 @@ def run_reporting_toc_workflow(
     }
 
 
-def _normalize_toc(raw: str) -> str:
+CHART_TYPE_ONLY_TITLES = {
+    "小提琴图",
+    "散点图",
+    "散点图矩阵",
+    "热力图",
+    "平行坐标图",
+    "PCA降维图",
+    "主成分分析图",
+    "箱线图",
+    "柱状图",
+    "条形图",
+    "折线图",
+    "直方图",
+    "饼图",
+    "雷达图",
+}
+
+
+def _split_toc_line(line: str) -> tuple[str, str, str] | None:
+    match = re.match(r"^(\d+(?:[\.．]\d+)*)(?:[\.．、]|\s+)?\s*(.*)$", str(line or "").strip())
+    if not match:
+        return None
+
+    num = match.group(1).replace("．", ".").strip()
+    remainder = match.group(2).strip()
+    outline = ""
+    outline_match = re.search(r"[（(]([^()（）]*)[）)]\s*$", remainder)
+    if outline_match:
+        outline = outline_match.group(1).strip()
+        title = remainder[: outline_match.start()].strip()
+    else:
+        title = remainder.strip()
+    return num, title, outline
+
+
+def _clean_generated_visual_title(text: str) -> str:
+    cleaned = re.sub(r"\s+", "", str(text or ""))
+    cleaned = re.sub(
+        r"^(?:小提琴图|散点图矩阵|散点图|热力图|平行坐标图|PCA降维图|"
+        r"主成分分析图|箱线图|柱状图|条形图|折线图|直方图|饼图|雷达图)"
+        r"(?:展示|显示|反映|呈现|说明|揭示)?(?:了)?",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"(?:小提琴图|散点图矩阵|散点图|热力图|平行坐标图|PCA降维图|"
+        r"主成分分析图|箱线图|柱状图|条形图|折线图|直方图|饼图|雷达图)$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = cleaned.strip(" ：:，,。.;；、-_/\\|")
+    return cleaned[:28].rstrip()
+
+
+def _visual_topic_candidates(visual_summary: Any) -> list[str]:
+    if not isinstance(visual_summary, dict):
+        return []
+    topics: list[str] = []
+    fig_analysis = visual_summary.get("fig_analysis")
+    if not isinstance(fig_analysis, list):
+        return topics
+    for item in fig_analysis:
+        if not isinstance(item, dict):
+            continue
+        topic = _clean_generated_visual_title(item.get("topic", ""))
+        if topic and topic not in topics:
+            topics.append(topic)
+    return topics
+
+
+def _soften_visual_chart_type_titles(toc_lines: list[str], visual_summary: Any) -> list[str]:
+    topic_candidates = _visual_topic_candidates(visual_summary)
+    topic_index = 0
+    softened: list[str] = []
+
+    for line in toc_lines:
+        parsed = _split_toc_line(line)
+        if parsed is None:
+            softened.append(line)
+            continue
+
+        num, title, outline = parsed
+        compact_title = re.sub(r"\s+", "", title)
+        if not num.startswith("3.") or compact_title not in CHART_TYPE_ONLY_TITLES:
+            softened.append(line)
+            continue
+
+        replacement = _clean_generated_visual_title(outline)
+        if not replacement and topic_index < len(topic_candidates):
+            replacement = topic_candidates[topic_index]
+            topic_index += 1
+        if not replacement:
+            replacement = "可视化发现"
+
+        suffix = f"（{outline}）" if outline else ""
+        softened.append(f"{num}{replacement}{suffix}")
+
+    return softened
+
+
+def _normalize_toc(raw: str, visual_summary: Any | None = None) -> str:
     """
     - 把 \\n 转成真换行
     - 只保留目录项
@@ -131,6 +233,7 @@ def _normalize_toc(raw: str) -> str:
     if not any("结论" in line or "展望" in line for line in toc_lines):
         toc_lines.append("5.结论与应用展望（总结分析发现及模型表现，提出后续优化方向）")
 
+    toc_lines = _soften_visual_chart_type_titles(toc_lines, visual_summary)
     return "\n".join(toc_lines)
 
 

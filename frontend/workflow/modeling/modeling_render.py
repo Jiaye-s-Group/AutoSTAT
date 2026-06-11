@@ -423,8 +423,16 @@ def _continue_modeling_phase2(agent) -> None:
     st.session_state.summary_4 = workflow_result.get("summary_4")
     st.session_state.abstract_4 = workflow_result.get("abstract_4")
 
+    summary_4 = workflow_result.get("summary_4")
+    if isinstance(summary_4, dict):
+        workflow_code = str(summary_4.get("code") or workflow_result.get("_final_code") or "").strip()
+        if workflow_code:
+            agent.save_code(workflow_code)
+        result_text = summary_4.get("result")
+        if result_text is not None:
+            agent.save_modeling_result(result_text)
+
     agent.add_memory({"role": "assistant", "content": workflow_result})
-    agent.finish_auto()
     st.rerun()
 
 
@@ -435,12 +443,22 @@ def _has_modeling_result(agent) -> bool:
     return bool(suggestion)
 
 
+def _has_completed_modeling_result(agent) -> bool:
+    summary_4 = st.session_state.get("summary_4") or st.session_state.get("modeling_summary_4")
+    if not isinstance(summary_4, dict):
+        return False
+
+    has_code = bool(str(summary_4.get("code") or agent.load_code() or "").strip())
+    has_result = bool(summary_4.get("result") or agent.load_modeling_result())
+    return has_code and has_result
+
+
 def _has_report_prerequisites(agent) -> bool:
     return bool(
         st.session_state.get("summary_1")
         and st.session_state.get("summary_2")
         and st.session_state.get("summary_3")
-        and st.session_state.get("summary_4")
+        and _has_completed_modeling_result(agent)
     )
 
 
@@ -500,7 +518,7 @@ def modeling_execution(agent, auto=False) -> None:
         summary_result = st.session_state.get("modeling_result_from_summary_4")
         if summary_result is not None or modeling_result is not None:
             train_download_model(agent)
-            with st.expander("训练结果", True):
+            with st.container():
                 st.subheader("训练结果")
                 if summary_result is not None:
                     _render_modeling_result(summary_result)
@@ -576,7 +594,7 @@ def modeling_chat(agent, source_data: Any, auto: bool) -> None:
         _continue_modeling_phase2(agent)
         return
 
-    if auto and _has_modeling_result(agent) and not agent.finish_auto_task:
+    if auto and _has_completed_modeling_result(agent) and not agent.finish_auto_task:
         agent.finish_auto()
         st.rerun()
 

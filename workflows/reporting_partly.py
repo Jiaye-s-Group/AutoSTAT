@@ -12,6 +12,7 @@ Reporting_partly workflow 本地实现。
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Callable
 
@@ -38,6 +39,19 @@ FIG_REFERENCE_PHRASE_RE = re.compile(
     r"\s*(?:所示|可见|可以看出|显示|展示)?\s*[，,、:：；;]?",
     flags=re.IGNORECASE,
 )
+
+DEFAULT_MAX_REPORT_FIGURES = 20
+DEFAULT_MAX_REPORT_FIGURES_PER_SECTION = 5
+DEFAULT_FIGURE_MATCH_CANDIDATE_SECTIONS = 5
+DEFAULT_LLM_FIGURE_MATCH_MIN_CONFIDENCE = 0.45
+
+CORE_REPORT_SECTION_TITLES = {
+    "1": "数据加载与结构梳理",
+    "2": "数据预处理",
+    "3": "可视化分析",
+    "4": "模型构建与评估",
+    "5": "结论与应用展望",
+}
 
 
 class ReportGenerationCancelled(RuntimeError):
@@ -170,10 +184,6 @@ def _section_figures(section: Any) -> list[int]:
     return []
 
 
-def _toc_has_figures(toc_list: list) -> bool:
-    return any(_section_figures(section) for section in toc_list)
-
-
 def _toc_assigned_figures(toc_list: list) -> list[int]:
     figures: list[int] = []
     seen: set[int] = set()
@@ -206,30 +216,16 @@ def _normalize_toc_figures(toc_list: list) -> list:
     return normalized
 
 
-def _merge_toc_figures(toc_list: list, source_toc_list: list) -> list:
-    if not toc_list or not source_toc_list:
-        return _normalize_toc_figures(toc_list)
-
-    merged: list[Any] = []
-    for index, section in enumerate(toc_list):
-        source_section = source_toc_list[index] if index < len(source_toc_list) else None
-        source_figures = _section_figures(source_section)
-
+def _clear_toc_figures(toc_list: list) -> list:
+    cleared: list[Any] = []
+    for section in toc_list or []:
         if isinstance(section, dict):
             section_copy = dict(section)
-            if not _section_figures(section_copy) and source_figures:
-                section_copy["figures"] = source_figures
-            else:
-                section_copy["figures"] = _section_figures(section_copy)
-            merged.append(section_copy)
-            continue
-
-        if source_figures and isinstance(source_section, dict):
-            merged.append(dict(source_section))
+            section_copy["figures"] = []
+            cleared.append(section_copy)
         else:
-            merged.append(section)
-
-    return merged
+            cleared.append(section)
+    return cleared
 
 
 def _toc_section_level(section: Any) -> int:
@@ -257,6 +253,14 @@ def _toc_section_text(section: Any) -> str:
             str(section.get(key, "") or "")
             for key in ("title", "outline", "desc", "description")
         )
+    return str(section or "")
+
+
+def _toc_section_title_text(section: Any) -> str:
+    if isinstance(section, dict):
+        num = _toc_section_num(section)
+        title = str(section.get("title", "") or "").strip()
+        return f"{num} {title}".strip()
     return str(section or "")
 
 
@@ -316,50 +320,6 @@ def _visual_toc_section_score(toc_list: list, index: int) -> int:
     if not _toc_section_has_child(toc_list, index):
         score += 5
     return score
-
-
-def _apply_toc_figure_fallback(toc_list: list, figures: list[int]) -> list:
-    if not toc_list or not figures:
-        return toc_list
-
-    normalized = _normalize_toc_figures(toc_list)
-    assigned = set(_toc_assigned_figures(normalized))
-    missing = [figure for figure in figures if figure not in assigned]
-    if not missing:
-        return normalized
-
-    scored_indices = [
-        (index, _visual_toc_section_score(normalized, index))
-        for index in range(len(normalized))
-    ]
-    scored_indices.sort(key=lambda item: item[1], reverse=True)
-    if not scored_indices or scored_indices[0][1] <= 0:
-        print(f"[REPORT][TOC_FIG] fallback skipped: no visual section for missing={missing}")
-        return normalized
-
-    target_index, target_score = scored_indices[0]
-    target_section = normalized[target_index]
-    target_figures = _section_figures(target_section)
-    merged_figures = target_figures + [figure for figure in missing if figure not in target_figures]
-
-    if isinstance(target_section, dict):
-        updated_section = dict(target_section)
-        updated_section["figures"] = merged_figures
-    else:
-        updated_section = {
-            "num": _toc_section_num(target_section),
-            "title": sanitize_section_heading_text(target_section),
-            "level": _toc_section_level(target_section),
-            "outline": "",
-            "figures": merged_figures,
-        }
-
-    normalized[target_index] = updated_section
-    print(
-        "[REPORT][TOC_FIG] fallback assigned missing figures "
-        f"{missing} to section={_toc_section_text(updated_section)!r}, score={target_score}"
-    )
-    return normalized
 
 
 def _dedupe_toc_figure_assignments(toc_list: list) -> list:
@@ -625,42 +585,661 @@ def _best_section_index_for_figure(
     return None
 
 
-def _assign_figures_to_best_sections(
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except Exception:
+        return default
+    return value if value > 0 else default
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except Exception:
+        return default
+    return value if value > 0 else default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _figure_context_filter_score(figure: int, figure_contexts: dict[int, str]) -> int:
+    """Apply only hard negative filters to invalid or failed figure contexts."""
+    context = normalize_part(figure_contexts.get(figure, ""))
+    if not context:
+        return -40
+
+    text = remove_figure_placeholders(context).strip()
+    lowered = text.lower()
+    if len(text) < 40:
+        return -20
+
+    weak_markers = (
+        "无法", "未能", "失败", "错误", "无有效", "没有生成", "空图",
+        "error", "failed", "cannot", "unable", "no valid",
+    )
+    if any(marker in text or marker in lowered for marker in weak_markers):
+        return -45
+
+    return 0
+
+
+def _figure_redundancy_penalty(
+    *,
+    figure: int,
+    selected: list[int],
+    figure_contexts: dict[int, str],
+) -> int:
+    if not selected:
+        return 0
+
+    tokens = _tokenize_dynamic_text(figure_contexts.get(figure, ""))
+    if not tokens:
+        return 0
+
+    penalty = 0
+    for selected_figure in selected:
+        selected_tokens = _tokenize_dynamic_text(figure_contexts.get(selected_figure, ""))
+        if not selected_tokens:
+            continue
+        overlap = len(tokens & selected_tokens)
+        union = len(tokens | selected_tokens)
+        if union <= 0:
+            continue
+        jaccard = overlap / union
+        if jaccard >= 0.72:
+            penalty = max(penalty, 35)
+        elif jaccard >= 0.55:
+            penalty = max(penalty, 18)
+    return penalty
+
+
+def _is_pipeline_setup_section(section: Any) -> bool:
+    title = re.sub(r"\s+", "", _toc_section_title_text(section))
+    if not title:
+        return False
+
+    setup_keywords = (
+        "数据加载", "数据导入", "结构梳理", "字段说明", "数据概览",
+        "数据预处理", "预处理", "清洗", "编码", "标准化", "归一化",
+    )
+    analysis_keywords = (
+        "可视化", "图表", "分布分析", "相关性", "模型", "评估", "结果", "性能",
+    )
+    return any(keyword in title for keyword in setup_keywords) and not any(
+        keyword in title for keyword in analysis_keywords
+    )
+
+
+def _is_modeling_section(section: Any) -> bool:
+    title = re.sub(r"\s+", "", _toc_section_title_text(section))
+    if not title:
+        return False
+
+    modeling_keywords = (
+        "模型", "建模", "分类器", "回归器", "预测", "评估", "性能",
+        "准确率", "精确率", "召回率", "混淆矩阵", "AUC", "ROC",
+        "RMSE", "MAE", "F1", "特征重要性", "残差",
+    )
+    return any(keyword.lower() in title.lower() for keyword in modeling_keywords)
+
+
+def _figure_is_modeling_result(figure: int, figure_contexts: dict[int, str]) -> bool:
+    text = re.sub(
+        r"\s+",
+        "",
+        _dynamic_match_text(figure_contexts.get(figure, "")),
+    )
+    if not text:
+        return False
+
+    modeling_keywords = (
+        "模型", "建模", "分类器", "回归器", "预测结果", "预测值",
+        "准确率", "精确率", "召回率", "混淆矩阵", "auc", "roc",
+        "rmse", "mae", "f1", "特征重要性", "残差", "学习曲线",
+        "交叉验证", "svm", "randomforest", "logisticregression",
+        "linearregression", "xgboost", "lightgbm",
+    )
+    return any(keyword in text for keyword in modeling_keywords)
+
+
+def _has_strong_figure_section_anchor(figure_title: str, section: Any) -> bool:
+    section_title = _toc_section_title_text(section)
+    compact_title = _compact_match_text(figure_title)
+    compact_section_title = _compact_match_text(section_title)
+    if (
+        compact_title
+        and compact_section_title
+        and _is_informative_compact_match(compact_title)
+        and _is_informative_compact_match(compact_section_title)
+        and (compact_title in compact_section_title or compact_section_title in compact_title)
+    ):
+        return True
+
+    overlap = _tokenize_dynamic_text(figure_title) & _tokenize_dynamic_text(section_title)
+    return any(len(token) >= 3 for token in overlap) or len(overlap) >= 2
+
+
+def _select_report_figures(
+    *,
+    candidate_figures: list[int],
+    figure_contexts: dict[int, str],
+    toc_list: list,
+) -> list[int]:
+    """Choose a bounded candidate pool. Final insertion is decided by pair planning."""
+    candidates = list(dict.fromkeys(candidate_figures))
+    if not candidates:
+        return []
+
+    max_figures = _positive_int_env("AUTOSTAT_REPORT_MAX_FIGURES", DEFAULT_MAX_REPORT_FIGURES)
+    max_per_section = _positive_int_env(
+        "AUTOSTAT_REPORT_MAX_FIGURES_PER_SECTION",
+        DEFAULT_MAX_REPORT_FIGURES_PER_SECTION,
+    )
+    if len(candidates) <= max_figures:
+        print(f"[REPORT][FIG_SELECT] keep all figures: {candidates}")
+        return candidates
+
+    normalized_toc = _normalize_toc_figures(toc_list or [])
+    records: list[dict[str, Any]] = []
+    for position, figure in enumerate(candidates):
+        best_index = _best_section_index_for_figure(
+            figure=figure,
+            toc_list=normalized_toc,
+            figure_contexts=figure_contexts,
+        )
+        match_score = 0
+        if best_index is not None:
+            match_score = _figure_section_match_score(
+                figure=figure,
+                figure_contexts=figure_contexts,
+                toc_list=normalized_toc,
+                section_index=best_index,
+            )
+
+        filter_score = _figure_context_filter_score(figure, figure_contexts)
+        total_score = match_score + filter_score
+        records.append(
+            {
+                "figure": figure,
+                "position": position,
+                "section": best_index,
+                "match_score": match_score,
+                "filter_score": filter_score,
+                "score": total_score,
+            }
+        )
+
+    ranked = sorted(records, key=lambda item: (item["score"], -item["position"]), reverse=True)
+    selected: list[int] = []
+    selected_set: set[int] = set()
+    per_section: dict[int | None, int] = {}
+
+    for item in ranked:
+        if len(selected) >= max_figures:
+            break
+        section = item["section"]
+        if per_section.get(section, 0) >= max_per_section:
+            continue
+        figure = int(item["figure"])
+        adjusted_score = int(item["score"]) - _figure_redundancy_penalty(
+            figure=figure,
+            selected=selected,
+            figure_contexts=figure_contexts,
+        )
+        if adjusted_score < 0 and len(selected) >= max(3, max_figures // 3):
+            continue
+        selected.append(figure)
+        selected_set.add(figure)
+        per_section[section] = per_section.get(section, 0) + 1
+
+    if len(selected) < max_figures:
+        for item in ranked:
+            if len(selected) >= max_figures:
+                break
+            figure = int(item["figure"])
+            if figure in selected_set:
+                continue
+            section = item["section"]
+            if per_section.get(section, 0) >= max_per_section:
+                continue
+            if _figure_redundancy_penalty(
+                figure=figure,
+                selected=selected,
+                figure_contexts=figure_contexts,
+            ) >= 35:
+                continue
+            selected.append(figure)
+            selected_set.add(figure)
+            per_section[section] = per_section.get(section, 0) + 1
+
+    if not selected:
+        selected = [int(item["figure"]) for item in ranked[:max_figures]]
+        selected_set = set(selected)
+
+    selected.sort(key=lambda figure: candidates.index(figure))
+    dropped = [figure for figure in candidates if figure not in selected_set]
+    score_debug = {
+        int(item["figure"]): {
+            "match": int(item["match_score"]),
+            "filter": int(item["filter_score"]),
+            "total": int(item["score"]),
+            "section": item["section"],
+        }
+        for item in records
+    }
+    print(
+        "[REPORT][FIG_SELECT] "
+        f"candidates={candidates}, selected={selected}, dropped={dropped}, "
+        f"max_figures={max_figures}, max_per_section={max_per_section}, "
+        f"scores={score_debug}"
+    )
+    return selected
+
+
+def _figure_section_alignment_score(
+    *,
+    figure: int,
+    figure_contexts: dict[int, str],
+    toc_list: list,
+    section_index: int,
+) -> int:
+    section = toc_list[section_index]
+    if _is_pipeline_setup_section(section):
+        return -100
+    if _is_modeling_section(section) and not _figure_is_modeling_result(figure, figure_contexts):
+        return -100
+
+    figure_title = _extract_figure_title(figure, figure_contexts)
+    figure_text = figure_contexts.get(figure, f"[FIG:{figure}]")
+    section_text = _section_match_text(section)
+
+    title_tokens = _tokenize_dynamic_text(figure_title)
+    figure_tokens = _tokenize_dynamic_text(figure_text)
+    section_tokens = _tokenize_dynamic_text(section_text)
+    section_title_tokens = _tokenize_dynamic_text(_toc_section_title_text(section))
+    title_overlap = title_tokens & section_tokens
+    title_section_overlap = title_tokens & section_title_tokens
+    context_overlap = (figure_tokens & section_tokens) - title_overlap
+    explicit_assignment = figure in _section_figures(section)
+    strong_title_anchor = _has_strong_figure_section_anchor(figure_title, section)
+
+    token_frequencies = _toc_token_frequencies(toc_list)
+    section_count = max(len(toc_list), 1)
+
+    score = 0
+    if explicit_assignment:
+        score += 35 if strong_title_anchor else 12
+
+    score += _weighted_dynamic_overlap_score(
+        title_overlap,
+        token_frequencies,
+        section_count,
+        base_score=26,
+    )
+    score += _weighted_dynamic_overlap_score(
+        title_section_overlap,
+        token_frequencies,
+        section_count,
+        base_score=18,
+    )
+    score += _weighted_dynamic_overlap_score(
+        context_overlap,
+        token_frequencies,
+        section_count,
+        base_score=5,
+    )
+
+    compact_title = _compact_match_text(figure_title)
+    compact_section = _compact_match_text(section_text)
+    if (
+        compact_title
+        and compact_section
+        and _is_informative_compact_match(compact_title)
+        and _is_informative_compact_match(compact_section)
+        and (compact_title in compact_section or compact_section in compact_title)
+    ):
+        score += 70
+
+    # Visual-section score is only a weak tie-breaker; direct overlap decides.
+    score += max(_visual_toc_section_score(toc_list, section_index), 0) // 10
+    if not _toc_section_has_child(toc_list, section_index):
+        score += 4
+
+    if not title_overlap and not context_overlap:
+        score -= 20 if explicit_assignment else 45
+
+    score += _figure_context_filter_score(figure, figure_contexts)
+    return score
+
+
+def _section_match_payload(section: Any) -> dict[str, Any]:
+    return {
+        "num": _toc_section_num(section),
+        "title": _extract_section_title(section),
+        "level": _toc_section_level(section),
+        "outline": str(section.get("outline", "") if isinstance(section, dict) else ""),
+        "modules": _section_modules(section),
+    }
+
+
+def _parse_json_array(text: str) -> list[Any]:
+    raw = _unwrap_code_block(text or "")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        pass
+
+    match = re.search(r"\[[\s\S]*\]", raw)
+    if not match:
+        return []
+    try:
+        parsed = json.loads(match.group(0))
+    except Exception:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _build_semantic_match_items(
+    *,
+    records: list[dict[str, Any]],
+    toc_list: list,
+    figure_contexts: dict[int, str],
+    max_candidates_per_figure: int,
+) -> list[dict[str, Any]]:
+    by_figure: dict[int, list[dict[str, Any]]] = {}
+    for record in records:
+        by_figure.setdefault(int(record["figure"]), []).append(record)
+
+    items: list[dict[str, Any]] = []
+    for figure in by_figure:
+        figure_records = sorted(
+            by_figure[figure],
+            key=lambda item: (int(item["score"]), -int(item["section_index"])),
+            reverse=True,
+        )[:max_candidates_per_figure]
+        context = _figure_context_with_placeholder(figure, figure_contexts)
+        items.append(
+            {
+                "figure": figure,
+                "title": _extract_figure_title(figure, figure_contexts),
+                "context": truncate_text(remove_figure_placeholders(context), 900),
+                "candidate_sections": [
+                    {
+                        **_section_match_payload(toc_list[int(record["section_index"])]),
+                        "local_score": int(record["score"]),
+                    }
+                    for record in figure_records
+                ],
+            }
+        )
+    return items
+
+
+def _run_figure_semantic_matcher(
+    *,
+    records: list[dict[str, Any]],
+    toc_list: list,
+    figure_contexts: dict[int, str],
+) -> dict[int, dict[str, Any]]:
+    if not _bool_env("AUTOSTAT_USE_LLM_FIGURE_MATCHER", True):
+        return {}
+    if not records:
+        return {}
+
+    max_candidates = _positive_int_env(
+        "AUTOSTAT_FIGURE_MATCH_CANDIDATE_SECTIONS",
+        DEFAULT_FIGURE_MATCH_CANDIDATE_SECTIONS,
+    )
+    items = _build_semantic_match_items(
+        records=records,
+        toc_list=toc_list,
+        figure_contexts=figure_contexts,
+        max_candidates_per_figure=max_candidates,
+    )
+    if not items:
+        return {}
+
+    prompt_ctx = {
+        "figure_match_items": json.dumps(items, ensure_ascii=False, indent=2),
+    }
+    try:
+        sys_prompt = render_file("reporting_partly/figure_semantic_matcher_llm_sys.txt", prompt_ctx)
+        user_prompt = render_file("reporting_partly/figure_semantic_matcher_llm_user.txt", prompt_ctx)
+        raw = chat(sys_prompt, user_prompt, name="report_partly.figure_semantic_match", temperature=0.1)
+    except Exception as exc:
+        print(f"[REPORT][FIG_MATCH] semantic matcher failed: {exc!r}")
+        return {}
+
+    decisions: dict[int, dict[str, Any]] = {}
+    for item in _parse_json_array(raw):
+        if not isinstance(item, dict):
+            continue
+        try:
+            figure = int(item.get("figure"))
+        except Exception:
+            continue
+        best_section = str(item.get("best_section") or "").replace("．", ".").strip()
+        should_insert = bool(item.get("should_insert", True))
+        try:
+            confidence = float(item.get("confidence", 0))
+        except Exception:
+            confidence = 0.0
+        decisions[figure] = {
+            "figure": figure,
+            "best_section": best_section,
+            "should_insert": should_insert,
+            "confidence": max(0.0, min(confidence, 1.0)),
+            "reason": str(item.get("reason", "") or "").strip(),
+        }
+
+    print(f"[REPORT][FIG_MATCH] semantic decisions={decisions}")
+    return decisions
+
+
+def _apply_semantic_match_decisions(
+    *,
+    records: list[dict[str, Any]],
+    decisions: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not decisions:
+        return records
+
+    min_confidence = _positive_float_env(
+        "AUTOSTAT_LLM_FIGURE_MATCH_MIN_CONFIDENCE",
+        DEFAULT_LLM_FIGURE_MATCH_MIN_CONFIDENCE,
+    )
+    adjusted: list[dict[str, Any]] = []
+    for record in records:
+        figure = int(record["figure"])
+        decision = decisions.get(figure)
+        if not decision:
+            adjusted.append(record)
+            continue
+
+        confidence = float(decision.get("confidence", 0.0))
+        section_num = str(record.get("section_num", "")).replace("．", ".").strip()
+        best_section = str(decision.get("best_section", "")).replace("．", ".").strip()
+        record_copy = dict(record)
+        if decision.get("should_insert", True) and confidence >= min_confidence and best_section and section_num == best_section:
+            record_copy["score"] = int(record_copy["score"]) + 100 + int(confidence * 100)
+            record_copy["semantic"] = True
+            record_copy["semantic_confidence"] = confidence
+            record_copy["semantic_reason"] = decision.get("reason", "")
+        else:
+            record_copy["score"] = max(0, int(record_copy["score"]) - 25)
+        adjusted.append(record_copy)
+    return adjusted
+
+
+def _best_available_record_for_figure(
+    *,
+    figure: int,
+    toc_list: list,
+    figure_contexts: dict[int, str],
+) -> dict[str, Any] | None:
+    scored: list[dict[str, Any]] = []
+    for section_index, section in enumerate(toc_list):
+        score = _figure_section_alignment_score(
+            figure=figure,
+            figure_contexts=figure_contexts,
+            toc_list=toc_list,
+            section_index=section_index,
+        )
+        if score < 0:
+            continue
+        scored.append(
+            {
+                "figure": figure,
+                "section_index": section_index,
+                "section_num": _toc_section_num(section),
+                "section_title": _extract_section_title(section),
+                "score": max(score, 35),
+                "explicit": figure in _section_figures(section),
+                "fallback": True,
+            }
+        )
+
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (int(item["score"]), -int(item["section_index"])), reverse=True)
+    return scored[0]
+
+
+def _build_figure_insert_plan(
     *,
     toc_list: list,
-    figures: list[int],
+    candidate_figures: list[int],
     figure_contexts: dict[int, str],
-) -> list:
-    if not toc_list or not figures:
-        return toc_list
-
+) -> tuple[list, list[int], list[dict[str, Any]]]:
     normalized = _normalize_toc_figures(toc_list)
-    assignments: dict[int, list[int]] = {index: [] for index in range(len(normalized))}
-    for figure in figures:
-        target_index = _best_section_index_for_figure(
+    candidates = list(dict.fromkeys(candidate_figures))
+    if not normalized or not candidates:
+        return normalized, [], []
+
+    max_figures = _positive_int_env("AUTOSTAT_REPORT_MAX_FIGURES", DEFAULT_MAX_REPORT_FIGURES)
+    max_per_section = _positive_int_env(
+        "AUTOSTAT_REPORT_MAX_FIGURES_PER_SECTION",
+        DEFAULT_MAX_REPORT_FIGURES_PER_SECTION,
+    )
+    min_score = _positive_int_env("AUTOSTAT_REPORT_MIN_FIGURE_PAIR_SCORE", 35)
+
+    records: list[dict[str, Any]] = []
+    for figure in candidates:
+        for section_index, section in enumerate(normalized):
+            score = _figure_section_alignment_score(
+                figure=figure,
+                figure_contexts=figure_contexts,
+                toc_list=normalized,
+                section_index=section_index,
+            )
+            if score < min_score:
+                continue
+            records.append(
+                {
+                    "figure": figure,
+                    "section_index": section_index,
+                    "section_num": _toc_section_num(section),
+                    "section_title": _extract_section_title(section),
+                    "score": score,
+                    "explicit": figure in _section_figures(section),
+                }
+            )
+
+    recorded_figures = {int(record["figure"]) for record in records}
+    for figure in candidates:
+        if figure in recorded_figures:
+            continue
+        fallback_record = _best_available_record_for_figure(
             figure=figure,
             toc_list=normalized,
             figure_contexts=figure_contexts,
         )
-        if target_index is None:
-            continue
-        assignments[target_index].append(figure)
+        if fallback_record is not None:
+            records.append(fallback_record)
 
-    assigned_count = sum(len(value) for value in assignments.values())
-    reassigned: list[Any] = []
+    records = _apply_semantic_match_decisions(
+        records=records,
+        decisions=_run_figure_semantic_matcher(
+            records=records,
+            toc_list=normalized,
+            figure_contexts=figure_contexts,
+        ),
+    )
+    records.sort(
+        key=lambda item: (
+            int(item["score"]),
+            1 if item.get("semantic") else 0,
+            1 if item.get("explicit") else 0,
+            -int(item["section_index"]),
+            -candidates.index(int(item["figure"])),
+        ),
+        reverse=True,
+    )
+
+    selected_records: list[dict[str, Any]] = []
+    selected_figures: set[int] = set()
+    per_section: dict[int, int] = {}
+
+    for record in records:
+        figure = int(record["figure"])
+        section_index = int(record["section_index"])
+        if figure in selected_figures:
+            continue
+        if len(selected_figures) >= max_figures:
+            break
+        if per_section.get(section_index, 0) >= max_per_section:
+            continue
+        if _figure_redundancy_penalty(
+            figure=figure,
+            selected=[int(item["figure"]) for item in selected_records],
+            figure_contexts=figure_contexts,
+        ) >= 35:
+            continue
+        selected_records.append(record)
+        selected_figures.add(figure)
+        per_section[section_index] = per_section.get(section_index, 0) + 1
+
+    assigned_by_section: dict[int, list[int]] = {}
+    for record in selected_records:
+        section_index = int(record["section_index"])
+        assigned_by_section.setdefault(section_index, []).append(int(record["figure"]))
+
+    planned_toc: list[Any] = []
     for index, section in enumerate(normalized):
         if isinstance(section, dict):
             section_copy = dict(section)
-            section_copy["figures"] = assignments.get(index, [])
-            reassigned.append(section_copy)
+            section_copy["figures"] = assigned_by_section.get(index, [])
+            planned_toc.append(section_copy)
         else:
-            reassigned.append(section)
+            planned_toc.append(section)
 
+    planned_figures = [int(item["figure"]) for item in selected_records]
+    dropped = [figure for figure in candidates if figure not in selected_figures]
     print(
-        "[REPORT][TOC_FIG] title assignment complete: "
-        f"expected={figures}, assigned={assigned_count}"
+        "[REPORT][FIG_PLAN] "
+        f"planned={selected_records}, dropped={dropped}, "
+        f"max_figures={max_figures}, max_per_section={max_per_section}, min_score={min_score}"
     )
-    return reassigned
+    return planned_toc, planned_figures, selected_records
 
 
 def _parse_toc_text(toc_text: str) -> list[dict[str, Any]]:
@@ -827,6 +1406,73 @@ def _merge_toc_with_authoritative_order(primary_toc: list, authoritative_toc: li
         print(f"[REPORT][TOC] ignored non-authoritative toc sections: {skipped_extra}")
 
     return _dedupe_toc_sections(merged)
+
+
+def _num_sort_key(num: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for part in str(num or "").replace("．", ".").split("."):
+        try:
+            parts.append(int(part))
+        except Exception:
+            parts.append(999)
+    return tuple(parts) if parts else (999,)
+
+
+def _make_core_section(num: str, title: str) -> dict[str, Any]:
+    return {
+        "num": num,
+        "title": title,
+        "level": num.count(".") + 1,
+        "outline": "",
+        "figures": [],
+    }
+
+
+def _ensure_core_report_sections(toc_list: list, ctx: dict[str, Any]) -> list:
+    if not toc_list:
+        return toc_list
+
+    normalized = _normalize_toc_figures(toc_list)
+    by_num: dict[str, Any] = {
+        _toc_section_num(section): section
+        for section in normalized
+        if _toc_section_num(section)
+    }
+    if not by_num:
+        return normalized
+
+    required: dict[str, str] = {}
+    if ctx.get("load_abstract"):
+        required["1"] = CORE_REPORT_SECTION_TITLES["1"]
+    if ctx.get("preproc_abstract"):
+        required["2"] = CORE_REPORT_SECTION_TITLES["2"]
+    if ctx.get("visual_abstract") or by_num.get("3") or any(num.startswith("3.") for num in by_num):
+        required["3"] = CORE_REPORT_SECTION_TITLES["3"]
+    if ctx.get("coding_abstract"):
+        required["4"] = CORE_REPORT_SECTION_TITLES["4"]
+    required["5"] = CORE_REPORT_SECTION_TITLES["5"]
+
+    for num in list(by_num):
+        if "." not in num:
+            continue
+        parent = num.rsplit(".", 1)[0]
+        while parent:
+            required.setdefault(parent, CORE_REPORT_SECTION_TITLES.get(parent, f"{parent} 分析结果"))
+            parent = parent.rsplit(".", 1)[0] if "." in parent else ""
+
+    combined: dict[str, Any] = {}
+    for num, title in required.items():
+        combined[num] = _make_core_section(num, title)
+    combined.update(by_num)
+
+    sorted_sections = [
+        combined[num]
+        for num in sorted(combined, key=_num_sort_key)
+    ]
+    extra_sections = [
+        section for section in normalized if not _toc_section_num(section)
+    ]
+    return _dedupe_toc_sections(sorted_sections + extra_sections)
 
 
 def _ensure_visual_fig_placeholders(text: str) -> str:
@@ -1144,13 +1790,23 @@ def run_reporting_partly_workflow(
     cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     selected_full_conten = _ensure_visual_fig_placeholders(selected_full_conten or "")
-    source_figures = _extract_fig_numbers_from_text(selected_full_conten)
-    figure_contexts = _extract_figure_contexts(selected_full_conten)
+    candidate_figures = _extract_fig_numbers_from_text(selected_full_conten)
+    candidate_figure_contexts = _extract_figure_contexts(selected_full_conten)
+    authoritative_toc = _parse_toc_text(toc_text)
+    candidate_pool_figures = _select_report_figures(
+        candidate_figures=candidate_figures,
+        figure_contexts=candidate_figure_contexts,
+        toc_list=authoritative_toc,
+    )
+    figure_contexts = {
+        figure: candidate_figure_contexts.get(figure, f"[FIG:{figure}]")
+        for figure in candidate_pool_figures
+    }
+    selected_full_conten = _format_figure_contexts(candidate_pool_figures, figure_contexts)
     print(
         f"[REPORT][INPUT] partly selected_full_conten length={len(selected_full_conten)}, "
-        f"fig_refs={source_figures}"
+        f"candidate_fig_refs={candidate_figures}, candidate_pool_fig_refs={candidate_pool_figures}"
     )
-    authoritative_toc = _parse_toc_text(toc_text)
     ctx: dict[str, Any] = {
         "toc_text": toc_text or "",
         "toc_md": toc_text or "",
@@ -1167,25 +1823,12 @@ def run_reporting_partly_workflow(
         "ref_context": ref_context or "（无参考资料）",
     }
 
-    # ---------- 节点 1: selected_photo_update_toc ----------
-    _raise_if_report_cancelled(cancel_check)
-    sp_sys = render_file("reporting_partly/selected_photo_update_toc_llm_sys.txt", ctx)
-    sp_user = render_file("reporting_partly/selected_photo_update_toc_llm_user.txt", ctx)
-    toc_list_raw = chat(sp_sys, sp_user, name="report_partly.select_photo").strip()
-    _raise_if_report_cancelled(cancel_check)
-    toc_list = _parse_toc_list(toc_list_raw)
-    toc_list = _merge_toc_with_authoritative_order(toc_list, authoritative_toc)
-    toc_list = _normalize_toc_figures(toc_list)
-    _log_toc_figure_state("toc_list before title assignment", toc_list)
-    toc_list = _assign_figures_to_best_sections(
-        toc_list=toc_list,
-        figures=source_figures,
-        figure_contexts=figure_contexts,
+    # ---------- 节点 1: base_toc ----------
+    toc_list = _ensure_core_report_sections(
+        _dedupe_toc_sections(_normalize_toc_figures(authoritative_toc)),
+        ctx,
     )
-    if not _toc_has_figures(toc_list):
-        toc_list = _apply_toc_figure_fallback(toc_list, source_figures)
-    toc_list = _dedupe_toc_figure_assignments(toc_list)
-    _log_toc_figure_state("toc_list after title assignment", toc_list)
+    _log_toc_figure_state("toc_list before module planning", toc_list)
     ctx["toc_list"] = toc_list
 
     # ---------- 节点 2: update_toc_with_relevant_sections ----------
@@ -1195,12 +1838,9 @@ def run_reporting_partly_workflow(
     toc_final_raw = chat(up_sys, up_user, name="report_partly.update_toc").strip()
     _raise_if_report_cancelled(cancel_check)
     toc_list_final = _parse_toc_list(toc_final_raw)
-    toc_list_final = _merge_toc_figures(toc_list_final, toc_list)
     toc_list_final = _merge_toc_with_authoritative_order(toc_list_final, toc_list or authoritative_toc)
 
     if not toc_list_final:
-        toc_list_final = toc_list
-    elif _toc_has_figures(toc_list) and not _toc_has_figures(toc_list_final):
         toc_list_final = toc_list
 
     if not toc_list_final:
@@ -1208,17 +1848,17 @@ def run_reporting_partly_workflow(
             line.strip() for line in (toc_text or "").splitlines() if line.strip()
         ]
 
-    _log_toc_figure_state("toc_list_final before title assignment", toc_list_final)
-    toc_list_final = _assign_figures_to_best_sections(
+    toc_list_final = _clear_toc_figures(_normalize_toc_figures(toc_list_final))
+    toc_list_final = _dedupe_toc_sections(toc_list_final)
+    toc_list_final = _ensure_core_report_sections(toc_list_final, ctx)
+    _log_toc_figure_state("toc_list before figure matching", toc_list_final)
+    toc_list_final, planned_figures, figure_insert_plan = _build_figure_insert_plan(
         toc_list=toc_list_final,
-        figures=source_figures,
+        candidate_figures=candidate_pool_figures,
         figure_contexts=figure_contexts,
     )
-    if not _toc_has_figures(toc_list_final):
-        toc_list_final = _apply_toc_figure_fallback(toc_list_final, source_figures)
-    toc_list_final = _dedupe_toc_figure_assignments(toc_list_final)
-    toc_list_final = _dedupe_toc_sections(toc_list_final)
-    _log_toc_figure_state("toc_list_final after title assignment", toc_list_final)
+    ctx["figure_insert_plan"] = figure_insert_plan
+    _log_toc_figure_state("toc_list_final after insert plan", toc_list_final)
 
     report_parts: list[str] = []
     report_part_sections: list[Any] = []
@@ -1267,18 +1907,11 @@ def run_reporting_partly_workflow(
         filled = normalize_part(filled)
         filled = _preserve_required_figures(filled, content, section, figure_contexts)
 
-        # debug：检查图号在哪一层还存在
-        print(f"[REPORT][SECTION {idx+1}] HAS_FIG_IN_FILLED =", bool(_extract_fig_numbers_from_text(filled)))
-        print(f"[REPORT][SECTION {idx+1}] FILLED_PREVIEW =", filled[:300])
-
-        # 最终正文优先用 filled，再退回 content
         final_part = filled or content
         final_part = normalize_part(final_part)
         final_part = _preserve_required_figures(final_part, content, section, figure_contexts)
 
-        print(f"[REPORT][SECTION {idx+1}] HAS_FIG_IN_FINAL =", bool(_extract_fig_numbers_from_text(final_part)))
-
-        # 关键修复：去掉模型自己写在正文开头的章节标题，最终统一以目录标题为准
+        # 统一用目录标题，避免正文开头重复标题。
         original_final_part = final_part
         final_part = _strip_redundant_heading(final_part, section)
         final_part = normalize_part(final_part)
@@ -1299,18 +1932,17 @@ def run_reporting_partly_workflow(
             report_parts.append(wrapped_part)
             report_part_sections.append(section)
 
-        # history 只给下一轮 writer 看，不参与最终成品拼接
         history_parts_for_prompt.append(truncate_text(final_part, 800))
 
     report_parts = _ensure_all_figures_in_report_parts(
         report_parts=report_parts,
         report_sections=report_part_sections,
         toc_list=toc_list_final,
-        expected_figures=source_figures,
+        expected_figures=planned_figures,
         figure_contexts=figure_contexts,
     )
     final_html = "\n\n".join(report_parts).strip()
-    _log_final_figure_ledger(final_html, source_figures)
+    _log_final_figure_ledger(final_html, planned_figures)
 
     # ---------- title_maker ----------
     # 只生成 title 字段返回，不再把 title 注入正文，避免前端额外装饰

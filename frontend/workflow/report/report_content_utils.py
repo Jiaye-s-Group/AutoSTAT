@@ -356,7 +356,7 @@ def _split_inline_heading_content(text: str) -> tuple[str, str | None]:
     return normalized, None
 
 
-def _parse_markdown_heading_line(text: str) -> tuple[str, str | None] | None:
+def _parse_markdown_heading_line_with_level(text: str) -> tuple[int, str, str | None] | None:
     if not isinstance(text, str):
         return None
 
@@ -364,18 +364,35 @@ def _parse_markdown_heading_line(text: str) -> tuple[str, str | None] | None:
     if not normalized:
         return None
 
-    heading_match = re.match(r"^#{1,6}[ \t\u3000]*(.*)$", normalized)
+    heading_match = re.match(r"^(#{1,6})[ \t\u3000]*(.*)$", normalized)
     if not heading_match:
         return None
 
-    heading_text = heading_match.group(1).strip()
+    heading_level = len(heading_match.group(1))
+    heading_text = heading_match.group(2).strip()
     if not heading_text:
         return None
 
     title_text, body_text = _split_inline_heading_content(heading_text)
     if not title_text:
         return None
+    return heading_level, title_text, body_text
+
+
+def _parse_markdown_heading_line(text: str) -> tuple[str, str | None] | None:
+    parsed = _parse_markdown_heading_line_with_level(text)
+    if parsed is None:
+        return None
+    _, title_text, body_text = parsed
     return title_text, body_text
+
+
+def _docx_heading_level_from_html(html_level: int) -> int:
+    return max(1, min(6, html_level - 1 if html_level > 1 else 1))
+
+
+def _docx_heading_level_from_markdown(markdown_level: int) -> int:
+    return _docx_heading_level_from_html(markdown_level)
 
 
 def _split_text_with_markdown_headings(text: str) -> list[tuple[str, str]]:
@@ -1188,18 +1205,36 @@ def build_docx_from_html(html_text: str) -> bytes:
         _add_docx_image(doc, image_buffer, caption_text=caption_text)
         return True
 
+    def add_markdown_text(text: str) -> bool:
+        lines = [line.strip() for line in text.replace("\\r\\n", "\n").replace("\\n", "\n").split("\n") if line.strip()]
+        if not lines:
+            return False
+
+        parsed_by_line = [_parse_markdown_heading_line_with_level(line) for line in lines]
+        if not any(parsed is not None for parsed in parsed_by_line):
+            return False
+
+        for line in lines:
+            parsed = _parse_markdown_heading_line_with_level(line)
+            if parsed is None:
+                _add_body_paragraph(doc, line)
+                continue
+            markdown_level, line_text, body_text = parsed
+            _add_heading_paragraph(
+                doc,
+                line_text,
+                level=_docx_heading_level_from_markdown(markdown_level),
+                state=state,
+            )
+            if body_text:
+                _add_body_paragraph(doc, body_text)
+        return True
+
     def walk(node: Tag | NavigableString) -> None:
         if isinstance(node, NavigableString):
             text = str(node).strip()
             if text:
-                parsed_lines = _split_markdown_heading_lines(text)
-                if parsed_lines:
-                    for line_kind, line_text in parsed_lines:
-                        if line_kind == "heading":
-                            _add_heading_paragraph(doc, line_text, level=1, state=state)
-                        else:
-                            _add_body_paragraph(doc, line_text)
-                else:
+                if not add_markdown_text(text):
                     _add_body_paragraph(doc, text)
             return
 
@@ -1215,7 +1250,14 @@ def build_docx_from_html(html_text: str) -> bytes:
         if node.name and node.name.startswith("h") and len(node.name) == 2 and node.name[1].isdigit():
             text = node.get_text(" ", strip=True)
             if text:
-                _add_heading_paragraph(doc, text, level=1, state=state, allow_title_style=True)
+                html_level = int(node.name[1])
+                _add_heading_paragraph(
+                    doc,
+                    text,
+                    level=_docx_heading_level_from_html(html_level),
+                    state=state,
+                    allow_title_style=(html_level == 1),
+                )
             return
 
         if node.name == "li":
@@ -1310,13 +1352,7 @@ def build_docx_from_html(html_text: str) -> bytes:
                 return
             text = node.get_text("\n", strip=True)
             if text:
-                parsed_lines = _split_markdown_heading_lines(text)
-                if parsed_lines:
-                    for line_kind, line_text in parsed_lines:
-                        if line_kind == "heading":
-                            _add_heading_paragraph(doc, line_text, level=1, state=state)
-                        else:
-                            _add_body_paragraph(doc, line_text)
+                if add_markdown_text(text):
                     return
                 _add_body_paragraph(doc, text)
             return
@@ -1333,14 +1369,7 @@ def build_docx_from_html(html_text: str) -> bytes:
             )
             handled_direct_text = False
             if direct_text and node.name not in {"ol", "ul"}:
-                parsed_lines = _split_markdown_heading_lines(direct_text)
-                if parsed_lines:
-                    for line_kind, line_text in parsed_lines:
-                        if line_kind == "heading":
-                            _add_heading_paragraph(doc, line_text, level=1, state=state)
-                        else:
-                            _add_body_paragraph(doc, line_text)
-                else:
+                if not add_markdown_text(direct_text):
                     _add_body_paragraph(doc, direct_text)
                 handled_direct_text = True
             for child in node.children:
@@ -1629,7 +1658,15 @@ def _clean_visual_topic_token(value: Any, max_chars: int = 36) -> str:
     text = html.unescape(text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip(" ：:，,。.;；、-_/\\|")
-    text = re.sub(r"^(?:图表|图中|该图|可视化结果|结果|数据显示)(?:展示|显示|反映|呈现)?(?:了)?", "", text)
+    text = re.sub(
+        r"^(?:图表|图中|该图|可视化结果|结果|数据显示|"
+        r"小提琴图|散点图矩阵|散点图|热力图|平行坐标图|PCA降维图|"
+        r"箱线图|柱状图|条形图|折线图|直方图|饼图|雷达图)"
+        r"(?:展示|显示|反映|呈现|说明|揭示)?(?:了)?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(
         r"(?:频率)?(?:分布)?(?:直方图|柱状图|条形图|折线图|散点图|箱线图|热力图|饼图|雷达图|图表|可视化|分析)$",
         "",
@@ -1648,24 +1685,6 @@ def _clean_visual_topic_token(value: Any, max_chars: int = 36) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars].rstrip()
-
-
-def _visual_theme_from_text(text: str, trace_types: list[str] | None = None) -> str:
-    source = text.lower()
-    chart_types = " ".join(trace_types or []).lower()
-    combined = f"{source} {chart_types}"
-
-    theme_rules = (
-        ("模型结果", ("模型", "准确率", "auc", "rmse", "mae", "重要性", "预测", "classification", "regression")),
-        ("变量关系", ("相关", "关系", "影响", "关联", "scatter", "heatmap", "corr")),
-        ("变化趋势", ("趋势", "变化", "时间", "日期", "月份", "年份", "line")),
-        ("分组比较", ("比较", "对比", "差异", "分组", "类别", "bar", "pie")),
-        ("分布特征", ("分布", "集中", "离散", "异常", "箱线", "直方", "histogram", "box", "violin")),
-    )
-    for theme, keywords in theme_rules:
-        if any(keyword in combined for keyword in keywords):
-            return theme
-    return "综合特征"
 
 
 def _topic_from_analysis_text(analysis: str) -> str:
@@ -1704,7 +1723,7 @@ def _topic_from_analysis_text(analysis: str) -> str:
     return _clean_visual_topic_token(first_sentence, max_chars=28)
 
 
-def _visual_topic_from_fig_item(item: Any, index: int) -> tuple[str, str, str]:
+def _visual_topic_from_fig_item(item: Any, index: int) -> tuple[str, str]:
     analysis = ""
     metadata: dict[str, Any] = {}
 
@@ -1735,34 +1754,23 @@ def _visual_topic_from_fig_item(item: Any, index: int) -> tuple[str, str, str]:
         if not topic:
             topic = f"图表{index + 1}"
 
-    theme_source = " ".join(
-        [
-            analysis,
-            stringify_string(metadata.get("title")),
-            stringify_string(metadata.get("trace_types")),
-        ]
-    )
-    theme = _visual_theme_from_text(theme_source, metadata.get("trace_types"))
-    return topic, theme, analysis
+    return topic, analysis
 
 
 def _compress_fig_analysis_for_toc(fig_analysis: list[Any]) -> list[dict[str, Any]]:
     groups: dict[str, dict[str, Any]] = {}
 
     for index, item in enumerate(fig_analysis):
-        topic, theme, analysis = _visual_topic_from_fig_item(item, index)
+        topic, analysis = _visual_topic_from_fig_item(item, index)
         key = re.sub(r"\s+", "", topic).lower()
         if key not in groups:
             groups[key] = {
                 "topic": topic,
-                "themes": [],
                 "figure_count": 0,
                 "analyses": [],
             }
 
         group = groups[key]
-        if theme and theme not in group["themes"]:
-            group["themes"].append(theme)
         group["figure_count"] += 1
         if analysis and len(group["analyses"]) < VISUAL_TOC_ANALYSES_PER_TOPIC:
             group["analyses"].append(_single_line_text(analysis, VISUAL_TOC_ITEM_ANALYSIS_CHARS))
@@ -1774,7 +1782,6 @@ def _compress_fig_analysis_for_toc(fig_analysis: list[Any]) -> list[dict[str, An
         kept_topics.append(
             {
                 "topic": "其他可视化主题",
-                "themes": ["补充发现"],
                 "figure_count": sum(int(topic.get("figure_count", 0)) for topic in overflow_topics),
                 "analyses": [
                     "还覆盖以下主题："
@@ -1791,9 +1798,8 @@ def _compress_fig_analysis_for_toc(fig_analysis: list[Any]) -> list[dict[str, An
         compressed.append(
             {
                 "topic": topic.get("topic", ""),
-                "theme": "、".join(topic.get("themes", [])),
                 "figure_count": topic.get("figure_count", 0),
-                "analysis": _single_line_text(analysis_text, VISUAL_TOC_TOPIC_ANALYSIS_CHARS),
+                "finding": _single_line_text(analysis_text, VISUAL_TOC_TOPIC_ANALYSIS_CHARS),
             }
         )
 
