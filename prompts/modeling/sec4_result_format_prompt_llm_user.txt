@@ -1,10 +1,11 @@
 请根据以下输入信息生成最终的 Markdown 建模结果说明。
 
-=== 输入 JSON 数据 ===
+=== 压缩后的建模结果证据 ===
+以下内容由系统从完整 result_dict 中确定性提取：完整保留模型名称、核心指标和 best_model；base64/artifacts 已从 prompt 中移除；长数组和逐行记录已压缩为 count/sample/统计摘要。
 {{result_json}}
 
 === 建模背景上下文 ===
-- 建模代码：{{modeling_code}}
+- 建模代码摘要：{{modeling_code}}
 - 用户偏好：{{preference_select}}
 - 额外需求：{{additional_preference}}
 

@@ -28,6 +28,9 @@ Modeling workflow 本地实现。
 """
 from __future__ import annotations
 
+import json
+import math
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -44,6 +47,56 @@ from workflows._plugins import (
 )
 
 MAX_FIX_ATTEMPTS = 5
+MODELING_CODE_PROMPT_MAX_CHARS = 6000
+MODELING_LONG_STRING_MAX_CHARS = 800
+MODELING_GENERIC_LIST_MAX_ITEMS = 12
+MODELING_MODEL_LIST_MAX_ITEMS = 30
+MODELING_IMPORTANCE_TOP_K = 20
+MODELING_SAMPLE_VALUES = 8
+MODELING_BASE64_MIN_CHARS = 256
+
+_BASE64_KEY_HINTS = ("b64", "base64")
+_ARTIFACT_KEY_HINTS = (
+    "artifact",
+    "artifacts",
+    "model_bytes",
+    "pickle",
+    "joblib",
+    "gz_bytes",
+    "gzip_bytes",
+)
+_LARGE_RECORD_KEY_HINTS = (
+    "records",
+    "prediction_records",
+    "predictions_df_records",
+    "rows",
+)
+_IMPORTANCE_KEY_HINTS = (
+    "importance",
+    "importances",
+    "feature_importance",
+    "feature_importances",
+    "coefficient",
+    "coefficients",
+    "coef",
+)
+_CORE_RESULT_KEYS = {
+    "dataset",
+    "task",
+    "task_type",
+    "target",
+    "models",
+    "best_model",
+    "metrics",
+    "score",
+    "intermediate",
+    "feature_importance",
+    "feature_importances",
+    "coefficients",
+    "coef",
+    "artifacts",
+    "artifact_warning",
+}
 
 
 def _build_modeling_ctx(
@@ -204,10 +257,25 @@ def run_modeling_phase2(
         }
 
     # ---------- 结果格式化 ----------
+    # 表格/内部逻辑继续使用 raw result；LLM prompt 只接收 compact evidence。
+    artifact_metadata = collect_modeling_artifact_metadata(final_result_json)
+    compact_result = compact_modeling_result(
+        final_result_json,
+        target=ctx.get("target", ""),
+        artifact_metadata=artifact_metadata,
+    )
+    compact_result_text = json.dumps(compact_result, ensure_ascii=False, indent=2, default=str)
+    compact_code = compact_modeling_code_for_prompt(final_code)
+    compact_stdout = compact_text(final_result_str, 1200)
+
     ctx["final_code"] = final_code
-    ctx["modeling_code"] = final_code
-    ctx["result_json"] = final_result_json
-    ctx["result"] = final_result_str
+    ctx["modeling_code"] = compact_code
+    ctx["code"] = compact_code
+    ctx["result_json"] = compact_result_text
+    ctx["modeling_result_evidence"] = compact_result_text
+    ctx["modeling_artifact_metadata"] = artifact_metadata
+    ctx["execution_stdout"] = compact_stdout
+    ctx["result"] = compact_stdout
     table_bundle = build_model_comparison_table_bundle(
         final_result_json,
         target=ctx.get("target", ""),
@@ -222,6 +290,7 @@ def run_modeling_phase2(
     rfp_user = render_file("modeling/sec4_result_format_prompt_llm_user.txt", ctx)
     result_format = chat(rfp_sys, rfp_user, name="model.result_format").strip()
     ctx["result_format"] = result_format
+    ctx["result"] = result_format
 
     # ---------- 章节正文 + 摘要 并行 ----------
     sh_sys = render_file("modeling/sec4_summary_html_llm_sys.txt", ctx)
@@ -248,6 +317,8 @@ def run_modeling_phase2(
         "model_suggestion": model_suggestion,
         "_refined_suggestions": refined_suggestions,
         "_final_code": final_code,
+        "_modeling_result_evidence": compact_result,
+        "_modeling_artifact_metadata": artifact_metadata,
         "_fix_attempts": attempt + 1 if success else MAX_FIX_ATTEMPTS,
     }
 
@@ -282,6 +353,511 @@ def run_modeling_workflow(
         return _empty_modeling_result()
 
     return run_modeling_phase2(ctx=ctx, data=data, df_head=df_head)
+
+
+def collect_modeling_artifact_metadata(result_json: Any) -> dict[str, Any]:
+    payload, _ = _coerce_modeling_payload(result_json)
+    items: list[dict[str, Any]] = []
+    _collect_artifact_items(payload, path=[], items=items)
+    return {
+        "present": bool(items),
+        "omitted_from_prompt": bool(items),
+        "items": items[:50],
+        "omitted_item_count": max(0, len(items) - 50),
+    }
+
+
+def compact_modeling_result(
+    result_json: Any,
+    *,
+    target: str = "",
+    artifact_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload, raw_text = _coerce_modeling_payload(result_json)
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "raw_json_chars": len(raw_text),
+            "note": "Modeling result payload could not be parsed as a dict.",
+        }
+
+    artifacts = artifact_metadata or collect_modeling_artifact_metadata(payload)
+    out: dict[str, Any] = {
+        "available": True,
+        "raw_json_chars": len(raw_text),
+        "target": compact_text(target, 200),
+    }
+
+    for key in ("dataset", "task", "task_type", "type"):
+        if key in payload:
+            out[key] = _compact_for_llm(payload.get(key), key=key)
+
+    models = payload.get("models")
+    if isinstance(models, list):
+        out["models"] = [_compact_model_entry(item) for item in models[:MODELING_MODEL_LIST_MAX_ITEMS]]
+        out["model_count"] = len(models)
+        if len(models) > MODELING_MODEL_LIST_MAX_ITEMS:
+            out["omitted_model_count"] = len(models) - MODELING_MODEL_LIST_MAX_ITEMS
+    elif models is not None:
+        out["models"] = _compact_for_llm(models, key="models")
+
+    if "best_model" in payload:
+        out["best_model"] = _compact_for_llm(payload.get("best_model"), key="best_model")
+
+    if "metrics" in payload:
+        out["metrics"] = _compact_for_llm(payload.get("metrics"), key="metrics")
+    if "score" in payload:
+        out["score"] = _compact_for_llm(payload.get("score"), key="score")
+
+    interpretability = _extract_interpretability(payload)
+    if interpretability:
+        out["interpretability"] = interpretability
+
+    if "intermediate" in payload:
+        out["intermediate_summary"] = _compact_for_llm(
+            payload.get("intermediate"),
+            key="intermediate",
+        )
+
+    if "artifact_warning" in payload:
+        out["artifact_warning"] = _compact_for_llm(
+            payload.get("artifact_warning"),
+            key="artifact_warning",
+        )
+    out["artifacts"] = artifacts
+
+    additional: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key in _CORE_RESULT_KEYS or _is_artifact_key(key) or _is_base64_key(key):
+            continue
+        if len(additional) >= 12:
+            additional["omitted_additional_field_count"] = (
+                len([k for k in payload if k not in _CORE_RESULT_KEYS]) - len(additional)
+            )
+            break
+        additional[key] = _compact_for_llm(value, key=key)
+    if additional:
+        out["additional_fields"] = additional
+
+    return out
+
+
+def compact_modeling_code_for_prompt(code: Any) -> str:
+    text = to_str(code).strip()
+    if not text:
+        return ""
+    if len(text) <= MODELING_CODE_PROMPT_MAX_CHARS:
+        return text
+    head_chars = int(MODELING_CODE_PROMPT_MAX_CHARS * 0.72)
+    tail_chars = MODELING_CODE_PROMPT_MAX_CHARS - head_chars
+    omitted = len(text) - head_chars - tail_chars
+    return (
+        text[:head_chars].rstrip()
+        + f"\n\n...[建模代码过长，已省略 {omitted} 字符]...\n\n"
+        + text[-tail_chars:].lstrip()
+    )
+
+
+def compact_text(value: Any, max_chars: int = MODELING_LONG_STRING_MAX_CHARS) -> str:
+    text = to_str(value).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + f"...[截断，原始长度 {len(text)} 字符]"
+
+
+def _coerce_modeling_payload(result_json: Any) -> tuple[Any, str]:
+    if isinstance(result_json, str):
+        raw_text = result_json
+        try:
+            return json.loads(result_json), raw_text
+        except Exception:
+            return result_json, raw_text
+    try:
+        raw_text = json.dumps(result_json, ensure_ascii=False, default=str)
+    except Exception:
+        raw_text = to_str(result_json)
+    return result_json, raw_text
+
+
+def _compact_for_llm(value: Any, *, key: str = "", depth: int = 0) -> Any:
+    key_text = key.lower()
+    if _is_base64_key(key_text) or _is_artifact_key(key_text):
+        return _artifact_value_metadata(key, value)
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return _compact_scalar(value, key=key)
+
+    if isinstance(value, dict):
+        if depth >= 5:
+            return _summarize_container(value)
+        out: dict[str, Any] = {}
+        for child_key, child_value in value.items():
+            child_key_text = str(child_key)
+            if _is_base64_key(child_key_text) or _is_artifact_key(child_key_text):
+                out[child_key_text] = _artifact_value_metadata(child_key_text, child_value)
+            else:
+                out[child_key_text] = _compact_for_llm(
+                    child_value,
+                    key=child_key_text,
+                    depth=depth + 1,
+                )
+        return out
+
+    if isinstance(value, (list, tuple)):
+        return _compact_list(list(value), key=key, depth=depth)
+
+    return compact_text(value)
+
+
+def _compact_model_entry(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return _compact_for_llm(value, key="model")
+
+    out: dict[str, Any] = {}
+    for key in ("name", "model", "model_name", "type", "task_type"):
+        if key in value:
+            out[key] = _compact_scalar(value.get(key), key=key)
+    if "metrics" in value:
+        out["metrics"] = _compact_for_llm(value.get("metrics"), key="metrics")
+    for key in ("score", "rank", "selected", "notes"):
+        if key in value:
+            out[key] = _compact_for_llm(value.get(key), key=key)
+
+    for key, child_value in value.items():
+        if key in out or key in {"metrics"}:
+            continue
+        if _is_importance_key(key):
+            out[key] = _compact_importance(child_value, key=key)
+        elif key not in {"artifacts"} and not _is_artifact_key(key) and not _is_base64_key(key):
+            compacted = _compact_for_llm(child_value, key=key)
+            if not _is_empty_compact_value(compacted):
+                out[key] = compacted
+    return out
+
+
+def _compact_list(values: list[Any], *, key: str = "", depth: int = 0) -> Any:
+    if not values:
+        return []
+    if _is_importance_key(key):
+        return _compact_importance(values, key=key)
+    if _is_large_record_key(key):
+        return {
+            "count": len(values),
+            "sample": [_compact_for_llm(item, key=key, depth=depth + 1) for item in values[:3]],
+            "omitted_count": max(0, len(values) - 3),
+        }
+
+    scalar_values = list(_iter_leaf_scalars(values, limit=5000))
+    if scalar_values:
+        numeric_summary = _numeric_summary(scalar_values)
+        if numeric_summary and len(values) > MODELING_SAMPLE_VALUES:
+            leaf_count = _count_leaf_values(values)
+            if len(scalar_values) < leaf_count:
+                numeric_summary["computed_from_sample_count"] = len(scalar_values)
+            sample_source = (
+                values
+                if all(not isinstance(item, (dict, list, tuple)) for item in values)
+                else scalar_values
+            )
+            return {
+                "count": leaf_count,
+                "sample": _sample_values(list(sample_source), MODELING_SAMPLE_VALUES),
+                "numeric_summary": numeric_summary,
+            }
+
+    if len(values) <= MODELING_GENERIC_LIST_MAX_ITEMS:
+        return [_compact_for_llm(item, key=key, depth=depth + 1) for item in values]
+
+    head_count = MODELING_GENERIC_LIST_MAX_ITEMS // 2
+    tail_count = MODELING_GENERIC_LIST_MAX_ITEMS - head_count
+    sample_items = values[:head_count] + values[-tail_count:]
+    return {
+        "count": len(values),
+        "sample": [_compact_for_llm(item, key=key, depth=depth + 1) for item in sample_items],
+        "omitted_count": len(values) - len(sample_items),
+    }
+
+
+def _extract_interpretability(payload: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in payload.items():
+        if _is_importance_key(key):
+            out[key] = _compact_importance(value, key=key)
+    intermediate = payload.get("intermediate")
+    if isinstance(intermediate, dict):
+        for key, value in intermediate.items():
+            if _is_importance_key(key):
+                out[key] = _compact_importance(value, key=key)
+    return out
+
+
+def _compact_importance(value: Any, *, key: str = "") -> Any:
+    if isinstance(value, dict):
+        rows = []
+        for feature, score in value.items():
+            numeric_score = _to_finite_float(score)
+            rows.append(
+                {
+                    "feature": compact_text(feature, 120),
+                    "value": numeric_score if numeric_score is not None else _compact_scalar(score, key=key),
+                }
+            )
+        return _top_importance_rows(rows, total_count=len(rows))
+
+    if isinstance(value, list):
+        rows = []
+        for item in value:
+            row = _importance_row_from_item(item, key=key)
+            if row:
+                rows.append(row)
+        if rows:
+            return _top_importance_rows(rows, total_count=len(value))
+    return _compact_for_llm(value, key="values")
+
+
+def _importance_row_from_item(item: Any, *, key: str = "") -> dict[str, Any] | None:
+    if isinstance(item, dict):
+        feature = (
+            item.get("feature")
+            or item.get("name")
+            or item.get("variable")
+            or item.get("column")
+            or item.get("term")
+        )
+        score = None
+        for score_key in (
+            "importance",
+            "feature_importance",
+            "coefficient",
+            "coef",
+            "value",
+            "score",
+            "weight",
+        ):
+            if score_key in item:
+                score = item.get(score_key)
+                break
+        if feature is None and score is None:
+            return None
+        numeric_score = _to_finite_float(score)
+        return {
+            "feature": compact_text(feature, 120),
+            "value": numeric_score if numeric_score is not None else _compact_scalar(score, key=key),
+        }
+    if isinstance(item, (list, tuple)) and len(item) >= 2:
+        numeric_score = _to_finite_float(item[1])
+        return {
+            "feature": compact_text(item[0], 120),
+            "value": numeric_score if numeric_score is not None else _compact_scalar(item[1], key=key),
+        }
+    return None
+
+
+def _top_importance_rows(rows: list[dict[str, Any]], *, total_count: int) -> dict[str, Any]:
+    def sort_value(row: dict[str, Any]) -> float:
+        value = row.get("value")
+        number = _to_finite_float(value)
+        return abs(number) if number is not None else 0.0
+
+    top_rows = sorted(rows, key=sort_value, reverse=True)[:MODELING_IMPORTANCE_TOP_K]
+    return {
+        "count": total_count,
+        "top": top_rows,
+        "omitted_count": max(0, total_count - len(top_rows)),
+    }
+
+
+def _collect_artifact_items(value: Any, *, path: list[str], items: list[dict[str, Any]]) -> None:
+    if len(items) > 200:
+        return
+    key = path[-1] if path else ""
+
+    if isinstance(value, dict):
+        if _is_artifact_key(key):
+            items.append(_artifact_item_metadata(path, value))
+        for child_key, child_value in value.items():
+            child_path = path + [str(child_key)]
+            child_key_text = str(child_key)
+            if _is_base64_key(child_key_text) or _is_artifact_key(child_key_text):
+                items.append(_artifact_item_metadata(child_path, child_value))
+            elif isinstance(child_value, (dict, list, tuple)):
+                _collect_artifact_items(child_value, path=child_path, items=items)
+            elif isinstance(child_value, str) and _looks_like_base64(child_value, key=child_key_text):
+                items.append(_artifact_item_metadata(child_path, child_value))
+        return
+
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(list(value)[:20]):
+            _collect_artifact_items(item, path=path + [str(index)], items=items)
+
+
+def _artifact_value_metadata(key: str, value: Any) -> dict[str, Any]:
+    metadata = _artifact_item_metadata([key] if key else [], value)
+    metadata["omitted_from_prompt"] = True
+    return metadata
+
+
+def _artifact_item_metadata(path: list[str], value: Any) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "path": ".".join(path) if path else "",
+        "type": type(value).__name__,
+        "omitted_from_prompt": True,
+    }
+    if isinstance(value, str):
+        item["chars"] = len(value)
+        item["base64_like"] = _looks_like_base64(value, key=path[-1] if path else "")
+    elif isinstance(value, dict):
+        item["keys"] = list(value.keys())[:20]
+        item["key_count"] = len(value)
+    elif isinstance(value, (list, tuple)):
+        item["count"] = len(value)
+    else:
+        item["value_preview"] = compact_text(value, 120)
+    return item
+
+
+def _compact_scalar(value: Any, *, key: str = "") -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if not math.isfinite(number):
+            return ""
+        return round(number, 6) if isinstance(value, float) else value
+    text = to_str(value).strip()
+    if _looks_like_base64(text, key=key):
+        return _artifact_value_metadata(key, text)
+    return compact_text(text, MODELING_LONG_STRING_MAX_CHARS)
+
+
+def _numeric_summary(values: list[Any]) -> dict[str, Any]:
+    numeric = [_to_finite_float(value) for value in values]
+    numeric = [value for value in numeric if value is not None]
+    if not numeric:
+        return {}
+    sorted_numeric = sorted(numeric)
+    count = len(sorted_numeric)
+    mean = sum(sorted_numeric) / count
+    variance = sum((value - mean) ** 2 for value in sorted_numeric) / count
+    return {
+        "count": count,
+        "min": round(sorted_numeric[0], 6),
+        "p25": round(_percentile(sorted_numeric, 0.25), 6),
+        "median": round(_percentile(sorted_numeric, 0.5), 6),
+        "p75": round(_percentile(sorted_numeric, 0.75), 6),
+        "max": round(sorted_numeric[-1], 6),
+        "mean": round(mean, 6),
+        "std": round(math.sqrt(variance), 6),
+    }
+
+
+def _percentile(sorted_values: list[float], fraction: float) -> float:
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    position = (len(sorted_values) - 1) * fraction
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return sorted_values[int(position)]
+    weight = position - lower
+    return sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight
+
+
+def _iter_leaf_scalars(values: Any, *, limit: int) -> Any:
+    stack = [values]
+    count = 0
+    while stack and count < limit:
+        current = stack.pop(0)
+        if isinstance(current, (list, tuple)):
+            stack = list(current[:limit]) + stack
+            continue
+        if isinstance(current, dict):
+            continue
+        yield current
+        count += 1
+
+
+def _count_leaf_values(values: Any) -> int:
+    if not isinstance(values, (list, tuple)):
+        return 1
+    total = 0
+    stack = [values]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (list, tuple)):
+            stack.extend(current)
+        else:
+            total += 1
+    return total
+
+
+def _sample_values(values: list[Any], max_items: int) -> list[Any]:
+    if len(values) <= max_items:
+        sample = values
+    else:
+        head_count = max_items // 2
+        tail_count = max_items - head_count
+        sample = values[:head_count] + values[-tail_count:]
+    return [_compact_scalar(value) for value in sample]
+
+
+def _summarize_container(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {"type": "dict", "key_count": len(value), "keys": list(value.keys())[:20]}
+    if isinstance(value, (list, tuple)):
+        return {"type": "list", "count": len(value)}
+    return {"type": type(value).__name__, "preview": compact_text(value, 200)}
+
+
+def _to_finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _looks_like_base64(value: Any, *, key: str = "") -> bool:
+    text = to_str(value).strip()
+    key_text = key.lower()
+    if len(text) < MODELING_BASE64_MIN_CHARS:
+        return False
+    if _is_base64_key(key_text):
+        return True
+    if not _is_artifact_key(key_text):
+        return False
+    compact = re.sub(r"\s+", "", text)
+    return bool(re.fullmatch(r"[A-Za-z0-9+/=_-]+", compact))
+
+
+def _is_base64_key(key: str) -> bool:
+    key_text = key.lower()
+    return any(hint in key_text for hint in _BASE64_KEY_HINTS)
+
+
+def _is_artifact_key(key: str) -> bool:
+    key_text = key.lower()
+    if key_text == "artifact_warning":
+        return False
+    return any(hint in key_text for hint in _ARTIFACT_KEY_HINTS)
+
+
+def _is_importance_key(key: str) -> bool:
+    key_text = key.lower()
+    return any(hint in key_text for hint in _IMPORTANCE_KEY_HINTS)
+
+
+def _is_large_record_key(key: str) -> bool:
+    key_text = key.lower()
+    return any(hint in key_text for hint in _LARGE_RECORD_KEY_HINTS)
+
+
+def _is_empty_compact_value(value: Any) -> bool:
+    return value in ("", None, [], {})
 
 
 # ===================================================================

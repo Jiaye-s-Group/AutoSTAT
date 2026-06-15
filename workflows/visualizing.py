@@ -5,12 +5,16 @@ Visualizing workflow local implementation.
 from __future__ import annotations
 
 import ast
+import base64
 import json
+import math
+import os
 import re
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from core.llm_client import chat
+from core.llm_client import chat, chat_multimodal
 from core.prompt_template import render_file
 from core.workflow_runner import to_str
 from workflows._plugins import (
@@ -25,6 +29,12 @@ from workflows._plugins import (
 MAX_FIX_ATTEMPTS = 5
 BATCH_CONCURRENCY = 10
 MAX_VIS_TITLE_CHARS = 20
+FIG_ARTIFACT_MAX_TRACES = 8
+FIG_ARTIFACT_MAX_SAMPLE_VALUES = 8
+FIG_ARTIFACT_MAX_CATEGORIES = 12
+FIG_IMAGE_WIDTH = int(os.getenv("AUTOSTAT_FIG_IMAGE_WIDTH", "1100"))
+FIG_IMAGE_HEIGHT = int(os.getenv("AUTOSTAT_FIG_IMAGE_HEIGHT", "720"))
+USE_FIGURE_IMAGES = os.getenv("AUTOSTAT_USE_FIGURE_IMAGES", "1").strip().lower() not in {"0", "false", "no", "off"}
 VAGUE_VIS_TITLES = {
     "变量关系与分布特征",
     "变量关系",
@@ -223,6 +233,7 @@ def run_visualizing_phase2(
     ctx["final_code"] = final_code
     exec_result = execute_and_extract(code=final_code, df_data=data)
     fig_task_list = exec_result.get("fig_task_list", [])
+    fig_task_list = _attach_figure_llm_artifacts(fig_task_list)
     if not fig_task_list:
         return {
             "full": "",
@@ -319,32 +330,292 @@ def run_visualizing_workflow(
     return run_visualizing_phase2(ctx=ctx, data=data, cols=cols, def_head=def_head)
 
 
+def _attach_figure_llm_artifacts(fig_task_list: Any) -> list[dict[str, Any]]:
+    if not isinstance(fig_task_list, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for raw_item in fig_task_list:
+        item = dict(raw_item) if isinstance(raw_item, dict) else {"fig": raw_item}
+        fig = item.get("fig", "")
+        artifact = compact_plotly_figure(fig)
+        item["fig_artifact"] = json.dumps(artifact, ensure_ascii=False, default=str)
+        item["fig_image"] = render_plotly_image_data_url(fig) if USE_FIGURE_IMAGES else ""
+        out.append(item)
+    return out
+
+
+def compact_plotly_figure(fig: Any) -> dict[str, Any]:
+    payload, raw_text = _coerce_plotly_payload(fig)
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "raw_json_chars": len(raw_text),
+            "note": "Figure payload could not be parsed; only raw size is available.",
+        }
+
+    layout = payload.get("layout") if isinstance(payload.get("layout"), dict) else {}
+    data = payload.get("data") if isinstance(payload.get("data"), list) else []
+    traces = []
+    total_points = 0
+    chart_types: list[str] = []
+    trace_names: list[str] = []
+
+    for trace_index, trace in enumerate(data[:FIG_ARTIFACT_MAX_TRACES]):
+        if not isinstance(trace, dict):
+            continue
+        trace_type = _clean_artifact_scalar(trace.get("type", "")) or "unknown"
+        trace_name = _clean_artifact_scalar(trace.get("name", ""))
+        if trace_type and trace_type not in chart_types:
+            chart_types.append(trace_type)
+        if trace_name and trace_name not in trace_names:
+            trace_names.append(trace_name)
+
+        dimensions: dict[str, Any] = {}
+        point_count = 0
+        for key in ("x", "y", "z", "labels", "values", "lat", "lon"):
+            if key not in trace:
+                continue
+            values = trace.get(key)
+            if isinstance(values, list):
+                point_count = max(point_count, _count_leaf_values(values))
+            dimensions[key] = _summarize_values(values)
+
+        total_points += point_count
+        traces.append(
+            {
+                "index": trace_index,
+                "type": trace_type,
+                "name": trace_name,
+                "mode": _clean_artifact_scalar(trace.get("mode", "")),
+                "point_count": point_count,
+                "dimensions": dimensions,
+            }
+        )
+
+    if len(data) > FIG_ARTIFACT_MAX_TRACES:
+        traces.append(
+            {
+                "omitted_traces": len(data) - FIG_ARTIFACT_MAX_TRACES,
+                "note": "Additional traces were omitted from the LLM artifact.",
+            }
+        )
+
+    return {
+        "available": True,
+        "raw_json_chars": len(raw_text),
+        "title": _layout_text(layout.get("title")),
+        "x_axis_title": _axis_title_text(layout.get("xaxis")),
+        "y_axis_title": _axis_title_text(layout.get("yaxis")),
+        "legend_title": _axis_title_text(layout.get("legend")),
+        "chart_types": chart_types,
+        "trace_names": trace_names[:FIG_ARTIFACT_MAX_CATEGORIES],
+        "trace_count": len(data),
+        "total_point_count_included": total_points,
+        "traces": traces,
+    }
+
+
+def _coerce_plotly_payload(fig: Any) -> tuple[dict[str, Any] | None, str]:
+    if isinstance(fig, dict):
+        return fig, json.dumps(fig, ensure_ascii=False, default=str)
+    raw_text = to_str(fig)
+    if not raw_text:
+        return None, ""
+    try:
+        payload = json.loads(raw_text)
+    except Exception:
+        return None, raw_text
+    return payload if isinstance(payload, dict) else None, raw_text
+
+
+def render_plotly_image_data_url(fig: Any) -> str:
+    payload, raw_text = _coerce_plotly_payload(fig)
+    if not isinstance(payload, dict):
+        return ""
+    try:
+        import plotly.io as pio
+
+        fig_obj = pio.from_json(raw_text)
+        image_bytes = fig_obj.to_image(
+            format="jpg",
+            width=FIG_IMAGE_WIDTH,
+            height=FIG_IMAGE_HEIGHT,
+            scale=1,
+        )
+    except Exception:
+        return ""
+    if not image_bytes:
+        return ""
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def _figure_artifact_text(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    artifact = item.get("fig_artifact", "")
+    if isinstance(artifact, str) and artifact.strip():
+        return artifact
+    if artifact:
+        try:
+            return json.dumps(artifact, ensure_ascii=False, default=str)
+        except Exception:
+            return str(artifact)
+    fig = item.get("fig", "")
+    return json.dumps(compact_plotly_figure(fig), ensure_ascii=False, default=str)
+
+
+def _chat_with_optional_figure_image(
+    sys_prompt: str,
+    user_prompt: str,
+    *,
+    image_data_url: str = "",
+    name: str,
+    **kwargs: Any,
+) -> str:
+    if image_data_url:
+        return chat_multimodal(
+            sys_prompt,
+            user_prompt,
+            image_data_url=image_data_url,
+            name=name,
+            **kwargs,
+        )
+    return chat(sys_prompt, user_prompt, name=name, **kwargs)
+
+
+def _summarize_values(values: Any) -> dict[str, Any]:
+    if isinstance(values, list):
+        flat = list(_iter_leaf_values(values, limit=5000))
+        numeric = [_to_finite_float(value) for value in flat]
+        numeric = [value for value in numeric if value is not None]
+        summary: dict[str, Any] = {
+            "count": _count_leaf_values(values),
+            "sample": _sample_values(flat, FIG_ARTIFACT_MAX_SAMPLE_VALUES),
+        }
+        if numeric:
+            sorted_numeric = sorted(numeric)
+            summary["numeric_summary"] = {
+                "min": round(sorted_numeric[0], 6),
+                "max": round(sorted_numeric[-1], 6),
+                "mean": round(sum(sorted_numeric) / len(sorted_numeric), 6),
+                "median": round(sorted_numeric[len(sorted_numeric) // 2], 6),
+            }
+        else:
+            categories = [
+                _clean_artifact_scalar(value)
+                for value in flat
+                if _clean_artifact_scalar(value)
+            ]
+            if categories:
+                summary["top_values"] = Counter(categories).most_common(FIG_ARTIFACT_MAX_CATEGORIES)
+        return summary
+    scalar = _clean_artifact_scalar(values)
+    return {"value": scalar} if scalar else {}
+
+
+def _iter_leaf_values(values: Any, *, limit: int) -> Any:
+    count = 0
+    stack = [values]
+    while stack and count < limit:
+        current = stack.pop(0)
+        if isinstance(current, list):
+            stack = current[:limit] + stack
+            continue
+        yield current
+        count += 1
+
+
+def _count_leaf_values(values: Any) -> int:
+    if not isinstance(values, list):
+        return 1
+    total = 0
+    stack = [values]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, list):
+            stack.extend(current)
+        else:
+            total += 1
+    return total
+
+
+def _sample_values(values: list[Any], max_items: int) -> list[Any]:
+    if not values:
+        return []
+    if len(values) <= max_items:
+        return [_clean_artifact_scalar(value) for value in values]
+    if max_items <= 2:
+        sample = values[:max_items]
+    else:
+        head_count = max_items // 2
+        tail_count = max_items - head_count
+        sample = values[:head_count] + values[-tail_count:]
+    return [_clean_artifact_scalar(value) for value in sample]
+
+
+def _to_finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _clean_artifact_scalar(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if not math.isfinite(number):
+            return ""
+        return round(number, 6) if isinstance(value, float) else value
+    text = str(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > 120:
+        return text[:117] + "..."
+    return text
+
+
 def _desc_fig_single(
     item: dict, dtype_info: str, base_ctx: dict[str, Any]
 ) -> dict[str, Any]:
     fig = item.get("fig", "") if isinstance(item, dict) else ""
     raw_title = item.get("title", "") if isinstance(item, dict) else ""
+    fig_artifact_text = _figure_artifact_text(item)
+    fig_image = item.get("fig_image", "") if isinstance(item, dict) else ""
 
-    p_out = desc_fig_prompt(dtype_info=dtype_info, fig=fig)
+    p_out = desc_fig_prompt(dtype_info=dtype_info, fig="", fig_artifact=fig_artifact_text)
     prompt_content = p_out.get("prompt_content", "")
 
     desc_ctx = {
         **base_ctx,
         "prompt_content": prompt_content,
-        "fig": fig,
+        "fig": fig_artifact_text,
+        "fig_artifact": fig_artifact_text,
         "raw_title": raw_title,
     }
     g_sys = render_file("visualizing/generate_desc_llm_sys.txt", desc_ctx)
     g_user = render_file("visualizing/generate_desc_llm_user.txt", desc_ctx)
     if not g_user.strip():
         g_user = prompt_content
-    desc = chat(
+    desc = _chat_with_optional_figure_image(
         g_sys or "你是数据可视化分析助手。",
         g_user,
+        image_data_url=fig_image,
         name="viz.generate_desc",
     ).strip()
 
-    return {"fig": fig, "desc": desc, "raw_title": raw_title}
+    return {
+        "fig": fig,
+        "fig_artifact": fig_artifact_text,
+        "desc": desc,
+        "raw_title": raw_title,
+    }
 
 
 def _generate_title_single(
@@ -353,11 +624,13 @@ def _generate_title_single(
     fig = item.get("fig", "") if isinstance(item, dict) else ""
     desc = item.get("desc", "") if isinstance(item, dict) else ""
     raw_title = item.get("raw_title", "") if isinstance(item, dict) else ""
+    fig_artifact_text = _figure_artifact_text(item)
 
     fig_meta = _extract_figure_metadata(fig)
     title_ctx = {
         **base_ctx,
-        "fig": fig[:4000],
+        "fig": fig_artifact_text[:5000],
+        "fig_artifact": fig_artifact_text,
         "desc": desc,
         "raw_title": raw_title,
         "cols_wo_id": cols_wo_id or [],
@@ -414,22 +687,36 @@ def _summary_fig_single(
 ) -> dict[str, Any]:
     fig = item.get("fig", "") if isinstance(item, dict) else ""
     desc = item.get("desc", "") if isinstance(item, dict) else ""
+    fig_artifact_text = _figure_artifact_text(item)
+    fig_image = item.get("fig_image", "") if isinstance(item, dict) else ""
 
     p_out = summary_fig_list_prompt(cols_wo_id=cols_wo_id, item=item)
     prompt = p_out.get("prompt", "")
 
-    sfd_ctx = {**base_ctx, "prompt": prompt, "fig": fig, "desc": desc}
+    sfd_ctx = {
+        **base_ctx,
+        "prompt": prompt,
+        "fig": fig_artifact_text,
+        "fig_artifact": fig_artifact_text,
+        "desc": desc,
+    }
     sfd_sys = render_file("visualizing/summary_fig_desc_llm_sys.txt", sfd_ctx)
     sfd_user = render_file("visualizing/summary_fig_desc_llm_user.txt", sfd_ctx)
     if not sfd_user.strip():
         sfd_user = prompt
-    analysis = chat(
+    analysis = _chat_with_optional_figure_image(
         sfd_sys or "你是数据可视化分析助手。",
         sfd_user,
+        image_data_url=fig_image,
         name="viz.summary_fig_desc",
     ).strip()
 
-    return {"fig": fig, "desc": desc, "analysis": analysis}
+    return {
+        "fig": fig,
+        "fig_artifact": fig_artifact_text,
+        "desc": desc,
+        "analysis": analysis,
+    }
 
 
 def _batch_run(items: list, func, concurrency: int = 10) -> list:
@@ -634,9 +921,9 @@ def _polish_title_to_chinese(
     base_ctx: dict[str, Any],
     fig_meta: dict[str, Any],
 ) -> str:
-    fig = item.get("fig", "") if isinstance(item, dict) else ""
     desc = item.get("desc", "") if isinstance(item, dict) else ""
     raw_title = item.get("raw_title", "") if isinstance(item, dict) else ""
+    fig_artifact_text = _figure_artifact_text(item)
 
     sys_prompt = (
         "你是一名学术论文图表标题润色专家。"
@@ -660,7 +947,7 @@ def _polish_title_to_chinese(
         f"图任务标识：{raw_title}\n"
         f"图表描述：{desc}\n"
         f"图表类型：{'，'.join(fig_meta.get('chart_types', []))}\n"
-        f"图表 JSON 摘要：{fig[:2500]}\n\n"
+        f"图表压缩证据：{fig_artifact_text[:5000]}\n\n"
         "只输出一个最终中文标题，不超过20个字。"
     )
     try:

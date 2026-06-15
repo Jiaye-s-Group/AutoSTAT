@@ -41,7 +41,7 @@ jieba>=0.42.1
 # pdfplumber>=0.9.0
 
 # ===== 可选：报告导出为 PDF（需安装 Playwright 浏览器） =====
-# playwright>=1.40.0
+playwright>=1.40.0
 # 安装后需运行: playwright install chromium
 
 # ===== 可选：深度学习相关 =====

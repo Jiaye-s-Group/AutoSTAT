@@ -4,6 +4,6 @@
 
 === 输入信息 ===
 - 用户初始需求：{{target}}
-- 建模代码：{{code}}
-- 建模运行结果：{{result}}
+- 建模代码摘要：{{code}}
+- 建模结果说明：{{result}}
 - 模型对比表题：{{comparison_table_title}}

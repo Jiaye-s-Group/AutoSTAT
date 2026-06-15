@@ -19,7 +19,7 @@ from typing import Any
 
 import pandas as pd
 
-from core.workflow_runner import to_str
+from core.workflow_runner import to_json_str, to_str
 
 
 # ===================================================================
@@ -69,6 +69,9 @@ def sec3_composer(*, fig_analysis: list) -> dict[str, Any]:
             fa_out.append(
                 {
                     "fig": to_str(item.get("fig", "")),
+                    "fig_artifact": to_str(item.get("fig_artifact", "")),
+                    "desc": to_str(item.get("desc", "")),
+                    "title": to_str(item.get("title", "")),
                     "analysis": to_str(item.get("analysis", "")),
                 }
             )
@@ -497,7 +500,16 @@ def summary_fig_list_prompt(
     返回 {is_multimodal, prompt}。
     """
     cols_text = ", ".join([str(c) for c in (cols_wo_id or [])])
-    fig = to_str(item.get("fig", "")) if isinstance(item, dict) else ""
+    fig_artifact = ""
+    if isinstance(item, dict):
+        artifact_value = item.get("fig_artifact_text", "") or item.get("fig_artifact", "")
+        fig_artifact = (
+            artifact_value
+            if isinstance(artifact_value, str)
+            else to_json_str(artifact_value)
+        )
+    if not fig_artifact and isinstance(item, dict):
+        fig_artifact = to_str(item.get("fig", ""))[:2000]
     desc = to_str(item.get("desc", "")) if isinstance(item, dict) else ""
 
     # 判断是否多模态：视当前模型是否支持图片。本地默认不使用多模态（节省成本）。
@@ -507,7 +519,7 @@ def summary_fig_list_prompt(
         f"你是一名数据可视化分析师。请基于以下信息对图表做一段中文分析（80~200字）：\n"
         f"- 图表标题/说明: {desc}\n"
         f"- 数据列: {cols_text}\n"
-        f"- 图表 JSON: {fig[:2000]}\n\n"
+        f"- 图表压缩证据: {fig_artifact[:5000]}\n\n"
         f"请从「图表想表达什么」「数据呈现出什么模式」「业务含义」三个角度简洁说明。"
     )
 
@@ -521,16 +533,19 @@ def desc_fig_prompt(
     *,
     dtype_info: str,
     fig: str,
+    fig_artifact: Any = "",
     selected_model: str = "GPT-4o",
 ) -> dict[str, Any]:
     """
     visualizing/1043512
     给每张图生成「描述文字」prompt。
     """
+    artifact_text = fig_artifact if isinstance(fig_artifact, str) else to_json_str(fig_artifact)
+    artifact_text = artifact_text or to_str(fig)[:2000]
     prompt = (
         f"请用一句话简明描述下面这张图所展示的数据分布/模式（50字以内）：\n"
         f"- 数据字段类型：{to_str(dtype_info)[:1000]}\n"
-        f"- 图表 JSON：{to_str(fig)[:2000]}"
+        f"- 图表压缩证据：{artifact_text[:5000]}"
     )
     return {"prompt_content": prompt}
 

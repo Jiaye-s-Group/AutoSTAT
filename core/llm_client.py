@@ -107,12 +107,95 @@ class LLMClient:
         name: str = "unnamed",
         retries: int = 2,
     ) -> str:
-        _ = name
-
         messages = []
         if sys:
             messages.append({"role": "system", "content": sys})
         messages.append({"role": "user", "content": user})
+
+        return self._complete_messages(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            model=model,
+            response_json=response_json,
+            name=name,
+            retries=retries,
+        )
+
+    def chat_multimodal(
+        self,
+        sys: str,
+        text: str,
+        *,
+        image_data_url: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        model: str | None = None,
+        response_json: bool = False,
+        name: str = "unnamed",
+        retries: int = 2,
+        fallback_to_text: bool = True,
+    ) -> str:
+        if not image_data_url:
+            return self.chat(
+                sys,
+                text,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model=model,
+                response_json=response_json,
+                name=name,
+                retries=retries,
+            )
+
+        messages: list[dict[str, Any]] = []
+        if sys:
+            messages.append({"role": "system", "content": sys})
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": text},
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                ],
+            }
+        )
+        try:
+            return self._complete_messages(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model=model,
+                response_json=response_json,
+                name=name,
+                retries=retries,
+            )
+        except Exception:
+            if not fallback_to_text:
+                raise
+            return self.chat(
+                sys,
+                text,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model=model,
+                response_json=response_json,
+                name=f"{name}.text_fallback",
+                retries=retries,
+            )
+
+    def _complete_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float | None,
+        max_tokens: int | None,
+        model: str | None,
+        response_json: bool,
+        name: str,
+        retries: int,
+    ) -> str:
+        _ = name
 
         use_max_completion_tokens = "api.openai.com" in (self.base_url or "")
         kwargs = self._build_chat_kwargs(
@@ -158,7 +241,7 @@ class LLMClient:
     def _build_chat_kwargs(
         self,
         *,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         model: str | None,
         temperature: float | None,
         max_tokens: int | None,
@@ -179,6 +262,10 @@ class LLMClient:
 
 def chat(sys: str, user: str, **kwargs: Any) -> str:
     return LLMClient.get().chat(sys, user, **kwargs)
+
+
+def chat_multimodal(sys: str, text: str, **kwargs: Any) -> str:
+    return LLMClient.get().chat_multimodal(sys, text, **kwargs)
 
 
 def chat_json(sys: str, user: str, **kwargs: Any) -> dict[str, Any]:
