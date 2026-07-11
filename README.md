@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="frontend/logo/logo_big.png" alt="AutoSTAT Logo" width="180">
+  <img src="frontend/logo/github.jpeg" alt="Automated Statistician" width="100%">
 </p>
 
 <h1 align="center">AutoSTAT v2</h1>
