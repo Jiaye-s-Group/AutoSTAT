@@ -18,6 +18,14 @@
 【修复任务】
 请结合错误信息和数据特征，重新生成一份修复后的 Python 代码。确保修复上述报错点，并且生成的 fig_dict 包含所有预期的可视化图表。
 
+硬性输出协议：
+- 代码必须显式创建 `fig_dict = {}`，并把每一张最终图保存为 `fig_dict["descriptive_unique_key"] = fig`。
+- `fig_dict` 的 value 必须是 Plotly Figure 对象。
+- 禁止只使用 `fig`、`figs`、`figures`、`charts`、`plots`、列表或函数内部变量保存图。
+- 禁止调用 `.show()`、`print()`、`write_html()`、`write_image()` 或任何外部 IO。
+- 如果原始代码已经创建了图但没有放入 `fig_dict`，请保留这些图的分析意图并改写为写入 `fig_dict`。
+- 最终代码执行结束时，`fig_dict` 必须是非空字典。
+
 重点：在代码编写时，严谨给df重新赋值，数据头部信息{{def_head}}的数据只是全局数据的前5行，编写代码时需要使用全局数据。
 
 大数据绘图约束：

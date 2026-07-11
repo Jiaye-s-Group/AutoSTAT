@@ -12,6 +12,7 @@ import streamlit_antd_components as sac
 from utils.page_paths import page_file
 from workflow.visualization.viz_coding import vis_code_gen, vis_execution
 from workflow.visualization.viz_color import apply_palette_to_figure, vis_palette
+from workflow.visualization.viz_quick_action import render_quick_visualization
 
 def _maybe_json_loads(value: Any) -> Any:
     if not isinstance(value, str):
@@ -288,8 +289,8 @@ def _normalize_visualization_workflow_result(result: Any) -> dict[str, Any] | No
     return normalized
 
 
-def call_coze_workflow_visualization(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """本地化版本：改走本地 Visualizing workflow（完整执行，兼容旧路径）。"""
+def call_visualization_workflow(inputs: dict[str, Any]) -> dict[str, Any] | None:
+    """Call the local visualization workflow."""
     from utils.local_workflow_bridge import call_visualizing_bridge
 
     inputs = dict(inputs)
@@ -308,7 +309,7 @@ def call_coze_workflow_visualization(inputs: dict[str, Any]) -> dict[str, Any] |
 
 
 def _call_visualization_phase1(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """Phase 1: 仅生成 suggestion，快速返回给前端展示。"""
+    """Run visualization phase 1 for recommendation preview."""
     from utils.local_workflow_bridge import call_visualizing_phase1_bridge
 
     inputs = dict(inputs)
@@ -318,7 +319,7 @@ def _call_visualization_phase1(inputs: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _call_visualization_phase2(inputs: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any] | None:
-    """Phase 2: 代码生成 + 验证 + 分析。"""
+    """Run visualization phase 2 for code generation and chart analysis."""
     from utils.local_workflow_bridge import call_visualizing_phase2_bridge
 
     inputs = dict(inputs)
@@ -552,7 +553,7 @@ def _request_visualization_recommendation(agent, source_data: Any, user_input: s
         st.error("无法从当前可用数据构造可视化工作流输入，请检查预处理结果或原始上传数据是否可解析。")
         return
 
-    # ── Phase 1: 快速获取 suggestion 并展示 ──────────────────────
+    # Phase 1 returns the recommendation text immediately.
     with st.spinner("正在生成可视化推荐方案..."):
         phase1_result = _call_visualization_phase1(inputs)
 
@@ -562,12 +563,12 @@ def _request_visualization_recommendation(agent, source_data: Any, user_input: s
     visual_recommendatio = phase1_result.get("visual_recommendatio", "")
     phase1_ctx = phase1_result.get("_ctx", {})
 
-    # 先把 suggestion 写入 session_state，让前端立刻可以显示
+    # Store the recommendation so the UI can render it before phase 2.
     st.session_state.visual_recommendatio = visual_recommendatio
     st.session_state.viz_suggestion = visual_recommendatio
     agent.save_suggestion(visual_recommendatio)
 
-    # 缓存 phase1 上下文和 inputs，供 phase2 使用
+    # Keep phase 1 context and inputs for phase 2.
     st.session_state._viz_phase1_ctx = phase1_ctx
     st.session_state._viz_phase2_inputs = inputs
     st.session_state._viz_phase2_pending = True
@@ -577,7 +578,7 @@ def _request_visualization_recommendation(agent, source_data: Any, user_input: s
 
 
 def _continue_visualization_phase2(agent) -> None:
-    """在 suggestion 已展示的前提下，继续执行 phase2（代码生成 + 图表分析）。"""
+    """Continue visualization after the recommendation preview has rendered."""
     phase1_ctx = st.session_state.pop("_viz_phase1_ctx", None)
     inputs = st.session_state.pop("_viz_phase2_inputs", None)
     st.session_state.pop("_viz_phase2_pending", None)
@@ -650,7 +651,7 @@ def vis_chat(agent, source_data: Any, auto: bool = False):
         for entry in chat_history
     )
 
-    # ── Phase 2 自动续接：suggestion 已展示，继续生成代码 ──────────
+    # Continue phase 2 after the recommendation has rendered.
     if st.session_state.get("_viz_phase2_pending"):
         _continue_visualization_phase2(agent)
         return
@@ -714,6 +715,8 @@ if __name__ == "__main__":
     columns = st.columns(2)
     with columns[0].expander("配色选择", True):
         vis_palette(agent)
+    with columns[0].expander("快速可视化", False):
+        render_quick_visualization(agent, df_shuffled)
     with columns[1].expander("可视化建议", True):
         vis_chat(agent, source_data, auto)
         vis_code_gen(agent, auto=auto)

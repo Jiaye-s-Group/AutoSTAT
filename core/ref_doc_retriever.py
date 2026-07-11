@@ -1,14 +1,4 @@
-"""
-参考资料文档检索器 —— 基于用户上传文档的 BM25 检索。
-
-与 rag_retriever.py 同构，但数据源是用户上传的 PDF/DOCX 文档 chunks，
-而非静态的算法黄页 JSONL。
-
-公开 API：
-    RefDocRetriever(chunks)
-        .retrieve(query, top_k=3, min_score=0.2) -> list[dict]
-        .format_results(results) -> str
-"""
+"""BM25 retriever for user-uploaded reference document chunks."""
 from __future__ import annotations
 
 import logging
@@ -27,7 +17,7 @@ except ImportError:
     _HAS_JIEBA = False
 
 
-# ---- 分词（与 rag_retriever.py 保持一致） ----
+# Tokenization aligned with rag_retriever.py.
 
 _TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fff]+|[A-Za-z0-9]+")
 
@@ -43,11 +33,8 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in tokens if len(t) > 1 or "\u4e00" <= t <= "\u9fff"]
 
 
-# ---- BM25 检索器 ----
-
-
 class RefDocRetriever:
-    """基于 BM25 的参考资料检索器。"""
+    """BM25 retriever over uploaded reference chunks."""
 
     def __init__(self, chunks: list[dict[str, Any]]):
         """
@@ -68,7 +55,7 @@ class RefDocRetriever:
         for chunk in self.chunks:
             text = str(chunk.get("text", ""))
             source = str(chunk.get("source", ""))
-            # source 名也作为 tokens 加入（加权 2 倍），方便按文件名检索
+            # Include the source name so file-name queries can match.
             tokens = _tokenize(text) + _tokenize(source) * 2
             self._doc_tokens.append(tokens)
 
@@ -84,7 +71,7 @@ class RefDocRetriever:
         top_k: int = 3,
         min_score: float = 0.2,
     ) -> list[dict[str, Any]]:
-        """BM25 检索，返回 top_k 个最相关的 chunk。"""
+        """Return the most relevant chunks for a query."""
         if not self.chunks or not query:
             return []
 
@@ -128,7 +115,7 @@ class RefDocRetriever:
         return results
 
     def format_results(self, results: list[dict[str, Any]]) -> str:
-        """将检索结果格式化为 LLM prompt 可读的文本。"""
+        """Format retrieved chunks for downstream prompts."""
         if not results:
             return "（未上传参考资料或未召回相关内容）"
         parts: list[str] = []
@@ -147,7 +134,7 @@ class RefDocRetriever:
         top_k: int = 3,
         min_score: float = 0.2,
     ) -> str:
-        """一步到位：检索 + 格式化。"""
+        """Retrieve and format matching chunks."""
         results = self.retrieve(query, top_k=top_k, min_score=min_score)
         return self.format_results(results)
 

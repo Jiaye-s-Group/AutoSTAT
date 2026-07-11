@@ -1,12 +1,9 @@
 """
-16 个 Coze 自定义 Plugin 的本地 Python 实现。
+Local Python helpers used by AutoSTAT workflows.
 
-Plugin 的 pluginName 分为几组:
-- "for AutoSTAT"                     →  数据处理/组装类
-- "for AutoSTAT Visualization"       →  可视化相关
-- "for AutoSTAT Composer"            →  summary 组装
-
-每个函数的签名严格对应 Coze JSON 里节点的 inputParameters / outputs。
+The functions in this module replace small hosted workflow/plugin nodes with
+plain Python implementations. They focus on data loading, code execution,
+visualization extraction, and summary composition.
 """
 from __future__ import annotations
 
@@ -22,16 +19,11 @@ import pandas as pd
 from core.workflow_runner import to_json_str, to_str
 
 
-# ===================================================================
-# 组 1：Composer 类（简单字段组装）
-# ===================================================================
+# Summary composers.
 
 
 def summary1_composer(*, desc: str, head_dict_str: str) -> dict[str, Any]:
-    """
-    loading/125743
-    组装 summary_1 = {title, desc, df}
-    """
+    """Compose the loading-stage summary."""
     return {
         "summary_1": {
             "title": "数据概览与数据含义分析",
@@ -44,10 +36,7 @@ def summary1_composer(*, desc: str, head_dict_str: str) -> dict[str, Any]:
 def summary2_composer(
     *, code: str, desc: str, processed_df: str
 ) -> dict[str, Any]:
-    """
-    preprocessing/122472
-    组装 summary_2 = {title, desc, processed_df, code}
-    """
+    """Compose the preprocessing-stage summary."""
     return {
         "summary_2": {
             "title": "数据预处理",
@@ -59,10 +48,7 @@ def summary2_composer(
 
 
 def sec3_composer(*, fig_analysis: list) -> dict[str, Any]:
-    """
-    visualizing/145846
-    组装 summary_3 = {title, fig_analysis: [{fig, analysis}...]}
-    """
+    """Compose the visualization-stage summary."""
     fa_out = []
     for item in fig_analysis or []:
         if isinstance(item, dict):
@@ -92,10 +78,7 @@ def sec4_composer(
     table_markdown: str = "",
     table_html: str = "",
 ) -> dict[str, Any]:
-    """
-    modeling/148910
-    组装 summary_4 = {title, desc, result, code}
-    """
+    """Compose the modeling-stage summary."""
     return {
         "summary_4": {
             "title": "建模分析",
@@ -112,10 +95,7 @@ def sec4_composer(
 def history_content_composer(
     *, content: str, history_content: str = ""
 ) -> dict[str, Any]:
-    """
-    reporting_partly/168914
-    把每一部分的内容拼到 history_content 末尾。
-    """
+    """Append one report section to the history context."""
     hc = to_str(history_content)
     c = to_str(content)
     if hc and c:
@@ -123,9 +103,7 @@ def history_content_composer(
     return {"history_content": hc + c}
 
 
-# ===================================================================
-# 组 2：列表处理类
-# ===================================================================
+# List helpers.
 
 
 def final_list(
@@ -133,10 +111,7 @@ def final_list(
     processed_df_head_list: list,
     processed_df_list: list,
 ) -> dict[str, Any]:
-    """
-    preprocessing/165429
-    从 Loop 产出的 list 里取最后一个元素（最终版本）。
-    """
+    """Return the latest preprocessing output from a retry list."""
     head = ""
     if isinstance(processed_df_head_list, list) and processed_df_head_list:
         head = to_str(processed_df_head_list[-1])
@@ -152,10 +127,7 @@ def final_list(
 
 
 def sec3_check_full(*, analysis_list: list) -> dict[str, Any]:
-    """
-    visualizing/186381
-    把 Loop 产出的 analysis 数组拼成一整段 full 文本。
-    """
+    """Join per-figure analysis items into one report context string."""
     if not isinstance(analysis_list, list):
         return {"full": ""}
     parts = []
@@ -178,21 +150,18 @@ def sec3_check_full(*, analysis_list: list) -> dict[str, Any]:
     return {"full": full}
 
 
-# ===================================================================
-# 组 3：数据加载
-# ===================================================================
+# Data loading and metadata.
 
 
 def loading_data(*, file_url: str) -> dict[str, Any]:
     """
     planning/128297
-    Coze 原版从 URL 下载 CSV，本地化里**不会用到**
-    （本地是直接把 DataFrame 传进来的）。
-    保留签名作为兼容占位。
+    The open-source workflow receives DataFrames directly, so remote URL loading
+    is intentionally not used. The signature remains as a compatibility guard.
     """
     return {
         "is_success": False,
-        "error": "loading_data plugin 在本地化版本中不使用 — 请直接从本地 DataFrame 构造 df_meta",
+        "error": "loading_data is not used by the local workflow; construct metadata from a DataFrame instead.",
         "shape_0": 0,
         "shape_1": 0,
         "dtype_info_str": "",
@@ -203,8 +172,7 @@ def loading_data(*, file_url: str) -> dict[str, Any]:
 
 def df_to_meta(df: pd.DataFrame) -> dict[str, Any]:
     """
-    本地替代：把 pandas.DataFrame 转成下游需要的元信息字典。
-    返回字段和 Coze 的 Loading_Data plugin 对齐。
+    Convert a pandas DataFrame into metadata consumed by downstream workflows.
     """
     if df is None or len(df) == 0:
         return {
@@ -227,17 +195,11 @@ def df_to_meta(df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-# ===================================================================
-# 组 4：预处理统计信息
-# ===================================================================
+# Preprocessing metadata.
 
 
 def get_preprocessing_suggestions(*, df: str) -> dict[str, Any]:
-    """
-    preprocessing/162738
-    根据 df 字符串（来自 Loading_Data 的 df 字段，是 records 格式 JSON）
-    统计出给 LLM 参考的基本信息。
-    """
+    """Build deterministic dataset facts for preprocessing prompts."""
     try:
         records = json.loads(df) if isinstance(df, str) else df
         if not isinstance(records, list):
@@ -272,14 +234,40 @@ def get_preprocessing_suggestions(*, df: str) -> dict[str, Any]:
     }
 
 
-# ===================================================================
-# 组 5：代码执行类 —— 最关键的 plugin
-# ===================================================================
+# Preprocessing code execution.
 
 
 _CODE_RUNNER_TEMPLATE = '''import json, sys, traceback
 import pandas as pd
 import numpy as np
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import (
+    FunctionTransformer,
+    LabelEncoder,
+    MinMaxScaler,
+    OrdinalEncoder,
+    RobustScaler,
+    StandardScaler,
+)
+from sklearn.preprocessing import OneHotEncoder as _SklearnOneHotEncoder
+
+if not hasattr(pd.DataFrame, "concat"):
+    pd.DataFrame.concat = staticmethod(pd.concat)
+
+def pd_isna_like(value):
+    return pd.isna(value)
+
+def OneHotEncoder(*args, **kwargs):
+    if "sparse" in kwargs and "sparse_output" not in kwargs:
+        kwargs["sparse_output"] = kwargs.pop("sparse")
+    try:
+        return _SklearnOneHotEncoder(*args, **kwargs)
+    except TypeError:
+        if "sparse_output" in kwargs:
+            kwargs["sparse"] = kwargs.pop("sparse_output")
+        return _SklearnOneHotEncoder(*args, **kwargs)
 
 _RECORDS = json.loads(sys.stdin.read())
 df = pd.DataFrame(_RECORDS)
@@ -291,7 +279,7 @@ except Exception as e:
     traceback.print_exc(file=sys.stderr)
     sys.exit(2)
 
-# 约定：用户代码处理后的结果必须写入 process_df，与前端执行器保持一致
+# Generated preprocessing code must assign a pandas DataFrame to process_df.
 _out = locals().get("process_df")
 if not isinstance(_out, pd.DataFrame):
     print("__AUTOSTAT_ERROR__", file=sys.stderr)
@@ -311,14 +299,7 @@ def code_runner(
     df: str,
     timeout_seconds: int = 60,
 ) -> dict[str, Any]:
-    """
-    preprocessing/138975
-    在子进程里执行 LLM 生成的预处理代码。隔离 + 超时。
-
-    用户代码约定：
-        - 输入变量名 df（pandas.DataFrame）
-        - 处理后结果必须放到 process_df，与前端执行器保持一致
-    """
+    """Run generated preprocessing code in a subprocess with a timeout."""
     user_code = to_str(code).strip()
     if not user_code:
         return {
@@ -328,7 +309,7 @@ def code_runner(
             "is_success": False,
         }
 
-    # 给用户代码整体加一层缩进（4 空格，对应 try: 块内）
+    # Indent generated code into the runner's try block.
     indented = textwrap.indent(user_code, " " * 4)
     script = _CODE_RUNNER_TEMPLATE.replace("__USER_CODE__", indented)
 
@@ -382,9 +363,7 @@ def code_runner(
     }
 
 
-# ===================================================================
-# 组 6：可视化代码执行
-# ===================================================================
+# Visualization code execution.
 
 
 _VIZ_RUNNER_TEMPLATE = '''import json, sys, traceback
@@ -408,15 +387,12 @@ _figs = {}
 if isinstance(locals().get("fig_dict"), dict):
     for k, v in fig_dict.items():
         try:
-            _figs[str(k)] = v.to_json()
+            if isinstance(v, go.Figure):
+                _figs[str(k)] = v.to_json()
+            elif hasattr(v, "to_plotly_json") and v.__class__.__module__.startswith("plotly"):
+                _figs[str(k)] = go.Figure(v).to_json()
         except Exception:
-            _figs[str(k)] = str(v)
-_solo = locals().get("fig")
-if _solo is not None and "default" not in _figs:
-    try:
-        _figs["default"] = _solo.to_json()
-    except Exception:
-        pass
+            pass
 
 print(json.dumps(_figs, ensure_ascii=False))
 '''
@@ -428,11 +404,7 @@ def execute_and_extract(
     df_data: str,
     timeout_seconds: int = 120,
 ) -> dict[str, Any]:
-    """
-    visualizing/165403
-    在子进程里执行 LLM 生成的 plotly 代码，收集 fig_dict。
-    返回 fig_task_list: [{title, fig_json}, ...]
-    """
+    """Run generated Plotly code and collect figures from `fig_dict`."""
     user_code = to_str(code).strip()
     if not user_code:
         return {"fig_task_list": []}
@@ -460,14 +432,21 @@ def execute_and_extract(
         return {"fig_task_list": [], "error": "输出解析失败"}
 
     fig_task_list = [{"title": k, "fig": v} for k, v in figs.items()]
+    if not fig_task_list:
+        return {
+            "fig_task_list": [],
+            "error": (
+                "No Plotly figures were collected from fig_dict. "
+                "The visualization code must store every generated Plotly Figure "
+                "as fig_dict['descriptive_key'] = fig and must not rely on fig.show(), "
+                "temporary variables, figures lists, charts dictionaries, or other output variables."
+            ),
+        }
     return {"fig_task_list": fig_task_list}
 
 
 def validate_viz_code(*, code: str, df_data: str) -> dict[str, Any]:
-    """
-    visualizing/154982
-    用前 5 行 df 来试跑代码，验证通过则返回 final_code。
-    """
+    """Smoke-test visualization code on a small DataFrame sample."""
     result = execute_and_extract(code=code, df_data=df_data, timeout_seconds=30)
     err = result.get("error", "")
     if err:
@@ -483,9 +462,7 @@ def validate_viz_code(*, code: str, df_data: str) -> dict[str, Any]:
     }
 
 
-# ===================================================================
-# 组 7：可视化的 prompt 拼装（给 Batch 节点用）
-# ===================================================================
+# Visualization prompt builders.
 
 
 def summary_fig_list_prompt(
@@ -494,11 +471,7 @@ def summary_fig_list_prompt(
     item: dict,
     selected_model: str = "GPT-4o",
 ) -> dict[str, Any]:
-    """
-    visualizing/151708
-    给每张图生成描述 prompt。item = {fig, desc, ...}。
-    返回 {is_multimodal, prompt}。
-    """
+    """Build a figure-analysis prompt for one visualization item."""
     cols_text = ", ".join([str(c) for c in (cols_wo_id or [])])
     fig_artifact = ""
     if isinstance(item, dict):
@@ -512,7 +485,7 @@ def summary_fig_list_prompt(
         fig_artifact = to_str(item.get("fig", ""))[:2000]
     desc = to_str(item.get("desc", "")) if isinstance(item, dict) else ""
 
-    # 判断是否多模态：视当前模型是否支持图片。本地默认不使用多模态（节省成本）。
+    # Only enable multimodal prompts for models known to support images.
     is_multimodal = selected_model.lower() in {"gpt-4o", "gpt-4-vision", "claude-3-opus"}
 
     prompt = (
@@ -536,10 +509,7 @@ def desc_fig_prompt(
     fig_artifact: Any = "",
     selected_model: str = "GPT-4o",
 ) -> dict[str, Any]:
-    """
-    visualizing/1043512
-    给每张图生成「描述文字」prompt。
-    """
+    """Build a short figure-description prompt."""
     artifact_text = fig_artifact if isinstance(fig_artifact, str) else to_json_str(fig_artifact)
     artifact_text = artifact_text or to_str(fig)[:2000]
     prompt = (
@@ -550,31 +520,22 @@ def desc_fig_prompt(
     return {"prompt_content": prompt}
 
 
-# ===================================================================
-# 组 8：RAG 格式化
-# ===================================================================
+# RAG formatting.
 
 
 def format_recall(*, output_list: list) -> dict[str, Any]:
-    """
-    preprocessing/155311 + modeling/155311
-    把 Knowledge retrieval 节点返回的 outputList 格式化成下游 LLM 能读的文本。
-
-    outputList 结构根据不同的来源可能不同，这里兼容：
-    - Coze 原生：[{"output": "...", "score": 0.9}, ...]
-    - 本地 retriever 产出：[{"name": "...", "description": "...", "code": "...", ...}]
-    """
+    """Format retrieved knowledge for preprocessing and modeling prompts."""
     if not isinstance(output_list, list) or not output_list:
         return {"knowledge_results": "（未召回相关算法）"}
 
-    # 检查第一条是否是本地格式
+    # Local algorithm-catalog results have their own formatter.
     first = output_list[0]
     if isinstance(first, dict) and ("name" in first or "category_l2" in first):
         from core.rag_retriever import format_recall as _format
 
         return {"knowledge_results": _format(output_list)}
 
-    # Coze 原生格式：直接拼接
+    # Generic retrieval format: concatenate chunk text.
     parts = []
     for i, item in enumerate(output_list, 1):
         if isinstance(item, dict):

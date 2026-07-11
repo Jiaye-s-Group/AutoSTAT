@@ -248,7 +248,7 @@ def vis_execution(agent, auto = False):
     )
     if code is not None:
         not_executed = agent.load_fig() == []
-        # 当点击按钮，或者 auto=True 且尚未执行过时才执行
+        # Run on explicit click, or once during auto mode.
         if st.button("▶️ 执行可视化") or (auto and not_executed):
             code = sanitize_visualization_code(edited)
             agent.save_code(code)

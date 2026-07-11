@@ -1,31 +1,4 @@
-"""
-Preprocessing workflow 本地实现。
-
-原 Coze 流程（简化）：
-    Start → Condition(prep_auto==True)
-      → get_preprocessing_suggestions(plugin)              [统计 df 基本信息]
-      → get_preprocessing_suggestions2(LLM)                [生成初版建议]
-      → refine_suggestions(LLM)                            [精炼建议]
-      → get_query(LLM) → Knowledge(RAG) → format_recall    [召回相关算法]
-      → code_generation(LLM)                               [生成预处理代码]
-      → Variable assign: code_prep = code
-      → Loop(max 5):                                       [修复循环]
-          ├─ code_runner(plugin)      [执行]
-          ├─ if success: break
-          └─ Code_Fixer(LLM)          [修]
-      → final_list(plugin)                                 [取最后一次结果]
-      → CHAP2_summary_html(LLM)                            [章节正文]
-      → ABS2_check_abstract(LLM)                           [摘要]
-      → summary2_composer(plugin)                          [组装]
-      → Code(兜底) → End
-
-输出:
-    {
-      "summary_2": {title, desc, processed_df, code},
-      "abstract_2": "...",
-      "suggestion": "初版建议"  # 给前端展示
-    }
-"""
+"""Generate preprocessing suggestions, code, execution results, and summaries."""
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -59,7 +32,7 @@ def run_preprocessing_workflow(
     preference_selected: str = "",
     ref_context: str = "",
 ) -> dict[str, Any]:
-    # ---------- Condition: prep_auto ----------
+    # Return an empty stage result when planning skips preprocessing.
     if not prep_auto:
         return {
             "summary_2": {"title": "", "desc": "", "processed_df": to_str(df), "code": ""},
@@ -67,7 +40,7 @@ def run_preprocessing_workflow(
             "suggestion": "",
         }
 
-    # ---------- 节点 1: get_preprocessing_suggestions (plugin) ----------
+    # Build deterministic dataset facts for the suggestion prompt.
     stats = get_preprocessing_suggestions(df=df)
     if not stats["is_success"]:
         return {
@@ -95,35 +68,33 @@ def run_preprocessing_workflow(
         "columns": stats["columns"],
     }
 
-    # ---------- 节点 2: get_preprocessing_suggestions2 (LLM) ----------
+    # Ask for initial preprocessing recommendations.
     sug_sys = render_file("preprocessing/get_preprocessing_suggestions2_llm_sys.txt", ctx)
     sug_user = render_file("preprocessing/get_preprocessing_suggestions2_llm_user.txt", ctx)
     suggestion = chat(sug_sys, sug_user, name="prep.get_suggestions").strip()
     ctx["suggestion"] = suggestion
 
-    # ---------- 节点 3: refine_suggestions (LLM) ----------
+    # Convert recommendations into concise code-generation requirements.
     ref_sys = render_file("preprocessing/refine_suggestions_llm_sys.txt", ctx)
     ref_user = render_file("preprocessing/refine_suggestions_llm_user.txt", ctx)
     refined_suggestions = chat(ref_sys, ref_user, name="prep.refine").strip()
     ctx["refined_suggestions"] = refined_suggestions
 
-    # ---------- 节点 4: RAG ----------
-    #   get_query(LLM) → 生成检索 query
+    # Retrieve method references for code generation.
     q_sys = render_file("preprocessing/get_query_llm_sys.txt", ctx)
     q_user = render_file("preprocessing/get_query_llm_user.txt", ctx)
     rag_query = chat(q_sys, q_user, name="prep.get_query", temperature=0).strip()
 
-    #   Knowledge retrieval + format_recall
     recall_results = retrieve(rag_query, top_k=3)
     ctx["knowledge_results"] = format_recall(output_list=recall_results)["knowledge_results"]
 
-    # ---------- 节点 5: code_generation (LLM) ----------
+    # Generate preprocessing code.
     cg_sys = render_file("preprocessing/code_generation_llm_sys.txt", ctx)
     cg_user = render_file("preprocessing/code_generation_llm_user.txt", ctx)
     initial_code = chat(cg_sys, cg_user, name="prep.code_generation").strip()
     initial_code = _unwrap_code_block(initial_code)
 
-    # ---------- 节点 6: Loop (修复循环，最多 5 次) ----------
+    # Execute and repair generated code up to MAX_FIX_ATTEMPTS.
     current_code = initial_code
     processed_df_list: list[str] = []
     processed_df_head_list: list[str] = []
@@ -143,7 +114,7 @@ def run_preprocessing_workflow(
         if attempt >= MAX_FIX_ATTEMPTS - 1:
             break
 
-        # ---------- 节点 6.x: Code_Fixer LLM ----------
+        # Ask the LLM to repair the code with the latest execution error.
         fix_ctx = {
             **ctx,
             "code": current_code,
@@ -160,7 +131,7 @@ def run_preprocessing_workflow(
         if fixed:
             current_code = fixed
 
-    # ---------- 节点 7: final_list (plugin) ----------
+    # Keep the latest successful output for downstream stages.
     if processed_df_list:
         final = final_list(
             processed_df_head_list=processed_df_head_list,
@@ -169,7 +140,7 @@ def run_preprocessing_workflow(
         processed_df = final["processed_df"]
         processed_df_head = final["processed_df_head"]
     else:
-        # 全部尝试都失败：退化为原始 df
+        # Fall back to the original data if every repair attempt fails.
         processed_df = df
         processed_df_head = head_dict_str
 
@@ -177,7 +148,7 @@ def run_preprocessing_workflow(
     ctx["processed_df"] = processed_df
     ctx["processed_df_head"] = processed_df_head
 
-    # ---------- 节点 8 & 9: 章节正文 + 摘要 并行 ----------
+    # Build the report body and abstract in parallel.
     chap_sys = render_file("preprocessing/chap2_summary_html_llm_sys.txt", ctx)
     chap_user = render_file("preprocessing/chap2_summary_html_llm_user.txt", ctx)
     abs_sys = render_file("preprocessing/abs2_check_abstract_llm_sys.txt", ctx)
@@ -189,14 +160,14 @@ def run_preprocessing_workflow(
         desc = f_desc.result().strip()
         abstract_2 = f_abs.result().strip()
 
-    # ---------- 节点 10: summary2_composer (plugin) ----------
+    # Normalize the output shape for the frontend and report workflows.
     composed = summary2_composer(code=current_code, desc=desc, processed_df=processed_df)
 
     return {
         "summary_2": composed["summary_2"],
         "abstract_2": abstract_2,
         "suggestion": suggestion,
-        # 额外字段（给前端展示）
+        # Internal fields for the frontend progress view.
         "_refined_suggestions": refined_suggestions,
         "_rag_query": rag_query,
         "_code_success": success,
@@ -206,14 +177,11 @@ def run_preprocessing_workflow(
 
 
 def _unwrap_code_block(text: str) -> str:
-    """
-    LLM 经常把代码包在 ```python ... ``` 里，去掉这层包装。
-    """
+    """Remove a surrounding Markdown code fence from generated code."""
     if not text:
         return ""
     t = text.strip()
     if t.startswith("```"):
-        # 去掉首行 ``` 或 ```python
         lines = t.splitlines()
         if lines[0].startswith("```"):
             lines = lines[1:]
@@ -223,7 +191,7 @@ def _unwrap_code_block(text: str) -> str:
     return t
 
 
-# ---------- CLI 测试入口 ----------
+# CLI smoke-test entry point.
 
 if __name__ == "__main__":
     import sys

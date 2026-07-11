@@ -1,33 +1,34 @@
 import sys, os
 import streamlit as st
 import warnings
-from utils.coze_runtime import (
-    ensure_coze_session_defaults,
-    handle_coze_oauth_callback,
-)
-from utils.page_paths import asset_file, page_file
-from utils.resizable_cards import inject_resizable_card_resizer
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+sys.path.append(os.path.dirname(__file__))
 
-# 忽略警告
+from utils.runtime_status import (
+    ensure_runtime_session_defaults,
+    handle_runtime_callback,
+)
+from utils.page_paths import asset_file, page_file
+from utils.resizable_cards import inject_resizable_card_resizer
+from settings.llm_config import render_llm_config_panel
+
+
+# Suppress noisy third-party warnings in Streamlit.
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", message="missing ScriptRunContext")
 
-# 基础路径配置
-sys.path.append(os.path.dirname(__file__))
-
-# 页面配置
+# Page setup.
 st.set_page_config(
     page_title="Autostat",
     page_icon="🤖",
     layout="wide"
 )
 
-# 基本Agent类定义
+# Base state holder shared by workflow pages.
 class BaseAgent:
     def __init__(self):
         self.df = None
@@ -501,7 +502,7 @@ class Retriever:
         self._chunks = []
     
     def add_uploaded_files(self, files):
-        """解析上传的参考资料文件，构建检索索引。"""
+        """Parse uploaded reference files and build the retrieval index."""
         try:
             from core.ref_doc_parser import parse_and_chunk
             from core.ref_doc_retriever import RefDocRetriever
@@ -510,7 +511,7 @@ class Retriever:
             self._chunks.extend(new_chunks)
             self._ref_retriever = RefDocRetriever(self._chunks)
 
-            # 同步到 session_state 供 workflow 使用
+            # Share the reference retriever with local workflow calls.
             st.session_state.ref_chunks = self._chunks
             st.session_state.ref_retriever = self._ref_retriever
 
@@ -531,12 +532,12 @@ class Retriever:
         return self._chunks
 
 def init_session_state():
-    """初始化会话状态，移除复杂的本地 API 配置逻辑"""
+    """Initialize Streamlit session state."""
     
     if 'auto_mode' not in st.session_state:
         st.session_state.auto_mode = False
     
-    # 初始化各个agent
+    # Initialize page agents.
     if 'data_loading_agent' not in st.session_state:
         st.session_state.data_loading_agent = DataLoadingAgent()
     elif not hasattr(st.session_state.data_loading_agent, "load_loading_workflow_result"):
@@ -595,14 +596,14 @@ def init_session_state():
     if 'ref_retriever' not in st.session_state:
         st.session_state.ref_retriever = None
 
-    # Coze 鉴权与版本配置
-    ensure_coze_session_defaults()
+    # Local workflow runtime defaults.
+    ensure_runtime_session_defaults()
 
 
 def run_app():
-    """渲染 Streamlit 应用程序主入口"""
+    """Render the Streamlit application."""
     init_session_state()
-    handle_coze_oauth_callback()
+    handle_runtime_callback()
     inject_resizable_card_resizer()
 
     def _reset_auto_agent_flags() -> None:
@@ -717,7 +718,7 @@ def run_app():
         st.session_state.planner_agent.stop_auto()
         _reset_auto_agent_flags()
 
-    # --- 侧边栏布局 ---
+    # Sidebar.
     with st.sidebar:
         st.markdown(
             """
@@ -743,230 +744,18 @@ def run_app():
             unsafe_allow_html=True,
         )
 
-        with st.expander("🔧 大模型配置", expanded=True):
-            # ---- 样式 ----
-            st.markdown(
-                """
-                <style>
-                .llm-status {
-                    font-size: 0.88rem; line-height: 1.5;
-                    border-radius: 10px; padding: 0.45rem 0.65rem;
-                    margin-top: 0.2rem; margin-bottom: 0.5rem;
-                }
-                .llm-ok  { color:#065f46; background:#d1fae5; border:1px solid #a7f3d0; }
-                .llm-warn{ color:#92400e; background:#fef3c7; border:1px solid #fde68a; }
-                .st-key-llm_save_btn button {
-                    background: linear-gradient(135deg, #5ea2ff 0%, #3d82f5 100%) !important;
-                    color: white !important; border: none !important; font-weight: 600 !important;
-                    box-shadow: 0 8px 18px rgba(61, 130, 245, 0.22) !important;
-                    transition: background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease !important;
-                }
-                .st-key-llm_save_btn button:hover {
-                    background: linear-gradient(135deg, #74b0ff 0%, #4a90ff 100%) !important;
-                    transform: translateY(-1px) !important;
-                    box-shadow: 0 10px 22px rgba(74, 144, 255, 0.26) !important;
-                }
-                </style>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            st.caption("支持所有 OpenAI API 兼容服务（DeepSeek、OpenAI、通义千问、AIHubMix 等）")
-
-            # ---- 预设快捷选择 ----
-            _PRESETS = {
-                "自定义": {"base_url": "", "model": ""},
-                "DeepSeek":   {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
-                "OpenAI":     {"base_url": "https://api.openai.com/v1",   "model": "gpt-4o"},
-                "AIHubMix":   {"base_url": "https://aihubmix.com/v1",     "model": "gpt-4o-mini"},
-                "通义千问":    {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
-                "智谱AI":     {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4-flash"},
-                "豆包":       {"base_url": "https://ark.cn-beijing.volces.com/api/v3", "model": "doubao-1-5-pro-256k-250115"},
-            }
-            _PRESET_NAMES = list(_PRESETS.keys())
-
-            def _clean_llm_value(value) -> str:
-                return str(value or "").strip()
-
-            def _make_llm_signature(provider, api_key, base_url, model_name) -> tuple[str, str, str, str]:
-                return (
-                    _clean_llm_value(provider),
-                    _clean_llm_value(api_key),
-                    _clean_llm_value(base_url),
-                    _clean_llm_value(model_name),
-                )
-
-            def _sync_llm_env(api_key: str, base_url: str, model_name: str) -> None:
-                env_values = {
-                    "OPENAI_API_KEY": api_key,
-                    "OPENAI_BASE_URL": base_url,
-                    "OPENAI_MODEL": model_name,
-                }
-                for env_key, env_value in env_values.items():
-                    if env_value:
-                        os.environ[env_key] = env_value
-                    else:
-                        os.environ.pop(env_key, None)
-
-            def _reset_llm_runtime() -> None:
-                try:
-                    from core.llm_client import LLMClient
-                    LLMClient._instance = None
-                except Exception:
-                    pass
-
-            # ---- session 初始化 ----
-            if "llm_provider" not in st.session_state:
-                st.session_state.llm_provider = "自定义"
-            if "llm_api_key" not in st.session_state:
-                st.session_state.llm_api_key = os.getenv("OPENAI_API_KEY", "")
-            if "llm_base_url" not in st.session_state:
-                st.session_state.llm_base_url = os.getenv("OPENAI_BASE_URL", "")
-            if "llm_model" not in st.session_state:
-                st.session_state.llm_model = os.getenv("OPENAI_MODEL", "")
-            if "llm_configured" not in st.session_state:
-                st.session_state.llm_configured = all(
-                    _make_llm_signature(
-                        st.session_state.llm_provider,
-                        st.session_state.llm_api_key,
-                        st.session_state.llm_base_url,
-                        st.session_state.llm_model,
-                    )[1:]
-                )
-            if "llm_connection_signature" not in st.session_state:
-                st.session_state.llm_connection_signature = (
-                    _make_llm_signature(
-                        st.session_state.llm_provider,
-                        st.session_state.llm_api_key,
-                        st.session_state.llm_base_url,
-                        st.session_state.llm_model,
-                    )
-                    if st.session_state.llm_configured
-                    else None
-                )
-            if "llm_key_input" not in st.session_state:
-                st.session_state.llm_key_input = st.session_state.llm_api_key
-            if "llm_url_input" not in st.session_state:
-                st.session_state.llm_url_input = st.session_state.llm_base_url
-            if "llm_model_input" not in st.session_state:
-                st.session_state.llm_model_input = st.session_state.llm_model
-
-            # ---- 快捷预设 ----
-            preset_choice = st.selectbox(
-                "快捷预设（选择后自动填充 Base URL 和模型名）",
-                options=_PRESET_NAMES,
-                index=_PRESET_NAMES.index(st.session_state.llm_provider)
-                    if st.session_state.llm_provider in _PRESET_NAMES else 0,
-                key="llm_provider_select",
-                label_visibility="collapsed",
-            )
-
-            # 切换预设时自动填充
-            if preset_choice != st.session_state.llm_provider:
-                st.session_state.llm_provider = preset_choice
-                p = _PRESETS[preset_choice]
-                st.session_state.llm_api_key = ""
-                st.session_state.llm_key_input = ""
-                st.session_state.llm_base_url = p["base_url"]
-                st.session_state.llm_url_input = p["base_url"]
-                st.session_state.llm_model = p["model"]
-                st.session_state.llm_model_input = p["model"]
-                st.session_state.llm_configured = False
-                st.session_state.llm_connection_signature = None
-
-            # ---- 三个核心字段（始终显示，始终可编辑） ----
-            api_key = st.text_input(
-                "API Key",
-                type="password",
-                placeholder="sk-xxxxxxxxxxxxxxxx",
-                key="llm_key_input",
-            )
-            base_url = st.text_input(
-                "Base URL",
-                placeholder="https://api.openai.com/v1",
-                key="llm_url_input",
-            )
-            model_name = st.text_input(
-                "Model",
-                placeholder="gpt-4o / deepseek-chat / qwen-plus ...",
-                key="llm_model_input",
-            )
-
-            # ---- 保存 & 测试 ----
-            if st.button("💾 保存并连接", use_container_width=True, key="llm_save_btn"):
-                api_key_clean = _clean_llm_value(api_key)
-                base_url_clean = _clean_llm_value(base_url)
-                model_name_clean = _clean_llm_value(model_name)
-
-                st.session_state.llm_api_key = api_key_clean
-                st.session_state.llm_base_url = base_url_clean
-                st.session_state.llm_model = model_name_clean
-                st.session_state.llm_provider = preset_choice
-
-                if api_key_clean and base_url_clean and model_name_clean:
-                    try:
-                        _sync_llm_env(api_key_clean, base_url_clean, model_name_clean)
-                        from core.llm_client import LLMClient
-                        LLMClient.reconfigure(
-                            base_url=base_url_clean,
-                            api_key=api_key_clean,
-                            model=model_name_clean,
-                        )
-                        st.session_state.llm_configured = True
-                        st.session_state.llm_connection_signature = _make_llm_signature(
-                            preset_choice,
-                            api_key_clean,
-                            base_url_clean,
-                            model_name_clean,
-                        )
-                        st.success("✅ 连接成功！")
-                    except Exception as exc:
-                        st.session_state.llm_configured = False
-                        st.session_state.llm_connection_signature = None
-                        st.error(f"连接失败：{exc}")
-                else:
-                    _sync_llm_env(api_key_clean, base_url_clean, model_name_clean)
-                    _reset_llm_runtime()
-                    st.session_state.llm_configured = False
-                    st.session_state.llm_connection_signature = None
-                    st.warning("请填写 API Key、Base URL 和 Model 三项。")
-
-            # ---- 状态指示 ----
-            current_llm_signature = _make_llm_signature(preset_choice, api_key, base_url, model_name)
-            current_llm_complete = all(current_llm_signature[1:])
-            current_llm_connected = (
-                st.session_state.llm_configured
-                and current_llm_complete
-                and st.session_state.llm_connection_signature == current_llm_signature
-            )
-
-            if current_llm_connected:
-                display_model = st.session_state.llm_model or "未知模型"
-                display_url = st.session_state.llm_base_url or ""
-                # 从 URL 提取简短标识
-                import re as _re
-                domain_match = _re.search(r"://([^/]+)", display_url)
-                domain_short = domain_match.group(1) if domain_match else display_url
-                st.markdown(
-                    f'<div class="llm-status llm-ok">✅ 已就绪 · <code>{display_model}</code><br/>'
-                    f'<span style="font-size:0.8rem;opacity:0.7;">{domain_short}</span></div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    '<div class="llm-status llm-warn">⚠️ 未连接，请填写完整配置后保存</div>',
-                    unsafe_allow_html=True,
-                )
+        with st.expander("大模型配置", expanded=True):
+            render_llm_config_panel()
 
         st.write("")
 
-        # 清空数据按钮
+        # Reset all in-memory state.
         if st.button("🧹 清空所有数据", use_container_width=True):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
 
-        # 自动模式逻辑（保留核心流程控制）
+        # Auto mode controls.
         df = st.session_state.data_loading_agent.load_df()
         if not st.session_state.auto_mode:
             if st.button("🚗 开启自动模式", use_container_width=True, type="primary"):
@@ -977,12 +766,12 @@ def run_app():
                 _stop_auto_mode()
                 st.rerun()
 
-        # 检查logo目录是否存在
+        # Optional project logo.
         logo_path = asset_file("logo", "logo_big.png")
         if os.path.exists(logo_path):
             st.image(logo_path, use_container_width=True)
 
-    # --- 页面导航 (保持模块化) ---
+    # Page navigation.
     pages = {
         "分析流程": [
             st.Page(page_file("dataloading", "dataloading_render.py"), title="📥 数据导入"),

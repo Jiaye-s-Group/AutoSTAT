@@ -1,35 +1,9 @@
-"""
-Modeling workflow 本地实现。
-
-原 Coze 流程:
-    Start → Condition(modeling_auto==True)
-      → Sec4_get_model_suggestion(LLM)   [推荐模型]
-      → Sec4_refine_suggestion(LLM)      [精炼]
-      → get_query(LLM) → Knowledge(RAG) → format_recall(plugin)
-      → sec4_code_generation(LLM)        [生成训练代码]
-      → Variable assign_1: code_modeling = code
-      → Loop(max 5): [修复循环]
-          ├─ code_runner(HTTP→本地)
-          ├─ if success: break
-          └─ sec4_code_fixed(LLM) → 更新 code_modeling
-      → Code_2(取 Loop 的 final_code + result_list)
-      → sec4_result_format_prompt(LLM)   [解析结果]
-      → Sec4_summary_html(LLM)           [章节正文]
-      → Sec4_check_abstract(LLM)         [摘要]
-      → sec4_composer(plugin)
-      → Code(兜底) → End
-
-输出:
-    {
-      "summary_4": {title, desc, result, code},
-      "abstract_4": "...",
-      "model_suggestion": "..."
-    }
-"""
+"""Generate modeling recommendations, executable code, metrics, and summaries."""
 from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -49,6 +23,11 @@ from workflows._plugins import (
 MAX_FIX_ATTEMPTS = 5
 MODELING_CODE_PROMPT_MAX_CHARS = 6000
 MODELING_LONG_STRING_MAX_CHARS = 800
+MODELING_PROMPT_HEAD_MAX_CHARS = int(os.getenv("AUTOSTAT_MODELING_PROMPT_HEAD_CHARS", "12000"))
+MODELING_PROMPT_DATA_MAX_CHARS = int(os.getenv("AUTOSTAT_MODELING_PROMPT_DATA_CHARS", "12000"))
+MODELING_PROMPT_USER_TEXT_MAX_CHARS = int(os.getenv("AUTOSTAT_MODELING_PROMPT_USER_TEXT_CHARS", "6000"))
+MODELING_PROMPT_CONTEXT_MAX_CHARS = int(os.getenv("AUTOSTAT_MODELING_PROMPT_CONTEXT_CHARS", "12000"))
+MODELING_PROMPT_MAX_COLUMNS = int(os.getenv("AUTOSTAT_MODELING_PROMPT_MAX_COLUMNS", "300"))
 MODELING_GENERIC_LIST_MAX_ITEMS = 12
 MODELING_MODEL_LIST_MAX_ITEMS = 30
 MODELING_IMPORTANCE_TOP_K = 20
@@ -112,21 +91,71 @@ def _build_modeling_ctx(
     preference_selected: str = "",
     ref_context: str = "",
 ) -> dict[str, Any]:
-    """构造 modeling workflow 公共上下文。"""
+    """Build shared prompt context for modeling steps."""
+    prompt_columns = _compact_columns_for_prompt(columns, target=target)
     return {
-        "data": data,
-        "df_head": df_head,
-        "columns": columns,
+        "data": _truncate_prompt_text(data, MODELING_PROMPT_DATA_MAX_CHARS),
+        "df_head": _compact_df_head_for_prompt(
+            df_head,
+            prompt_columns=prompt_columns,
+            max_chars=MODELING_PROMPT_HEAD_MAX_CHARS,
+        ),
+        "columns": prompt_columns,
         "target": target or "",
-        "train_code": train_code or "",
-        "user_input": user_input or "",
-        "user_prompt": user_prompt or user_input or "",
-        "add_preference": add_preference or "",
-        "additional_preference": add_preference or "",
-        "preference_selected": preference_selected or "",
-        "preference_select": preference_selected or "",
-        "ref_context": ref_context or "（无参考资料）",
+        "train_code": _truncate_prompt_text(train_code or "", MODELING_CODE_PROMPT_MAX_CHARS),
+        "user_input": _truncate_prompt_text(user_input or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
+        "user_prompt": _truncate_prompt_text(user_prompt or user_input or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
+        "add_preference": _truncate_prompt_text(add_preference or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
+        "additional_preference": _truncate_prompt_text(add_preference or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
+        "preference_selected": _truncate_prompt_text(preference_selected or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
+        "preference_select": _truncate_prompt_text(preference_selected or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
+        "ref_context": _truncate_prompt_text(ref_context or "（无参考资料）", MODELING_PROMPT_CONTEXT_MAX_CHARS),
     }
+
+
+def _truncate_prompt_text(value: Any, max_chars: int) -> str:
+    text = to_str(value).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + f"\n...[truncated for modeling prompt; original chars={len(text)}]"
+
+
+def _compact_columns_for_prompt(columns: Any, *, target: str = "") -> list[str]:
+    raw_columns = [str(col) for col in (columns or [])]
+    if len(raw_columns) <= MODELING_PROMPT_MAX_COLUMNS:
+        return raw_columns
+
+    target_text = str(target or "").strip()
+    kept: list[str] = []
+    if target_text and target_text in raw_columns:
+        kept.append(target_text)
+    for col in raw_columns:
+        if col in kept:
+            continue
+        kept.append(col)
+        if len(kept) >= MODELING_PROMPT_MAX_COLUMNS:
+            break
+    kept.append(f"...[{len(raw_columns) - len(kept)} omitted columns; full df is still available at runtime]")
+    return kept
+
+
+def _compact_df_head_for_prompt(df_head: Any, *, prompt_columns: list[str], max_chars: int) -> str:
+    text = to_str(df_head).strip()
+    if len(text) <= max_chars:
+        return text
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return _truncate_prompt_text(text, max_chars)
+
+    if isinstance(parsed, dict):
+        keep = {col for col in prompt_columns if not col.startswith("...[")}
+        compacted = {str(key): value for key, value in parsed.items() if str(key) in keep}
+        compact_text_value = json.dumps(compacted, ensure_ascii=False, default=str)
+        if len(compact_text_value) <= max_chars:
+            return compact_text_value
+    return _truncate_prompt_text(text, max_chars)
 
 
 def _empty_modeling_result() -> dict[str, Any]:
@@ -154,7 +183,7 @@ def run_modeling_phase1(
     preference_selected: str = "",
     ref_context: str = "",
 ) -> dict[str, Any]:
-    """Phase 1: 生成 model_suggestion + refined_suggestions，快速返回给前端展示。"""
+    """Generate modeling recommendations and concise implementation requirements."""
     if not modeling_auto:
         return {"model_suggestion": "", "refined_suggestions": "", "_ctx": {}}
 
@@ -189,7 +218,7 @@ def run_modeling_phase2(
     data: str,
     df_head: str,
 ) -> dict[str, Any]:
-    """Phase 2: RAG + 代码生成 + 验证修复 + 结果格式化 + 摘要。依赖 phase1 产出的 ctx。"""
+    """Run RAG, code generation, repair, result formatting, and summaries."""
     model_suggestion = ctx.get("model_suggestion", "")
     refined_suggestions = ctx.get("refined_suggestions", "")
 
@@ -201,13 +230,13 @@ def run_modeling_phase2(
     recall_results = retrieve(rag_query, top_k=3)
     ctx["knowledge_results"] = format_recall(output_list=recall_results)["knowledge_results"]
 
-    # ---------- 代码生成 ----------
+    # Generate modeling code from the refined requirements.
     cg_sys = render_file("modeling/sec4_code_generation_llm_sys.txt", ctx)
     cg_user = render_file("modeling/sec4_code_generation_llm_user.txt", ctx)
     generated_code = chat(cg_sys, cg_user, name="model.code_generation").strip()
     generated_code = _unwrap_code_block(generated_code)
 
-    # ---------- 修复循环 ----------
+    # Execute and repair generated code until it yields a valid metrics table.
     current_code = generated_code
     success = False
     last_error = ""
@@ -217,12 +246,29 @@ def run_modeling_phase2(
     for attempt in range(MAX_FIX_ATTEMPTS):
         run_result = _run_modeling_code(code=current_code, data=data)
         if run_result["is_success"]:
-            success = True
-            final_result_str = run_result.get("stdout", "")
-            final_result_json = run_result.get("result_json", {})
-            break
+            candidate_result_json = run_result.get("result_json", {})
+            candidate_table = build_model_comparison_table_bundle(
+                candidate_result_json,
+                target=ctx.get("target", ""),
+                user_input=ctx.get("user_input", ""),
+                additional_preference=ctx.get("additional_preference", ""),
+            )
+            if candidate_table.get("has_table"):
+                success = True
+                final_result_str = run_result.get("stdout", "")
+                final_result_json = candidate_result_json
+                break
 
-        last_error = run_result.get("error", "")
+            last_error = (
+                "代码执行成功，但 result_dict 无法生成模型对比表。"
+                "result_dict 必须包含可解析的 models 列表；每个模型条目必须包含 name/type/metrics，"
+                "metrics 中至少包含一个数值型评价指标。"
+            )
+            if attempt >= MAX_FIX_ATTEMPTS - 1:
+                break
+        else:
+            last_error = run_result.get("error", "")
+
         if attempt >= MAX_FIX_ATTEMPTS - 1:
             break
 
@@ -254,10 +300,12 @@ def run_modeling_phase2(
             },
             "abstract_4": f"建模代码执行失败：{last_error[:200]}",
             "model_suggestion": model_suggestion,
+            "_code_success": False,
+            "_code_error": last_error,
+            "_fix_attempts": MAX_FIX_ATTEMPTS,
         }
 
-    # ---------- 结果格式化 ----------
-    # 表格/内部逻辑继续使用 raw result；LLM prompt 只接收 compact evidence。
+    # Use the raw result for deterministic tables; pass compact evidence to the LLM.
     artifact_metadata = collect_modeling_artifact_metadata(final_result_json)
     compact_result = compact_modeling_result(
         final_result_json,
@@ -292,7 +340,7 @@ def run_modeling_phase2(
     ctx["result_format"] = result_format
     ctx["result"] = result_format
 
-    # ---------- 章节正文 + 摘要 并行 ----------
+    # Build the report body and abstract in parallel.
     sh_sys = render_file("modeling/sec4_summary_html_llm_sys.txt", ctx)
     sh_user = render_file("modeling/sec4_summary_html_llm_user.txt", ctx)
     ab_sys = render_file("modeling/sec4_check_abstract_llm_sys.txt", ctx)
@@ -319,6 +367,8 @@ def run_modeling_phase2(
         "_final_code": final_code,
         "_modeling_result_evidence": compact_result,
         "_modeling_artifact_metadata": artifact_metadata,
+        "_code_success": True,
+        "_code_error": "",
         "_fix_attempts": attempt + 1 if success else MAX_FIX_ATTEMPTS,
     }
 
@@ -337,7 +387,7 @@ def run_modeling_workflow(
     preference_selected: str = "",
     ref_context: str = "",
 ) -> dict[str, Any]:
-    """完整执行（兼容旧调用方式，顺序执行 phase1 + phase2）。"""
+    """Run modeling recommendation and code-generation phases in sequence."""
     if not modeling_auto:
         return _empty_modeling_result()
 
@@ -860,19 +910,16 @@ def _is_empty_compact_value(value: Any) -> bool:
     return value in ("", None, [], {})
 
 
-# ===================================================================
-# 建模代码专用 runner —— 比 preprocessing 多一个 result_json 输出
-# ===================================================================
+# Modeling code runner with structured result capture.
 
 
 def _run_modeling_code(*, code: str, data: str, timeout_seconds: int = 300) -> dict[str, Any]:
-    """
-    执行建模训练代码。
-    约定用户代码必须设置 result_dict 变量，与前端执行器保持一致。
-    """
+    """Run generated modeling code and collect its `result_dict` output."""
     import json
+    import os
     import subprocess
     import sys
+    import tempfile
     import textwrap
 
     user_code = to_str(code).strip()
@@ -882,6 +929,43 @@ def _run_modeling_code(*, code: str, data: str, timeout_seconds: int = 300) -> d
     script = '''import json, sys, traceback
 import pandas as pd
 import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, LabelEncoder, OrdinalEncoder
+from sklearn.preprocessing import OneHotEncoder as _SklearnOneHotEncoder
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor, ExtraTreesClassifier, ExtraTreesRegressor, AdaBoostClassifier, AdaBoostRegressor
+from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge, Lasso, ElasticNet
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from sklearn.svm import SVC, SVR
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.naive_bayes import GaussianNB
+
+if not hasattr(pd.DataFrame, "concat"):
+    pd.DataFrame.concat = staticmethod(pd.concat)
+
+def pd_isna_like(value):
+    return pd.isna(value)
+
+def OneHotEncoder(*args, **kwargs):
+    if "sparse" in kwargs and "sparse_output" not in kwargs:
+        kwargs["sparse_output"] = kwargs.pop("sparse")
+    try:
+        return _SklearnOneHotEncoder(*args, **kwargs)
+    except TypeError:
+        if "sparse_output" in kwargs:
+            kwargs["sparse"] = kwargs.pop("sparse_output")
+        return _SklearnOneHotEncoder(*args, **kwargs)
+
+try:
+    from xgboost import XGBClassifier, XGBRegressor
+except Exception:
+    XGBClassifier = None
+    XGBRegressor = None
+
+try:
+    from lightgbm import LGBMClassifier, LGBMRegressor
+except Exception:
+    LGBMClassifier = None
+    LGBMRegressor = None
 
 _RECORDS = json.loads(sys.stdin.read())
 df = pd.DataFrame(_RECORDS)
@@ -893,14 +977,14 @@ except Exception as e:
     traceback.print_exc(file=sys.stderr)
     sys.exit(2)
 
-# 收集 result_dict 变量。后端 runner 与前端训练执行器保持同一输出协议。
+# Collect result_dict using the same contract as the frontend runner.
 _out = locals().get("result_dict")
 if not isinstance(_out, dict):
     print("__AUTOSTAT_ERROR__", file=sys.stderr)
     print("代码必须定义 dict 类型的 result_dict", file=sys.stderr)
     sys.exit(3)
 
-# 把 numpy / pandas 类型变成原生 JSON 友好类型
+# Convert numpy and pandas values into JSON-friendly Python objects.
 def _clean(o):
     if hasattr(o, "item"):
         try:
@@ -913,19 +997,66 @@ def _clean(o):
         return [_clean(v) for v in o]
     return o
 
-print("__AUTOSTAT_RESULT__:" + json.dumps(_clean(_out), ensure_ascii=False))
+def _looks_numeric_list(values):
+    if not isinstance(values, list) or not values:
+        return False
+    sample = values[:50]
+    return all(isinstance(v, (int, float, np.integer, np.floating)) for v in sample)
+
+def _summarize_numeric_list(values):
+    arr = np.asarray(values, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    summary = {"count": int(arr.size), "sample": values[:10]}
+    if finite.size:
+        summary.update({
+            "mean": float(np.mean(finite)),
+            "std": float(np.std(finite)),
+            "min": float(np.min(finite)),
+            "max": float(np.max(finite)),
+        })
+    return summary
+
+def _strip_transport_heavy_values(o, key=""):
+    key_text = str(key).lower()
+    if any(hint in key_text for hint in (
+        "artifact", "b64", "base64", "pickle", "gzip", "blob", "bytes",
+        "model_object", "serialized", "raw_model", "fitted_model",
+    )):
+        return {"stripped": True, "reason": "model artifact removed before report transport"}
+
+    if isinstance(o, dict):
+        return {str(k): _strip_transport_heavy_values(v, k) for k, v in o.items()}
+
+    if isinstance(o, list):
+        if len(o) > 50 and _looks_numeric_list(o):
+            return _summarize_numeric_list(o)
+        if len(o) > 50:
+            return {"count": len(o), "sample": [_strip_transport_heavy_values(v, key) for v in o[:10]]}
+        return [_strip_transport_heavy_values(v, key) for v in o]
+
+    if isinstance(o, str) and len(o) > 4000:
+        compact = "".join(o.split())
+        if len(compact) > 4000:
+            return {"stripped": True, "chars": len(o), "reason": "large string removed before report transport"}
+    return o
+
+_cleaned = _strip_transport_heavy_values(_clean(_out))
+print("__AUTOSTAT_RESULT__:" + json.dumps(_cleaned, ensure_ascii=False))
 '''
 
     indented = textwrap.indent(user_code, " " * 4)
     full_script = script.replace("__USER_CODE__", indented)
 
     try:
+        env = dict(os.environ)
+        env.setdefault("MPLCONFIGDIR", tempfile.gettempdir())
         completed = subprocess.run(
             [sys.executable, "-c", full_script],
             input=to_str(data) or "[]",
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return {
@@ -938,12 +1069,12 @@ print("__AUTOSTAT_RESULT__:" + json.dumps(_clean(_out), ensure_ascii=False))
     if completed.returncode != 0:
         return {
             "is_success": False,
-            "error": (completed.stderr or "")[:1500],
+            "error": (completed.stderr or "")[:6000],
             "stdout": completed.stdout or "",
             "result_json": {},
         }
 
-    # 分离打印输出和 result
+    # Separate user stdout from the structured result payload.
     result_json: dict = {}
     lines = completed.stdout.splitlines()
     stdout_clean_lines = []
@@ -978,7 +1109,7 @@ def _unwrap_code_block(text: str) -> str:
     return t
 
 
-# ---------- CLI 测试入口 ----------
+# CLI smoke-test entry point.
 
 if __name__ == "__main__":
     import sys

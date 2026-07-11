@@ -15,6 +15,8 @@ import re
 import time
 from typing import Any
 
+from core.config_store import LLMConfig, load_llm_config, llm_config_from_env
+
 try:  # Optional dependency
     from dotenv import load_dotenv
 
@@ -39,12 +41,16 @@ def _get_openai_cls():
     return _OpenAI
 
 
-DEFAULT_BASE_URL = os.getenv("OPENAI_BASE_URL", "")
-DEFAULT_API_KEY = os.getenv("OPENAI_API_KEY", "")
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "")
 DEFAULT_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 DEFAULT_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096"))
 DEFAULT_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
+
+
+def _default_llm_config() -> LLMConfig:
+    stored_config = load_llm_config()
+    if stored_config.is_complete():
+        return stored_config
+    return llm_config_from_env()
 
 
 class LLMClient:
@@ -54,11 +60,16 @@ class LLMClient:
 
     def __init__(
         self,
-        base_url: str = DEFAULT_BASE_URL,
-        api_key: str = DEFAULT_API_KEY,
-        model: str = DEFAULT_MODEL,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ):
+        default_config = _default_llm_config()
+        api_key = api_key if api_key is not None else default_config.api_key
+        base_url = base_url if base_url is not None else default_config.base_url
+        model = model if model is not None else default_config.model
+
         if not api_key:
             raise RuntimeError(
                 "未配置 API Key。请在侧边栏“大模型配置”中填写 API Key、Base URL 和 Model 后保存。"
@@ -66,6 +77,10 @@ class LLMClient:
         if not base_url:
             raise RuntimeError(
                 "未配置 Base URL。请在侧边栏“大模型配置”中填写 Base URL，例如 https://api.openai.com/v1。"
+            )
+        if not model:
+            raise RuntimeError(
+                "未配置 Model。请在侧边栏“大模型配置”中填写模型名称，例如 deepseek-chat。"
             )
 
         OpenAI = _get_openai_cls()
@@ -231,6 +246,15 @@ class LLMClient:
 
                 if response_json and "response_format" in err_text:
                     kwargs.pop("response_format", None)
+                    continue
+                if (
+                    "temperature" in kwargs
+                    and (
+                        "temperature" in err_text
+                        or "not a chat model" in err_text
+                    )
+                ):
+                    kwargs.pop("temperature", None)
                     continue
                 if attempt < retries:
                     time.sleep(1 + attempt)

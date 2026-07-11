@@ -1,42 +1,29 @@
-# === Python ===
+.DS_Store
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-*.egg-info/
-dist/
-build/
-*.egg
 
-# === 虚拟环境 ===
-venv/
-.venv/
-env/
-ENV/
-
-# === 环境变量（含 API Key，绝对不能提交！）===
 .env
+.venv/
+venv/
+env/
 
-# === IDE ===
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
-# === OS ===
-.DS_Store
-Thumbs.db
-desktop.ini
+*.pkl
+*.pkl.gz
+*.joblib
+*.onnx
 
-# === 临时文件 & 输出 ===
-*.log
+output/
+outputs/
+results/
 tmp/
 temp/
-output/
-*.docx
-*.pdf
-!knowledge/*.xlsx
+exports/
+artifacts/
 
-# === Jupyter ===
-.ipynb_checkpoints/
+.streamlit/secrets.toml
+frontend/utils/.streamlit/

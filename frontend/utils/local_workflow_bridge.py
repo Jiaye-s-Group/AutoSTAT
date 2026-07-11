@@ -1,8 +1,9 @@
 """
-前端 render 页面 → 本地 workflow 的桥接层。
+Bridge Streamlit page inputs to local workflow functions.
 
-原 render 页面构造好 inputs dict 后走 Coze HTTP，这里把它替换成本地调用，
-返回结构**严格对齐原 Coze** 返回的 data 字段。
+Render pages build dictionaries from session state. This module normalizes those
+inputs, calls the corresponding workflow, and returns the workflow result to the
+UI layer.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ def _err(msg: str) -> None:
     st.error(msg)
 
 def _get_ref_context(query: str = "") -> str:
-    """从 session_state 中获取参考资料检索结果。"""
+    """Return formatted reference-document snippets from session state."""
     retriever = st.session_state.get("ref_retriever")
     if retriever is None or retriever.is_empty:
         return ""
@@ -25,7 +26,7 @@ def _get_ref_context(query: str = "") -> str:
 
 
 def call_loading_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """对应 Coze Loading workflow (7598094351072526389)"""
+    """Call the loading workflow from UI inputs."""
     from workflows.loading import run_loading_workflow
 
     try:
@@ -46,7 +47,7 @@ def call_loading_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def call_preprocessing_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """对应 Coze Preprocessing workflow (7604840478119706677)"""
+    """Call the preprocessing workflow from UI inputs."""
     from workflows.preprocessing import run_preprocessing_workflow
 
     try:
@@ -68,7 +69,7 @@ def call_preprocessing_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def call_visualizing_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """对应 Coze Visualizing workflow (7628850702967930885)"""
+    """Call the visualization workflow from UI inputs."""
     from workflows.visualizing import run_visualizing_workflow
 
     try:
@@ -97,7 +98,7 @@ def call_visualizing_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def call_visualizing_phase1_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """Phase 1: 仅生成 visual_recommendation + refined_suggestions，快速返回。"""
+    """Run visualization phase 1 for recommendation preview."""
     from workflows.visualizing import run_visualizing_phase1
 
     try:
@@ -126,7 +127,7 @@ def call_visualizing_phase1_bridge(inputs: dict[str, Any]) -> dict[str, Any] | N
 
 
 def call_visualizing_phase2_bridge(inputs: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any] | None:
-    """Phase 2: 代码生成 + 验证 + 图表分析，依赖 phase1 的 ctx。"""
+    """Run visualization phase 2 for code generation and chart analysis."""
     from workflows.visualizing import run_visualizing_phase2
 
     try:
@@ -148,7 +149,7 @@ def call_visualizing_phase2_bridge(inputs: dict[str, Any], ctx: dict[str, Any]) 
 
 
 def call_modeling_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """对应 Coze Modeling workflow (7605874583226056709)"""
+    """Call the modeling workflow from UI inputs."""
     from workflows.modeling import run_modeling_workflow
 
     try:
@@ -177,7 +178,7 @@ def call_modeling_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def call_modeling_phase1_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """Phase 1: 仅生成 model_suggestion + refined_suggestions，快速返回。"""
+    """Run modeling phase 1 for recommendation preview."""
     from workflows.modeling import run_modeling_phase1
 
     try:
@@ -206,7 +207,7 @@ def call_modeling_phase1_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None
 
 
 def call_modeling_phase2_bridge(inputs: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any] | None:
-    """Phase 2: RAG + 代码生成 + 验证 + 结果分析，依赖 phase1 的 ctx。"""
+    """Run modeling phase 2 for RAG, code generation, and result analysis."""
     from workflows.modeling import run_modeling_phase2
 
     try:
@@ -221,7 +222,7 @@ def call_modeling_phase2_bridge(inputs: dict[str, Any], ctx: dict[str, Any]) -> 
 
 
 def call_reporting_toc_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """对应 Coze Reporting_toc workflow (7619618199978508341)"""
+    """Call the report-outline workflow from UI inputs."""
     from workflows.reporting_toc import run_reporting_toc_workflow
 
     try:
@@ -268,7 +269,7 @@ def call_reporting_toc_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def call_reporting_partly_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """对应 Coze Reporting_partly workflow (7619618317418446901)"""
+    """Call the report-writing workflow from UI inputs."""
     from workflows.reporting_partly import ReportGenerationCancelled, run_reporting_partly_workflow
 
     try:
@@ -284,6 +285,7 @@ def call_reporting_partly_bridge(inputs: dict[str, Any]) -> dict[str, Any] | Non
             add_preference=str(inputs.get("add_preference", "")),
             preference_select=str(inputs.get("preference_select", "")),
             ref_context=_get_ref_context(f"报告撰写 业务背景 {inputs.get('add_preference', '')}"),
+            stage_reference_contexts=inputs.get("stage_reference_contexts") if isinstance(inputs.get("stage_reference_contexts"), dict) else None,
             cancel_check=cancel_check if callable(cancel_check) else None,
         )
     except ReportGenerationCancelled:

@@ -19,18 +19,9 @@ def read_data_from_file(
     na_values: List[str] = ['?'],
     encoding: Optional[str] = None
 ) -> pd.DataFrame:
-    """
-    从上传的数据文件读取 DataFrame。
-    - 支持 .csv/.data/.txt/.xlsx/.xls/.mat
-    - col_names=None 时使用 header=0（文件首行做列名）
-    - col_names 不为 None 时使用 header=None 并指定 names=col_names
-    - 文本文件：自动探测编码、嗅探分隔符，跳过坏行
-    - Excel 文件：直接使用 pandas.read_excel
-    - MAT 文件：使用 scipy.loadmat，提取第一个主要变量，转为 DataFrame，并保证一维列
-    """
-    # 读取所有字节
+    """Read an uploaded table-like file into a DataFrame."""
+    # Read the full upload once and rewind the stream for later callers.
     data_bytes = uploaded_data_file.read()
-    # 重置流位置
     try:
         uploaded_data_file.seek(0)
     except Exception:
@@ -39,7 +30,7 @@ def read_data_from_file(
     name = uploaded_data_file.name
     ext = os.path.splitext(name)[1].lower()
 
-    # Excel 文件处理
+    # Excel files are delegated to pandas directly.
     if ext in ('.xlsx', '.xls'):
         excel_kwargs = {}
         if col_names is None:
@@ -49,7 +40,7 @@ def read_data_from_file(
             excel_kwargs['names'] = col_names
         return pd.read_excel(io.BytesIO(data_bytes), **excel_kwargs)
 
-    # ARFF 文件特殊处理
+    # ARFF files need scipy metadata handling before DataFrame conversion.
     if ext == '.arff':
         text = data_bytes.decode(encoding or 'utf-8', errors='ignore')
         raw_data, meta = arff.loadarff(io.StringIO(text))
@@ -61,7 +52,7 @@ def read_data_from_file(
             df.columns = col_names
         return df
         
-    # —— MAT 文件特殊处理 —— #
+    # MAT files may contain sparse or multidimensional arrays.
     if ext == '.mat':
         mat = loadmat(io.BytesIO(data_bytes))
         data_keys = [k for k in mat.keys() if not k.startswith('__')]
@@ -69,7 +60,6 @@ def read_data_from_file(
             raise ValueError('MAT 文件中未发现有效数据变量')
         arr = mat[data_keys[0]]
 
-        # —— 先处理稀疏矩阵 —— #
         if sparse.issparse(arr):
             arr = arr.toarray()
 
@@ -141,12 +131,7 @@ def read_data_from_file(
 
 
 def process_complex_data(uploaded_files, dataloadingagent):
-    """
-    上传处理逻辑：
-    - 单文件：当作普通表格或 MAT 文件读（第一行当表头）
-    - 多文件：若有 .names/.arff 表头文件，则用其列名；否则推断列名
-      并在存在多个数据文件时，通过用户选择进行横向或纵向拼接
-    """
+    """Load one or more uploaded data files into a combined DataFrame."""
     if not uploaded_files:
         st.error("请先上传文件")
         return None, None
@@ -159,7 +144,7 @@ def process_complex_data(uploaded_files, dataloadingagent):
     data_files = [f for f in uploaded_files
                   if os.path.splitext(f.name)[1].lower() in data_exts]
 
-    # 单文件直接读取
+    # A single data file can be read directly.
     if len(uploaded_files) == 1 and uploaded_files[0] in data_files:
         return read_data_from_file(uploaded_files[0], col_names=None), None
 
@@ -168,14 +153,13 @@ def process_complex_data(uploaded_files, dataloadingagent):
             "未检测到任何数据文件，请上传支持的格式：.csv/.data/.txt/.xlsx/.xls/.mat/.arff/.tsv/.dat/.tst"
         )
 
-    # 1) 如果存在表头文件 (.names/.arff)，读取列名
+    # Prefer explicit column names from a header-like file.
     if names_files:
         header_file = names_files[0]
-        # 使用 read_data_from_file 读取 sample，以确保正确处理编码
         sample_df = read_data_from_file(data_files[0], col_names=None)
         col_names = dataloadingagent.read_names_from_file(header_file, sample_df.head())
     else:
-        # 2) 否则从第一个数据文件推断列名，加入编码容错
+        # Otherwise infer column names from the first data file.
         sample = data_files[0]
         ext0 = os.path.splitext(sample.name)[1].lower()
         try:
@@ -185,8 +169,7 @@ def process_complex_data(uploaded_files, dataloadingagent):
                 df_sample = read_data_from_file(sample, col_names=None)
                 col_names = list(df_sample.columns)
             else:
-                # 文本文件推断列名，带上 encoding 参数
-                # 先通过 chardet 检测，再尝试 utf-8,失败则 latin1
+                # Detect text encoding before asking pandas for header columns.
                 raw_bytes = sample.read()
                 detected = chardet.detect(raw_bytes)
                 enc = detected.get('encoding', 'utf-8')
@@ -208,10 +191,9 @@ def process_complex_data(uploaded_files, dataloadingagent):
             try: sample.seek(0)
             except: pass
 
-    # 读取所有数据文件并统一列名
+    # Read all data files with the same column names.
     dfs = [read_data_from_file(f, col_names=col_names) for f in data_files]
 
-    # 若多个数据文件，弹出拼接模式选择
     if len(data_files) >= 2:
 
         big_df = pd.concat(dfs, axis=0, ignore_index=True)

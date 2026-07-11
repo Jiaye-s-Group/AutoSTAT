@@ -1,0 +1,9 @@
+date,region,channel,revenue,orders,return_rate
+2026-01-01,North,Online,12340,132,0.031
+2026-01-02,North,Retail,8420,87,0.044
+2026-01-03,South,Online,15320,149,0.027
+2026-01-04,South,Retail,9100,94,0.052
+2026-01-05,East,Online,17880,163,0.025
+2026-01-06,East,Retail,11240,105,0.037
+2026-01-07,West,Online,13110,128,0.033
+2026-01-08,West,Retail,9900,91,0.048

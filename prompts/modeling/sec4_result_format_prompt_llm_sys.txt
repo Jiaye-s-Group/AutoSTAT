@@ -13,6 +13,7 @@
 
 3. **深度分析**：
    - 必须针对 JSON 中的 `intermediate` 字段进行深入讲解，包括但不限于：线性回归系数、预测值分析、残差分布、特征重要性以及交叉验证细节。
+   - 只能解释输入证据中真实出现的字段名或特征名；如果 `intermediate` 没有提供特征名，不得凭数据集常识猜测。严禁把外部 Ames Housing 常见字段名写入报告，例如 `SalePrice`、`GrLivArea`、`OverallQual`、`GarageArea`、`YearBuilt`；除非它们逐字出现在输入证据中。当前数据若使用 `price`、`area`、`Overall_Qual`、`Garage_Area`、`Year_Built` 等字段，必须保留这些精确列名。
 
 4. **格式约束**：
    - 只返回纯 Markdown 文本。

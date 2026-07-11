@@ -1,10 +1,11 @@
 class ReportNode:
-    """文档节点：可以是 heading 或 paragraph"""
+    """A report tree node."""
+
     def __init__(self, node_type, text, level=0):
-        self.type = node_type   # "heading" 或 "paragraph"
+        self.type = node_type
         self.text = text
         self.level = level
-        self.children = []  # 子节点（用于分层）
+        self.children = []
 
     def to_dict(self):
         return {
@@ -14,19 +15,18 @@ class ReportNode:
             "children": [c.to_dict() for c in self.children]
         }
 
-# 现在只适合于顺序添加
 class Reportcore:
-    def __init__(self):
-        self.root = ReportNode("root", "", level=-1)  # 虚拟根节点
-        self.current_stack = [self.root]  # 用栈管理当前层级
+    """Simple ordered report tree used by legacy export helpers."""
 
-    def add_heading(self, text, level=0):# 从0开始
-        """
-        添加标题，根据 level 自动挂载到合适的父节点
-        """
+    def __init__(self):
+        self.root = ReportNode("root", "", level=-1)
+        self.current_stack = [self.root]
+
+    def add_heading(self, text, level=0):
+        """Add a heading under the nearest valid parent."""
         new_node = ReportNode("heading", text, level)
 
-        # 回溯到合适的父节点
+        # Walk back to the nearest parent level.
         while self.current_stack and self.current_stack[-1].level >= level:
             self.current_stack.pop()
 
@@ -35,9 +35,7 @@ class Reportcore:
         self.current_stack.append(new_node)
 
     def add_paragraph(self, text):
-        """
-        添加段落，挂在当前最后一个 heading 下
-        """
+        """Add a paragraph under the current heading."""
         parent = self.current_stack[-1]
 
         parent.children.append(ReportNode("paragraph", text, level=parent.level + 1))

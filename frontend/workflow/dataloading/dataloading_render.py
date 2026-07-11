@@ -9,7 +9,7 @@ import streamlit_antd_components as sac
 from utils.page_paths import page_file
 from workflow.dataloading.dataloading_core import process_complex_data, load_concat_file, PathFileWrapper
 
-# --- Coze 工作流配置 ---
+# --- Local workflow configuration ---
 def _maybe_json_loads(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -97,14 +97,13 @@ def _save_loading_workflow_outputs(agent, workflow_result: dict[str, Any]) -> No
         agent.loading_workflow_result = workflow_result
 
 
-def call_coze_workflow(
+def call_loading_workflow(
     df: pd.DataFrame,
     user_input: str = "",
     loading_auto: bool = True,
 ):
     """
-    本地化版本：调用本地的 loading workflow，不再走 Coze。
-    返回结构与原版一致：{summary_1, abstract_1}
+    Call the local loading workflow and return {summary_1, abstract_1}.
     """
     from workflows.loading import run_loading_workflow
     from workflows._plugins import df_to_meta
@@ -307,7 +306,7 @@ def _has_loading_result(agent) -> bool:
 
 def _request_loading_analysis(agent, df: pd.DataFrame, user_input: str) -> None:
     with st.spinner("正在解析数据，请耐心等待..."):
-        workflow_result = call_coze_workflow(
+        workflow_result = call_loading_workflow(
             df,
             user_input=user_input,
             loading_auto=True,

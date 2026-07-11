@@ -277,8 +277,8 @@ def _render_modeling_result(result_value: Any) -> None:
     st.markdown(f"> {normalized}")
 
 
-def call_coze_workflow_modeling(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """本地化版本：改走本地 Modeling workflow（完整执行，兼容旧路径）。"""
+def call_modeling_workflow(inputs: dict[str, Any]) -> dict[str, Any] | None:
+    """Call the local modeling workflow."""
     from utils.local_workflow_bridge import call_modeling_bridge
 
     inputs = dict(inputs)
@@ -297,7 +297,7 @@ def call_coze_workflow_modeling(inputs: dict[str, Any]) -> dict[str, Any] | None
 
 
 def _call_modeling_phase1(inputs: dict[str, Any]) -> dict[str, Any] | None:
-    """Phase 1: 仅生成 suggestion，快速返回给前端展示。"""
+    """Run modeling phase 1 for recommendation preview."""
     from utils.local_workflow_bridge import call_modeling_phase1_bridge
 
     inputs = dict(inputs)
@@ -307,7 +307,7 @@ def _call_modeling_phase1(inputs: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _call_modeling_phase2(inputs: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any] | None:
-    """Phase 2: RAG + 代码生成 + 验证 + 分析。"""
+    """Run modeling phase 2 for code generation and result analysis."""
     from utils.local_workflow_bridge import call_modeling_phase2_bridge
 
     inputs = dict(inputs)
@@ -378,7 +378,7 @@ def _request_modeling_recommendation(
         st.error("无法从当前可用数据构造建模工作流输入，请检查预处理结果或原始上传数据是否可解析。")
         return
 
-    # ── Phase 1: 快速获取 suggestion 并展示 ──────────────────────
+    # Phase 1 returns the recommendation text immediately.
     with st.spinner("正在生成建模推荐方案..."):
         phase1_result = _call_modeling_phase1(inputs)
 
@@ -388,12 +388,12 @@ def _request_modeling_recommendation(
     suggestion = phase1_result.get("model_suggestion", "")
     phase1_ctx = phase1_result.get("_ctx", {})
 
-    # 先把 suggestion 写入 session_state，让前端立刻可以显示
+    # Store the recommendation so the UI can render it before phase 2.
     st.session_state.modeling_suggestion = suggestion
     st.session_state.model_suggestion = suggestion
     agent.save_suggestion(suggestion)
 
-    # 缓存 phase1 上下文和 inputs，供 phase2 使用
+    # Keep phase 1 context and inputs for phase 2.
     st.session_state._model_phase1_ctx = phase1_ctx
     st.session_state._model_phase2_inputs = inputs
     st.session_state._model_phase2_pending = True
@@ -403,7 +403,7 @@ def _request_modeling_recommendation(
 
 
 def _continue_modeling_phase2(agent) -> None:
-    """在 suggestion 已展示的前提下，继续执行 phase2（RAG + 代码生成 + 训练 + 分析）。"""
+    """Continue modeling after the recommendation preview has rendered."""
     phase1_ctx = st.session_state.pop("_model_phase1_ctx", None)
     inputs = st.session_state.pop("_model_phase2_inputs", None)
     st.session_state.pop("_model_phase2_pending", None)
@@ -589,7 +589,7 @@ def modeling_chat(agent, source_data: Any, auto: bool) -> None:
     )
     saved_user_input = _agent_load_value(agent, "load_user_input", "user_input", "") or ""
 
-    # ── Phase 2 自动续接：suggestion 已展示，继续生成代码 ──────────
+    # Continue phase 2 after the recommendation has rendered.
     if st.session_state.get("_model_phase2_pending"):
         _continue_modeling_phase2(agent)
         return

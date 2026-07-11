@@ -24,26 +24,25 @@
             ],
             "best_model": {
             "name": "<得分最优的模型类名>",
+            "metric": "<用于选择最佳模型的指标名>",
             "score": <float>
             },
-            "artifacts": {
-            "best_model_b64": "<base64 字符串>",
-            "best_model_format": "pickle+gzip"
-            },
--如模型过大，可选 "artifact_warning": <int 字节大小>
--以及用户在 Requirement 中提出的其他字段
--除最终评估指标外，脚本必须在 result_dict 中加入 intermediate 字段，用于存放模型中间结果（如线性回归系数、预测值、残差、特征重要性、交叉验证细节等）。
+            "intermediate": {
+            "<可选解释性结果>": "<只保留轻量摘要、top features 或少量样例>"
+            }
 }
- 5) 确保所有数值均为 Python 原生类型（float、int），字段名严格为 models、best_model、artifacts；如果用户有额外需求，如记录训练时间、特征重要性等，也请加入 result_dict。
- 6) 模型导出：训练完毕后，将选定的 best_model 用 pickle 序列化并 gzip 压缩，再 base64 编码；把编码字符串和格式信息填入 result_dict["artifacts"]，并确保最终 result_dict 可 JSON 序列化。
+4b) 如果输出系数或特征重要性，必须同时输出对应的真实特征名（例如 feature_names、coefficient_table、feature_importance_table，或每项包含 feature/name 与 value/importance）。严禁只输出裸数组后在解释中猜测字段含义。
+ 5) 确保所有数值均为 Python 原生类型（float、int），字段名严格包含 models 和 best_model；如果用户有额外需求，如记录训练时间、特征重要性等，也请加入 result_dict。
+ 6) 严禁序列化、导出或编码模型对象；严禁在 result_dict 中放入 artifacts、pickle、gzip、base64、best_model_b64、完整预测数组、完整残差数组或完整训练数据。若需要解释性结果，只保留 top 10 特征/系数、少量样例或聚合统计。
 7) 脚本末尾仅包含一行 `result_dict = {...}`，不要 print、不创建其他全局变量、不读写文件。
-8) 如果模型序列化后的字节数超过合理大小，请在 result_dict 中添加 `"artifact_warning": <字节数>`。
+8) result_dict 必须足够轻量，能直接进入报告生成 prompt；不要输出任何大对象或长文本。
 9) 不要使用任何外部 IO 或文件操作。
 10) 请准确实现Requirement中要求的模型，不许添加Requirement之外的模型，若先提供的库中无法直接调用对应模型，请手动实现！
 11) 若使用 XGBoost：
    - 严禁传入 `use_label_encoder` 参数；
    - 对 `XGBClassifier` / `XGBRegressor` 仅使用当前版本有效的参数；
    - 若分类任务中的标签 `y` 不是数值型，必须先在代码中完成标签编码，再训练 `XGBClassifier`。
+11b) 训练任何 sklearn / xgboost / lightgbm 模型前，必须保证传入模型的 X 和 y 不含 NaN、inf 或无法转换的 object 字符串。若存在缺失值或非有限值，请在新变量（如 model_df、X_df、X_train_df）中处理：数值列用训练集或全量数据的中位数兜底填充，分类列用 "Missing" 填充并做 one-hot 编码，布尔列转为 0/1。不要把含 NaN/inf 的数组直接传给 fit/predict。
 
 # 限制
 只允许生成纯代码块，不允许添加任何注释说明。

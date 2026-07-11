@@ -8,7 +8,7 @@ import streamlit as st
 from utils.page_paths import page_file
 from workflow.preprocessing.preprocessing_core import prep_code_gen, prep_meta_execution
 
-# Coze intl workflow config.
+# Local preprocessing workflow configuration.
 def _maybe_json_loads(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -105,7 +105,7 @@ def _extract_suggestion_text(workflow_result: dict[str, Any]) -> str | None:
 def _serialize_dataframe_for_workflow(df: pd.DataFrame) -> str:
     safe_df = df.copy()
 
-    # Coze workflow input expects a string, so serialize the in-memory DataFrame.
+    # The workflow accepts serialized data so it can run outside Streamlit.
     for column in safe_df.columns:
         if pd.api.types.is_datetime64_any_dtype(safe_df[column]):
             safe_df[column] = safe_df[column].astype(str)
@@ -113,12 +113,12 @@ def _serialize_dataframe_for_workflow(df: pd.DataFrame) -> str:
     return safe_df.to_json(orient="records", force_ascii=False)
 
 
-def call_coze_workflow_prep(
+def call_preprocessing_workflow(
     df: pd.DataFrame,
     prep_auto: bool = True,
     user_input: str = "",
 ) -> dict[str, Any] | None:
-    """本地化版本：改走本地 Preprocessing workflow。"""
+    """Call the local preprocessing workflow."""
     from utils.local_workflow_bridge import call_preprocessing_bridge
 
     preview_df = df.head(10)
@@ -220,7 +220,7 @@ def _has_prep_result(agent) -> bool:
 
 def _request_prep_recommendation(agent, df: pd.DataFrame, user_input: str) -> None:
     with st.spinner("正在智能分析数据，预计需要 2-3 分钟，请耐心等待..."):
-        workflow_result = call_coze_workflow_prep(
+        workflow_result = call_preprocessing_workflow(
             df,
             prep_auto=True,
             user_input=user_input,

@@ -1,14 +1,4 @@
-"""
-本地 RAG 检索器 —— 基于算法黄页的 BM25 + 字段加权匹配。
-
-设计思路：
-- 知识源：knowledge/algorithm_catalog.jsonl（274 条算法）
-- get_query LLM 已经把 query 写成规整的 "二级分类名 + 算法名" 空格拼接
-- 不需要向量库，直接用 BM25 + category_l2/name 字段加权就够用
-
-公开 API：
-    retrieve(query, top_k=3, min_score=0.0) -> list[dict]
-"""
+"""BM25 retriever for the built-in statistical-method catalog."""
 from __future__ import annotations
 
 import json
@@ -20,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    import jieba  # 可选：中文分词
+    import jieba
 
     if hasattr(jieba, "setLogLevel"):
         jieba.setLogLevel(logging.ERROR)
@@ -30,8 +20,6 @@ except ImportError:
     _HAS_JIEBA = False
 
 
-# ---- 配置 ----
-
 DEFAULT_JSONL = os.getenv(
     "RAG_KNOWLEDGE_PATH",
     str(Path(__file__).resolve().parent.parent / "knowledge" / "algorithm_catalog.jsonl"),
@@ -40,16 +28,11 @@ DEFAULT_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
 DEFAULT_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.3"))
 
 
-# ---- 分词 ----
-
 _TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fff]+|[A-Za-z0-9]+")
 
 
 def _tokenize(text: str) -> list[str]:
-    """
-    优先 jieba，降级为规则分词。
-    单个 CJK 字符也返回（黄页里很多 2-3 字短词，过度分词反而损失信息）。
-    """
+    """Tokenize Chinese and Latin text for BM25 matching."""
     if not text:
         return []
     text = text.lower()
@@ -57,11 +40,8 @@ def _tokenize(text: str) -> list[str]:
         tokens = [t.strip() for t in jieba.cut_for_search(text) if t.strip()]
     else:
         tokens = _TOKEN_PATTERN.findall(text)
-    # 停用过短的纯英文/数字（单字的 "a"/"1"）
+    # Drop short Latin/numeric noise while preserving single CJK characters.
     return [t for t in tokens if len(t) > 1 or "\u4e00" <= t <= "\u9fff"]
-
-
-# ---- BM25 索引 ----
 
 
 class Retriever:
@@ -71,16 +51,14 @@ class Retriever:
             raise FileNotFoundError(f"知识库文件不存在: {self.path}")
 
         self.docs: list[dict[str, Any]] = []
-        self._doc_tokens: list[list[str]] = []  # 每条算法的 tokens
-        self._doc_field_tokens: list[dict[str, list[str]]] = []  # 字段级 tokens
-        self._doc_freq: dict[str, int] = {}  # 包含词 t 的文档数
+        self._doc_tokens: list[list[str]] = []
+        self._doc_field_tokens: list[dict[str, list[str]]] = []
+        self._doc_freq: dict[str, int] = {}
         self._avg_len: float = 0.0
         self._N: int = 0
 
         self._load()
         self._build_index()
-
-    # ---- 加载 ----
 
     def _load(self) -> None:
         with self.path.open("r", encoding="utf-8") as f:
@@ -97,7 +75,7 @@ class Retriever:
 
     def _build_index(self) -> None:
         for doc in self.docs:
-            # name 和 category_l2 最重要（get_query 就是按它们拼 query 的）
+            # Generated queries usually emphasize category_l2 and algorithm name.
             name = str(doc.get("name", ""))
             cat2 = str(doc.get("category_l2", ""))
             cat1 = str(doc.get("category_l1", ""))
@@ -109,9 +87,9 @@ class Retriever:
                 "category_l1": _tokenize(cat1),
                 "description": _tokenize(desc),
             }
-            # 合并 tokens 用于 BM25 文档长度/词频统计
+            # Weight the most discriminative fields in the BM25 document body.
             all_tokens = (
-                field_tokens["name"] * 3  # 加权
+                field_tokens["name"] * 3
                 + field_tokens["category_l2"] * 3
                 + field_tokens["category_l1"]
                 + field_tokens["description"]
@@ -130,8 +108,6 @@ class Retriever:
         self._N = len(self.docs)
         self._avg_len = sum(len(t) for t in self._doc_tokens) / max(1, self._N)
 
-    # ---- 查询 ----
-
     def retrieve(
         self,
         query: str,
@@ -147,13 +123,13 @@ class Retriever:
         for i, d_tokens in enumerate(self._doc_tokens):
             score = 0.0
             dl = len(d_tokens)
-            # 计算每个 token 的 bm25 分数
+            # Accumulate BM25 contributions for each query token.
             for qt in q_tokens:
                 df = self._doc_freq.get(qt, 0)
                 if df == 0:
                     continue
                 idf = math.log((self._N - df + 0.5) / (df + 0.5) + 1)
-                # token 在 doc 中出现次数
+                # Term frequency in this document.
                 tf = d_tokens.count(qt)
                 if tf == 0:
                     continue
@@ -164,7 +140,7 @@ class Retriever:
 
         scores.sort(key=lambda x: x[0], reverse=True)
 
-        # 归一化到 [0, 1]：用最高分做基准
+        # Normalize scores by the top hit.
         if not scores:
             return []
         max_score = scores[0][0] or 1.0
@@ -180,7 +156,7 @@ class Retriever:
         return results
 
 
-# ---- 单例便捷 API ----
+# Singleton convenience API.
 
 _instance: Retriever | None = None
 
@@ -197,15 +173,12 @@ def retrieve(
     top_k: int = DEFAULT_TOP_K,
     min_score: float = DEFAULT_MIN_SCORE,
 ) -> list[dict[str, Any]]:
-    """便捷函数：查询算法黄页。"""
+    """Retrieve matching methods from the built-in catalog."""
     return get_retriever().retrieve(query, top_k=top_k, min_score=min_score)
 
 
 def format_recall(results: list[dict[str, Any]]) -> str:
-    """
-    把召回结果格式化成下游 LLM 能读的 Markdown 片段。
-    复刻原 Coze 的 `format_recall` plugin 行为。
-    """
+    """Format retrieved methods as Markdown for downstream prompts."""
     if not results:
         return "（未召回相关算法）"
     lines = []

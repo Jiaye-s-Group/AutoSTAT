@@ -1,4 +1,4 @@
-"""AutoSTAT 本地化 agent 核心模块。"""
+"""AutoSTAT core infrastructure."""
 from core.llm_client import chat, chat_json, LLMClient
 from core.prompt_template import render, render_file
 from core.workflow_runner import safe_object, dig, to_str, to_json_str

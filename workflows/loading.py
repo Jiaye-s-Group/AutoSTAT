@@ -1,19 +1,4 @@
-"""
-Loading workflow 本地实现。
-
-原 Coze 流程：
-    Start → Condition(loading_auto==True) ─┬─► do_data_description(LLM)
-                                           │       ├─► ABS1_check_abstract(LLM) ─► abstract_1
-                                           │       └─► CHAP1_summary_html(LLM) ─► summary1_composer ─► summary_1
-                                           └─► (else) fall through to Code with empty values
-    Code(兜底) → End {summary_1, abstract_1}
-
-输出:
-    {
-      "summary_1": {"title": "...", "desc": "...", "df": "..."},
-      "abstract_1": "一段式摘要..."
-    }
-"""
+"""Generate the loading-stage summary and abstract."""
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -36,7 +21,7 @@ def run_loading_workflow(
     preference_selected: str = "",
     ref_context: str = "",
 ) -> dict[str, Any]:
-    # ---------- Condition: loading_auto ----------
+    # Return an empty stage result when planning skips loading analysis.
     if not loading_auto:
         return {
             "summary_1": {"title": "", "desc": "", "df": ""},
@@ -54,7 +39,7 @@ def run_loading_workflow(
         "ref_context": ref_context or "（无参考资料）",
     }
 
-    # 三个 LLM call 都只依赖 ctx 中的原始元信息，互不依赖 → 全并行
+    # These prompts depend only on raw metadata, so they can run in parallel.
     desc_sys = render_file("loading/do_data_description__llm_sys.txt", ctx)
     desc_user = render_file("loading/do_data_description__llm_user.txt", ctx)
     chap_sys = render_file("loading/chap1_summary_html_llm_sys.txt", ctx)
@@ -70,7 +55,6 @@ def run_loading_workflow(
         chap_desc = f_chap.result()
         abstract_1 = f_abs.result().strip()
 
-    # ---------- summary1_composer ----------
     composed = summary1_composer(desc=chap_desc, head_dict_str=head_dict_str)
     summary_1 = composed["summary_1"]
 
@@ -85,7 +69,7 @@ def run_loading_workflow(
     }
 
 
-# ---------- CLI 测试入口 ----------
+# CLI smoke-test entry point.
 
 if __name__ == "__main__":
     import sys

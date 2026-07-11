@@ -280,11 +280,7 @@ def _parse_figure_number_token(value: Any) -> int | None:
 
 
 def normalize_figure_placeholders(text: str) -> str:
-    """
-    兼容中文模型常见图引用写法，并统一为 [FIG:n]。
-    支持：图1、图表1、图片1、插图1、第1张图、Figure 1、Fig. 1、FIG-1、FIG#1、
-    全角 FIG/数字、中文数字和圈号数字等。
-    """
+    """Normalize common figure references to `[FIG:n]` placeholders."""
     if not isinstance(text, str) or not text:
         return text
 

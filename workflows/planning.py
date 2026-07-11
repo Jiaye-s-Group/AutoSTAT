@@ -1,20 +1,4 @@
-"""
-Planning workflow 本地实现。
-
-原 Coze 流程：
-    Start(data, preferences)
-      → Data_to_url(Code) → Loading_Data(plugin) → planner(LLM) → analysis_path(LLM) → End
-
-本地流程（输入直接是 DataFrame）：
-    df → df_to_meta → planner(LLM, JSON) → analysis_path(LLM) → 返回
-
-输出与原 Coze 严格对齐：
-    {
-      loading_auto, prep_auto, vis_auto, modeling_auto, report_auto,
-      plan,
-      shape_0, shape_1, dtype_info_str, head_dict_str, df
-    }
-"""
+"""Plan which AutoSTAT stages should run for a dataset."""
 from __future__ import annotations
 
 from typing import Any
@@ -34,10 +18,8 @@ def run_planning_workflow(
     preference_selected: str = "",
     ref_context: str = "",
 ) -> dict[str, Any]:
-    """
-    Run Planning: 根据 df 元信息让 LLM 决定 5 个阶段开关 + 生成分析路径说明。
-    """
-    # ---------- 节点 1: df_to_meta（替代 Data_to_url + Loading_Data） ----------
+    """Return stage switches, dataset metadata, and a short analysis plan."""
+    # Build compact dataset metadata for the planner prompt.
     meta = df_to_meta(df)
     if not meta["is_success"]:
         return {
@@ -61,12 +43,12 @@ def run_planning_workflow(
         "head_dict_str": meta["head_dict_str"],
         "add_preference": add_preference or "",
         "preference_selected": preference_selected or "",
-        # analysis_path prompt 里写的是 preference_select（少了 ed）
+        # Keep the legacy prompt variable name for compatibility.
         "preference_select": preference_selected or "",
         "ref_context": ref_context or "（无参考资料）",
     }
 
-    # ---------- 节点 2: planner LLM（输出 5 个开关 JSON） ----------
+    # Ask the LLM for the stage switches as strict JSON.
     planner_sys = render_file("planning/planner_llm_sys.txt", ctx)
     planner_user = render_file("planning/planner_llm_user.txt", ctx)
     planner_result = chat_json(
@@ -82,7 +64,7 @@ def run_planning_workflow(
     modeling_auto = as_bool(planner_result.get("modeling_auto"), default=False)
     report_auto = as_bool(planner_result.get("report_auto"), default=True)
 
-    # ---------- 节点 3: analysis_path LLM（写一段分析路径说明） ----------
+    # Generate the user-facing analysis plan text.
     ctx.update(
         {
             "loading_auto": loading_auto,
@@ -117,7 +99,7 @@ def run_planning_workflow(
     }
 
 
-# ---------- CLI 测试入口 ----------
+# CLI smoke-test entry point.
 
 if __name__ == "__main__":
     import sys

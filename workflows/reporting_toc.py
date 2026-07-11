@@ -1,19 +1,4 @@
-"""
-Reporting_toc workflow 本地实现。
-
-修正版目标：
-1. 保持旧版“两步法”原理：先 summarize，再 generate toc；
-2. 目录阶段只吃“短摘要”，不再把大段 summary / full / code 全塞进 prompt；
-3. 避免 token 爆炸；
-4. 输出结构与 reporting_partly / report_render 保持兼容。
-
-原 Coze 流程：
-    Start → Condition(report_auto==True)
-      → summarize_all_sections(LLM)       [综合前 4 个 summary]
-      → generate_toc_from_summary(LLM)    [生成目录 markdown]
-      → Code(规整目录 + 补齐"结论"章节)
-      → End
-"""
+"""Generate a compact report outline from stage summaries."""
 from __future__ import annotations
 
 import re
@@ -60,9 +45,7 @@ def run_reporting_toc_workflow(
             toc_text="",
         )
 
-    # 关键修复：
-    # 目录阶段只使用“瘦身后的 summary + 截断后的 abstract”
-    # 不再把大段全文 / 代码 / 大图分析喂进来
+    # Keep the outline prompt compact by using summaries and short abstracts.
     ctx: dict[str, Any] = {
         "load_summary": shrink_summary_for_toc(load_summary),
         "preproc_summary": shrink_summary_for_toc(preproc_summary),
@@ -72,7 +55,7 @@ def run_reporting_toc_workflow(
         "preproc_abstract": truncate_text(preproc_abstract, 1200),
         "visual_abstract": truncate_text(visual_abstract, 1200),
         "coding_abstract": truncate_text(coding_abstract, 1200),
-        # toc 阶段不使用全文，显式清空，防止 prompt 模板误带入
+        # The outline step should not receive full stage artifacts.
         "selected_full_conten": "",
         "toc_md": normalize_toc_md_input(toc_md),
         "outline_length": outline_length or "标准",
@@ -82,23 +65,23 @@ def run_reporting_toc_workflow(
         "ref_context": truncate_text(ref_context, 1500) if ref_context else "（无参考资料）",
     }
 
-    # ---------- 节点 1: summarize_all_sections ----------
+    # Summarize all completed stages.
     s_sys = render_file("reporting_toc/summarize_all_sections_llm_sys.txt", ctx)
     s_user = render_file("reporting_toc/summarize_all_sections_llm_user.txt", ctx)
     full_summary = chat(s_sys, s_user, name="report_toc.summarize").strip()
     ctx["full_summary"] = truncate_text(full_summary, 2500)
 
-    # ---------- 节点 2: generate_toc_from_summary ----------
+    # Generate the table of contents from the compact summary.
     t_sys = render_file("reporting_toc/generate_toc_from_summary_llm_sys.txt", ctx)
     t_user = render_file("reporting_toc/generate_toc_from_summary_llm_user.txt", ctx)
     toc_raw = chat(t_sys, t_user, name="report_toc.generate_toc").strip()
 
-    # ---------- 节点 3: 规整目录 + 补齐"结论" ----------
+    # Normalize the outline and ensure it has a conclusion section.
     toc_text = _normalize_toc(toc_raw, visual_summary=ctx.get("visual_summary"))
 
     return {
         "toc_text": toc_text,
-        # 注意：这里只是 passthrough 给 reporting_partly，toc 阶段自己不使用全文
+        # Pass full content through for report writing; it is not used above.
         "selected_full_conten": selected_full_conten or "",
         "load_abstract": load_abstract or "",
         "preproc_abstract": preproc_abstract or "",
@@ -107,7 +90,7 @@ def run_reporting_toc_workflow(
         "add_preference": add_preference or "",
         "preference_select": preference_selected or "",
         "ref_context": ref_context or "",
-        "_full_summary": full_summary,  # 调试用
+        "_full_summary": full_summary,
     }
 
 

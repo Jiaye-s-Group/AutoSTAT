@@ -1,0 +1,1 @@
+"""Frontend settings panels."""

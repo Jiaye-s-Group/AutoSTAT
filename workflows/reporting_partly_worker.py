@@ -4,9 +4,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +50,19 @@ def _configure_llm(llm_config: dict[str, Any]) -> None:
         LLMClient.reconfigure(base_url=base_url, api_key=api_key, model=model)
 
 
-def _run_reporting_partly(inputs: dict[str, Any]) -> dict[str, Any]:
+def _build_progress_callback(progress_path: Path | None) -> Callable[[dict[str, Any]], None] | None:
+    if progress_path is None:
+        return None
+
+    def callback(progress: dict[str, Any]) -> None:
+        payload = dict(progress)
+        payload["updated_at"] = time.time()
+        _write_json_atomic(progress_path, payload)
+
+    return callback
+
+
+def _run_reporting_partly(inputs: dict[str, Any], progress_path: Path | None = None) -> dict[str, Any]:
     from workflows.reporting_partly import run_reporting_partly_workflow
 
     return run_reporting_partly_workflow(
@@ -63,23 +76,26 @@ def _run_reporting_partly(inputs: dict[str, Any]) -> dict[str, Any]:
         add_preference=str(inputs.get("add_preference", "")),
         preference_select=str(inputs.get("preference_select") or inputs.get("preference_selected") or ""),
         ref_context=str(inputs.get("ref_context", "")),
+        stage_reference_contexts=inputs.get("stage_reference_contexts") if isinstance(inputs.get("stage_reference_contexts"), dict) else None,
+        progress_callback=_build_progress_callback(progress_path),
     )
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        print("Usage: python -m workflows.reporting_partly_worker <input.json> <output.json>", file=sys.stderr)
+    if len(argv) not in (3, 4):
+        print("Usage: python -m workflows.reporting_partly_worker <input.json> <output.json> [progress.json]", file=sys.stderr)
         return 2
 
     input_path = Path(argv[1])
     output_path = Path(argv[2])
+    progress_path = Path(argv[3]) if len(argv) == 4 else None
 
     try:
         payload = _read_json(input_path)
         llm_config = payload.get("llm_config") if isinstance(payload.get("llm_config"), dict) else {}
         inputs = payload.get("inputs") if isinstance(payload.get("inputs"), dict) else {}
         _configure_llm(llm_config)
-        result = _run_reporting_partly(inputs)
+        result = _run_reporting_partly(inputs, progress_path)
         _write_json_atomic(output_path, {"ok": True, "result": result})
         return 0
     except BaseException as exc:

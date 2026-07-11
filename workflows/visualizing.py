@@ -10,6 +10,9 @@ import json
 import math
 import os
 import re
+import signal
+import subprocess
+import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -29,12 +32,40 @@ from workflows._plugins import (
 MAX_FIX_ATTEMPTS = 5
 BATCH_CONCURRENCY = 10
 MAX_VIS_TITLE_CHARS = 20
+MAX_PROMPT_DATA_CHARS = int(os.getenv("AUTOSTAT_VIZ_PROMPT_DATA_CHARS", "20000"))
+MAX_PROMPT_HEAD_CHARS = int(os.getenv("AUTOSTAT_VIZ_PROMPT_HEAD_CHARS", "12000"))
+MAX_PROMPT_CONTEXT_CHARS = int(os.getenv("AUTOSTAT_VIZ_PROMPT_CONTEXT_CHARS", "12000"))
+MAX_PROMPT_USER_TEXT_CHARS = int(os.getenv("AUTOSTAT_VIZ_PROMPT_USER_TEXT_CHARS", "6000"))
 FIG_ARTIFACT_MAX_TRACES = 8
 FIG_ARTIFACT_MAX_SAMPLE_VALUES = 8
 FIG_ARTIFACT_MAX_CATEGORIES = 12
 FIG_IMAGE_WIDTH = int(os.getenv("AUTOSTAT_FIG_IMAGE_WIDTH", "1100"))
 FIG_IMAGE_HEIGHT = int(os.getenv("AUTOSTAT_FIG_IMAGE_HEIGHT", "720"))
+FIG_IMAGE_TIMEOUT_SECONDS = int(os.getenv("AUTOSTAT_FIG_IMAGE_TIMEOUT_SECONDS", "20"))
 USE_FIGURE_IMAGES = os.getenv("AUTOSTAT_USE_FIGURE_IMAGES", "1").strip().lower() not in {"0", "false", "no", "off"}
+DISABLE_FIGURE_IMAGES_AFTER_TIMEOUT = (
+    os.getenv("AUTOSTAT_DISABLE_FIGURE_IMAGES_AFTER_TIMEOUT", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+_FIGURE_IMAGE_RENDER_DISABLED = False
+_PLOTLY_IMAGE_RENDER_SCRIPT = r"""
+import base64
+import sys
+
+import plotly.io as pio
+
+raw_text = sys.stdin.read()
+width = int(sys.argv[1])
+height = int(sys.argv[2])
+fig_obj = pio.from_json(raw_text)
+image_bytes = fig_obj.to_image(
+    format="jpg",
+    width=width,
+    height=height,
+    scale=1,
+)
+sys.stdout.write(base64.b64encode(image_bytes).decode("ascii"))
+"""
 VAGUE_VIS_TITLES = {
     "变量关系与分布特征",
     "变量关系",
@@ -53,6 +84,13 @@ VAGUE_VIS_TITLES = {
     "数据展示",
     "模型表现",
 }
+
+
+def _truncate_prompt_text(value: Any, max_chars: int) -> str:
+    text = to_str(value)
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n...[truncated for visualization prompt]"
 
 
 def _sanitize_visualization_code(code: str) -> str:
@@ -111,21 +149,21 @@ def _build_ctx(
     preference_selected: str = "",
     ref_context: str = "",
 ) -> dict[str, Any]:
-    """构造 visualizing workflow 公共上下文。"""
+    """Build shared prompt context for visualization steps."""
     return {
-        "data": data,
+        "data": _truncate_prompt_text(data, MAX_PROMPT_DATA_CHARS),
         "shape_0": shape0,
         "shape_1": shape1,
         "shape0": shape0,
         "shape1": shape1,
         "cols": cols,
-        "def_head": def_head,
-        "df_head": def_head,
+        "def_head": _truncate_prompt_text(def_head, MAX_PROMPT_HEAD_CHARS),
+        "df_head": _truncate_prompt_text(def_head, MAX_PROMPT_HEAD_CHARS),
         "color": color or "",
-        "user_input": user_input or "",
-        "add_preference": add_preference or "",
-        "preference_selected": preference_selected or "",
-        "ref_context": ref_context or "（无参考资料）",
+        "user_input": _truncate_prompt_text(user_input, MAX_PROMPT_USER_TEXT_CHARS),
+        "add_preference": _truncate_prompt_text(add_preference, MAX_PROMPT_USER_TEXT_CHARS),
+        "preference_selected": _truncate_prompt_text(preference_selected, MAX_PROMPT_USER_TEXT_CHARS),
+        "ref_context": _truncate_prompt_text(ref_context or "（无参考资料）", MAX_PROMPT_CONTEXT_CHARS),
     }
 
 
@@ -143,7 +181,7 @@ def run_visualizing_phase1(
     preference_selected: str = "",
     ref_context: str = "",
 ) -> dict[str, Any]:
-    """Phase 1: 生成 visual_recommendation + refined_suggestions，快速返回给前端展示。"""
+    """Generate visualization recommendations and implementation requirements."""
     if not vis_auto:
         return {"visual_recommendatio": "", "refined_suggestions": "", "_ctx": {}}
 
@@ -159,13 +197,19 @@ def run_visualizing_phase1(
     visual_recommendatio = chat(
         vr_sys, vr_user, name="viz.get_visual_recommendation"
     ).strip()
-    ctx["visual_recommendation"] = visual_recommendatio
-    ctx["visual_recommendatio"] = visual_recommendatio
+    ctx["visual_recommendation"] = _truncate_prompt_text(
+        visual_recommendatio,
+        MAX_PROMPT_CONTEXT_CHARS,
+    )
+    ctx["visual_recommendatio"] = ctx["visual_recommendation"]
 
     rs_sys = render_file("visualizing/sec3_refine_suggestions_llm_sys.txt", ctx)
     rs_user = render_file("visualizing/sec3_refine_suggestions_llm_user.txt", ctx)
     refined_suggestions = chat(rs_sys, rs_user, name="viz.refine_suggestions").strip()
-    ctx["refined_suggestions"] = refined_suggestions
+    ctx["refined_suggestions"] = _truncate_prompt_text(
+        refined_suggestions,
+        MAX_PROMPT_CONTEXT_CHARS,
+    )
 
     return {
         "visual_recommendatio": visual_recommendatio,
@@ -181,7 +225,7 @@ def run_visualizing_phase2(
     cols: list,
     def_head: str,
 ) -> dict[str, Any]:
-    """Phase 2: 代码生成 + 验证修复 + 图表分析。依赖 phase1 产出的 ctx。"""
+    """Generate, validate, repair, execute, and summarize visualization code."""
     visual_recommendatio = ctx.get("visual_recommendatio", "")
 
     cg_sys = render_file("visualizing/sec3_code_generation_llm_sys.txt", ctx)
@@ -247,7 +291,7 @@ def run_visualizing_phase2(
     cols_wo_id = _filter_id_columns(cols)
     dtype_info = to_str(def_head)
 
-    # 每张图独立并行：desc → (title ‖ summary)
+    # Each figure can generate its title and summary independently.
     def _process_single_fig(item: dict) -> dict[str, Any]:
         pack = _desc_fig_single(item, dtype_info, ctx)
         with ThreadPoolExecutor(max_workers=2) as inner_pool:
@@ -313,7 +357,7 @@ def run_visualizing_workflow(
     preference_selected: str = "",
     ref_context: str = "",
 ) -> dict[str, Any]:
-    """完整执行（兼容旧调用方式，顺序执行 phase1 + phase2）。"""
+    """Run visualization recommendation and code-generation phases in sequence."""
     if not vis_auto:
         return _empty_result()
 
@@ -429,25 +473,75 @@ def _coerce_plotly_payload(fig: Any) -> tuple[dict[str, Any] | None, str]:
 
 
 def render_plotly_image_data_url(fig: Any) -> str:
+    global _FIGURE_IMAGE_RENDER_DISABLED
+    if _FIGURE_IMAGE_RENDER_DISABLED or FIG_IMAGE_TIMEOUT_SECONDS <= 0:
+        return ""
     payload, raw_text = _coerce_plotly_payload(fig)
     if not isinstance(payload, dict):
         return ""
-    try:
-        import plotly.io as pio
+    status, encoded = _render_plotly_image_base64(raw_text)
+    if status == "timeout" and DISABLE_FIGURE_IMAGES_AFTER_TIMEOUT:
+        _FIGURE_IMAGE_RENDER_DISABLED = True
+    if not encoded:
+        return ""
+    return f"data:image/jpeg;base64,{encoded}"
 
-        fig_obj = pio.from_json(raw_text)
-        image_bytes = fig_obj.to_image(
-            format="jpg",
-            width=FIG_IMAGE_WIDTH,
-            height=FIG_IMAGE_HEIGHT,
-            scale=1,
+
+def _render_plotly_image_base64(raw_text: str) -> tuple[str, str]:
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                _PLOTLY_IMAGE_RENDER_SCRIPT,
+                str(FIG_IMAGE_WIDTH),
+                str(FIG_IMAGE_HEIGHT),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
         )
     except Exception:
-        return ""
-    if not image_bytes:
-        return ""
-    encoded = base64.b64encode(image_bytes).decode("ascii")
-    return f"data:image/jpeg;base64,{encoded}"
+        return "error", ""
+
+    try:
+        stdout, _stderr = process.communicate(raw_text, timeout=FIG_IMAGE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(process)
+        return "timeout", ""
+
+    if process.returncode != 0:
+        return "error", ""
+    encoded = stdout.strip()
+    return ("ok", encoded) if encoded else ("empty", "")
+
+
+def _terminate_process_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except Exception:
+        try:
+            process.terminate()
+        except Exception:
+            pass
+    try:
+        process.wait(timeout=2)
+        return
+    except Exception:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+    try:
+        process.wait(timeout=2)
+    except Exception:
+        pass
 
 
 def _figure_artifact_text(item: Any) -> str:

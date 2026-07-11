@@ -2,19 +2,9 @@ import ast
 
 
 def sanitize_code(code):
-    """
-    清理和标准化代码字符串
-    
-    Args:
-        code: 原始代码字符串
-    
-    Returns:
-        清理后的代码字符串
-    """
-    # 移除代码前后的空白字符
+    """Strip Markdown fences and surrounding whitespace from code."""
     code = code.strip()
-    
-    # 移除代码中的 Markdown 代码块标记
+
     if code.startswith('```python'):
         code = code[9:]
     elif code.startswith('```'):
@@ -23,21 +13,13 @@ def sanitize_code(code):
     if code.endswith('```'):
         code = code[:-3]
     
-    # 移除代码前后的空白字符
     code = code.strip()
     
     return code
 
 
 def sanitize_visualization_code(code):
-    """
-    清理可视化代码，并强制保留运行环境中提供的全量 df。
-
-    规则：
-    - 保留原有的 markdown code fence 清理逻辑
-    - 删除任何把 Name('df') 重新赋值的语句
-    - 如果需要数据变换，应让上游 LLM 使用 plot_df / agg_df 等新变量名
-    """
+    """Strip fences and prevent generated visualization code from reassigning df."""
     code = sanitize_code(code)
 
     try:

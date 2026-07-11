@@ -10,7 +10,6 @@ def preferences_select():
         key="modeling_requirements"
     )
     
-    # 如果用户有输入（非空）
     if st.session_state.add_preference is not None:
         st.chat_message("assistant").write(f"用户的需求是：{st.session_state.add_preference}")
     
@@ -75,7 +74,7 @@ def preferences_select():
 
 
 def prep_chat(agent):
-    """渲染对话式建议区"""
+    """Render the preference assistant chat area."""
 
     with st.chat_message("assistant"):
         st.write("我是 Autostat 自动模式决策助手，很高兴为您服务！\n\n"

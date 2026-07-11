@@ -1,10 +1,8 @@
 """
-Workflow 执行辅助工具。
+Small workflow execution helpers.
 
-抽出 12 个 Coze Code 节点里重复的"兜底/透传"模式：
-- safe_object(schema, data): 按 schema 补齐字段 + 类型兜底
-- dig(obj, path): 深层取值
-- to_str / to_json_str: 安全字符串化
+These helpers normalize loosely structured LLM/plugin outputs before later
+stages consume them.
 """
 from __future__ import annotations
 
@@ -13,7 +11,7 @@ from typing import Any
 
 
 def to_str(x: Any, default: str = "") -> str:
-    """任何值 → 字符串；None/非字符串按 default 处理。"""
+    """Return a string value or the provided default."""
     if x is None:
         return default
     if isinstance(x, str):
@@ -22,7 +20,7 @@ def to_str(x: Any, default: str = "") -> str:
 
 
 def to_json_str(x: Any) -> str:
-    """把 dict / list 转成 JSON 字符串，其他类型透传。"""
+    """Serialize structured values to JSON text."""
     if x is None:
         return ""
     if isinstance(x, str):
@@ -34,7 +32,7 @@ def to_json_str(x: Any) -> str:
 
 
 def dig(obj: Any, *path: str, default: Any = None) -> Any:
-    """dig(d, 'a', 'b', 'c') == d['a']['b']['c'], 找不到返回 default。"""
+    """Read a nested value from dictionaries/lists with a default fallback."""
     cur = obj
     for key in path:
         if isinstance(cur, dict):
@@ -50,14 +48,7 @@ def dig(obj: Any, *path: str, default: Any = None) -> Any:
 
 
 def safe_object(schema: dict[str, Any], data: Any) -> dict[str, Any]:
-    """
-    按 schema 规范 data，补齐缺失字段。
-
-    schema 示例：{"title": "", "desc": "", "df": ""}
-    （values 表示每个字段的默认值）
-
-    Coze 里的 "composer" 和 "final_list" code 节点都在做这类兜底。
-    """
+    """Normalize a dictionary against a default-value schema."""
     if not isinstance(data, dict):
         return dict(schema)
     out = dict(data)
@@ -66,13 +57,13 @@ def safe_object(schema: dict[str, Any], data: Any) -> dict[str, Any]:
         if v is None:
             out[k] = default
         elif isinstance(default, str) and not isinstance(v, str):
-            # 字段期望字符串但值不是 → 兜底
+            # Keep string fields predictable for prompt rendering.
             out[k] = default
     return out
 
 
 def coalesce_list(value: Any) -> list:
-    """不是 list 就包成 list；None 变空 list。"""
+    """Return a list, wrapping scalar values and treating None as empty."""
     if value is None:
         return []
     if isinstance(value, list):
@@ -81,7 +72,7 @@ def coalesce_list(value: Any) -> list:
 
 
 def as_bool(value: Any, default: bool = False) -> bool:
-    """把各种形态的 bool 输入归一化。"""
+    """Normalize common boolean representations."""
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
