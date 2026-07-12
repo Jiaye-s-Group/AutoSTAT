@@ -180,26 +180,6 @@ ruff check .
 
 ---
 
-## 常见问题
-
-**Q: 没有 OpenAI API Key，可以使用其他模型吗？**
-
-可以。只要服务提供 OpenAI-compatible Chat Completions API，就可以通过 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 和 `OPENAI_MODEL` 接入。
-
-**Q: API Key 会保存在哪里？**
-
-默认读取 `.env` 或系统环境变量。如果在侧边栏选择保存，会写入用户目录 `~/.config/autostat/config.toml`，不会保存到项目仓库。
-
-**Q: 为什么代码生成会自动重试？**
-
-AutoSTAT 会在本地执行生成的分析代码。如果代码运行失败，系统会把错误信息反馈给模型，并尝试自动修复。
-
-**Q: 如何替换内置方法知识库？**
-
-可以编辑 `knowledge/algorithm_catalog.jsonl`，每行是一条 JSON 记录。
-
----
-
 ## 许可
 
 本项目基于 MIT 许可证开源，详见 [LICENSE](./LICENSE) 文件。
