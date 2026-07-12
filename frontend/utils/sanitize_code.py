@@ -1,4 +1,6 @@
-import ast
+from core.visualization_code_sanitizer import (
+    sanitize_visualization_code as sanitize_generated_visualization_code,
+)
 
 
 def sanitize_code(code):
@@ -19,46 +21,8 @@ def sanitize_code(code):
 
 
 def sanitize_visualization_code(code):
-    """Strip fences and prevent generated visualization code from reassigning df."""
-    code = sanitize_code(code)
-
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return code
-
-    class _DropDfReassign(ast.NodeTransformer):
-        @staticmethod
-        def _is_df_name(target):
-            return isinstance(target, ast.Name) and target.id == "df"
-
-        def visit_Assign(self, node):
-            if any(self._is_df_name(target) for target in node.targets):
-                return None
-            return self.generic_visit(node)
-
-        def visit_AnnAssign(self, node):
-            if self._is_df_name(node.target):
-                return None
-            return self.generic_visit(node)
-
-        def visit_AugAssign(self, node):
-            if self._is_df_name(node.target):
-                return None
-            return self.generic_visit(node)
-
-        def visit_NamedExpr(self, node):
-            if self._is_df_name(node.target):
-                return None
-            return self.generic_visit(node)
-
-    sanitized_tree = _DropDfReassign().visit(tree)
-    ast.fix_missing_locations(sanitized_tree)
-
-    try:
-        return ast.unparse(sanitized_tree).strip()
-    except Exception:
-        return code
+    """Sanitize generated visualization code before frontend execution."""
+    return sanitize_generated_visualization_code(sanitize_code(code))
 
 
 def to_json_serializable(obj):

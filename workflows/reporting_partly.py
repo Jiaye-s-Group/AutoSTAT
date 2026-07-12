@@ -37,8 +37,10 @@ NATURAL_FIGURE_REFERENCE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
-DEFAULT_MAX_REPORT_FIGURES = 20
-DEFAULT_MAX_REPORT_FIGURES_PER_SECTION = 5
+# No numerical figure cap by default. Set the corresponding environment
+# variables to positive integers when a deployment needs explicit limits.
+DEFAULT_MAX_REPORT_FIGURES: int | None = None
+DEFAULT_MAX_REPORT_FIGURES_PER_SECTION: int | None = None
 DEFAULT_FIGURE_MATCH_CANDIDATE_SECTIONS = 5
 DEFAULT_LLM_FIGURE_MATCH_MIN_CONFIDENCE = 0.45
 
@@ -603,6 +605,20 @@ def _positive_int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _report_figure_limit_env(name: str, default: int | None) -> int | None:
+    """Read a report figure limit; missing or zero values mean no limit."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except Exception:
+        return default
+    if value == 0:
+        return None
+    return value if value > 0 else default
+
+
 def _positive_float_env(name: str, default: float) -> float:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -753,13 +769,14 @@ def _select_report_figures(
     if not candidates:
         return []
 
-    max_figures = _positive_int_env("AUTOSTAT_REPORT_MAX_FIGURES", DEFAULT_MAX_REPORT_FIGURES)
-    max_per_section = _positive_int_env(
+    max_figures = _report_figure_limit_env("AUTOSTAT_REPORT_MAX_FIGURES", DEFAULT_MAX_REPORT_FIGURES)
+    max_per_section = _report_figure_limit_env(
         "AUTOSTAT_REPORT_MAX_FIGURES_PER_SECTION",
         DEFAULT_MAX_REPORT_FIGURES_PER_SECTION,
     )
-    if len(candidates) <= max_figures:
-        print(f"[REPORT][FIG_SELECT] keep all figures: {candidates}")
+    if max_figures is None or len(candidates) <= max_figures:
+        limit_label = "unlimited" if max_figures is None else str(max_figures)
+        print(f"[REPORT][FIG_SELECT] keep all figures (max_figures={limit_label}): {candidates}")
         return candidates
 
     normalized_toc = _normalize_toc_figures(toc_list or [])
@@ -801,7 +818,7 @@ def _select_report_figures(
         if len(selected) >= max_figures:
             break
         section = item["section"]
-        if per_section.get(section, 0) >= max_per_section:
+        if max_per_section is not None and per_section.get(section, 0) >= max_per_section:
             continue
         figure = int(item["figure"])
         adjusted_score = int(item["score"]) - _figure_redundancy_penalty(
@@ -823,7 +840,7 @@ def _select_report_figures(
             if figure in selected_set:
                 continue
             section = item["section"]
-            if per_section.get(section, 0) >= max_per_section:
+            if max_per_section is not None and per_section.get(section, 0) >= max_per_section:
                 continue
             if _figure_redundancy_penalty(
                 figure=figure,
@@ -1142,8 +1159,8 @@ def _build_figure_insert_plan(
     if not normalized or not candidates:
         return normalized, [], []
 
-    max_figures = _positive_int_env("AUTOSTAT_REPORT_MAX_FIGURES", DEFAULT_MAX_REPORT_FIGURES)
-    max_per_section = _positive_int_env(
+    max_figures = _report_figure_limit_env("AUTOSTAT_REPORT_MAX_FIGURES", DEFAULT_MAX_REPORT_FIGURES)
+    max_per_section = _report_figure_limit_env(
         "AUTOSTAT_REPORT_MAX_FIGURES_PER_SECTION",
         DEFAULT_MAX_REPORT_FIGURES_PER_SECTION,
     )
@@ -1211,11 +1228,11 @@ def _build_figure_insert_plan(
         section_index = int(record["section_index"])
         if figure in selected_figures:
             continue
-        if len(selected_figures) >= max_figures:
+        if max_figures is not None and len(selected_figures) >= max_figures:
             break
-        if per_section.get(section_index, 0) >= max_per_section:
+        if max_per_section is not None and per_section.get(section_index, 0) >= max_per_section:
             continue
-        if _figure_redundancy_penalty(
+        if max_figures is not None and _figure_redundancy_penalty(
             figure=figure,
             selected=[int(item["figure"]) for item in selected_records],
             figure_contexts=figure_contexts,

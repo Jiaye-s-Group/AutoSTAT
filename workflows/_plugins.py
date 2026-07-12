@@ -16,6 +16,7 @@ from typing import Any
 
 import pandas as pd
 
+from core.visualization_code_sanitizer import sanitize_visualization_code
 from core.workflow_runner import to_json_str, to_str
 
 
@@ -394,6 +395,16 @@ if isinstance(locals().get("fig_dict"), dict):
         except Exception:
             pass
 
+_solo = locals().get("fig")
+if _solo is not None and not _figs:
+    try:
+        if isinstance(_solo, go.Figure):
+            _figs["default"] = _solo.to_json()
+        elif hasattr(_solo, "to_plotly_json") and _solo.__class__.__module__.startswith("plotly"):
+            _figs["default"] = go.Figure(_solo).to_json()
+    except Exception:
+        pass
+
 print(json.dumps(_figs, ensure_ascii=False))
 '''
 
@@ -404,10 +415,17 @@ def execute_and_extract(
     df_data: str,
     timeout_seconds: int = 120,
 ) -> dict[str, Any]:
-    """Run generated Plotly code and collect figures from `fig_dict`."""
-    user_code = to_str(code).strip()
+    """Run generated Plotly code and collect figures from `fig_dict` or `fig`."""
+    user_code = sanitize_visualization_code(to_str(code))
     if not user_code:
-        return {"fig_task_list": []}
+        return {
+            "fig_task_list": [],
+            "error": (
+                "Visualization code is empty after sanitization. "
+                "Generate executable Python code that creates at least one Plotly Figure "
+                "and stores it in fig_dict or fig."
+            ),
+        }
 
     indented = textwrap.indent(user_code, " " * 4)
     script = _VIZ_RUNNER_TEMPLATE.replace("__USER_CODE__", indented)
@@ -457,7 +475,7 @@ def validate_viz_code(*, code: str, df_data: str) -> dict[str, Any]:
         }
     return {
         "error_msg": "",
-        "final_code": to_str(code),
+        "final_code": sanitize_visualization_code(to_str(code)),
         "is_success": True,
     }
 

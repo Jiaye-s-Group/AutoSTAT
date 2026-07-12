@@ -598,7 +598,22 @@ def _continue_visualization_phase2(agent) -> None:
     st.session_state.full = workflow_result.get("full")
     st.session_state.abstract_3 = workflow_result.get("abstract_3")
     st.session_state.summary_3 = workflow_result.get("summary_3")
-    st.session_state.final_code = workflow_result.get("final_code", "")
+    final_code = workflow_result.get("final_code", "")
+    code_success = workflow_result.get("_code_success")
+    if code_success is False or not final_code:
+        error_message = (
+            workflow_result.get("_code_error")
+            or workflow_result.get("abstract_3")
+            or "可视化代码生成失败，请重新生成。"
+        )
+        st.session_state.final_code = ""
+        agent.save_error(error_message)
+        agent.add_memory({"role": "assistant", "content": workflow_result})
+        st.error(error_message)
+        agent.finish_auto()
+        return
+
+    st.session_state.final_code = final_code
 
     agent.add_memory({"role": "assistant", "content": workflow_result})
     agent.finish_auto()

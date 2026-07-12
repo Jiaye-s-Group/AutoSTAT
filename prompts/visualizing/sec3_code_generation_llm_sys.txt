@@ -44,3 +44,4 @@
 13) Forbidden examples: `df = pd.DataFrame(...)`, `df = pd.read_csv(...)`, `df = df.head(...)`, `df = {...}`, `df = [...]`.
 14) `{{def_head}}` is only a 5-row preview for column understanding. Never rebuild a new `df` from it.
 15) If you need transformed data, create a new variable such as `plot_df = df.copy()` or `agg_df = ...`, and keep the global `df` unchanged.
+16) Plotly Express 参数必须真实存在。若使用 `trendline="ols"`，`trendline_options` 只能包含 `add_constant`、`log_x`、`log_y`；禁止使用 `ci`、`confidence_interval`、`confidence`、`conf_int` 等未支持参数。

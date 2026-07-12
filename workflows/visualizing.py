@@ -4,7 +4,6 @@ Visualizing workflow local implementation.
 
 from __future__ import annotations
 
-import ast
 import base64
 import json
 import math
@@ -19,6 +18,7 @@ from typing import Any
 
 from core.llm_client import chat, chat_multimodal
 from core.prompt_template import render_file
+from core.visualization_code_sanitizer import sanitize_visualization_code
 from core.workflow_runner import to_str
 from workflows._plugins import (
     desc_fig_prompt,
@@ -94,46 +94,7 @@ def _truncate_prompt_text(value: Any, max_chars: int) -> str:
 
 
 def _sanitize_visualization_code(code: str) -> str:
-    code = _unwrap_code_block(code)
-    if not code:
-        return ""
-
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return code
-
-    class _DropDfReassign(ast.NodeTransformer):
-        @staticmethod
-        def _is_df_name(target):
-            return isinstance(target, ast.Name) and target.id == "df"
-
-        def visit_Assign(self, node):
-            if any(self._is_df_name(target) for target in node.targets):
-                return None
-            return self.generic_visit(node)
-
-        def visit_AnnAssign(self, node):
-            if self._is_df_name(node.target):
-                return None
-            return self.generic_visit(node)
-
-        def visit_AugAssign(self, node):
-            if self._is_df_name(node.target):
-                return None
-            return self.generic_visit(node)
-
-        def visit_NamedExpr(self, node):
-            if self._is_df_name(node.target):
-                return None
-            return self.generic_visit(node)
-
-    sanitized_tree = _DropDfReassign().visit(tree)
-    ast.fix_missing_locations(sanitized_tree)
-    try:
-        return ast.unparse(sanitized_tree).strip()
-    except Exception:
-        return code
+    return sanitize_visualization_code(code)
 
 
 def _build_ctx(
@@ -263,17 +224,20 @@ def run_visualizing_phase2(
         if fixed:
             current_code = fixed
 
-    final_code = current_code
     if not success:
         return {
             "full": "",
             "abstract_3": f"可视化代码生成失败：{last_error[:500]}",
             "summary_3": {"title": "数据可视化", "fig_analysis": []},
             "visual_recommendatio": visual_recommendatio,
-            "final_code": final_code,
+            "final_code": "",
+            "_failed_code": current_code,
+            "_code_success": False,
+            "_code_error": last_error[:1000],
             "tu_title": [],
         }
 
+    final_code = current_code
     ctx["final_code"] = final_code
     exec_result = execute_and_extract(code=final_code, df_data=data)
     fig_task_list = exec_result.get("fig_task_list", [])
@@ -281,10 +245,13 @@ def run_visualizing_phase2(
     if not fig_task_list:
         return {
             "full": "",
-            "abstract_3": "未能从代码中提取到任何图表。",
+            "abstract_3": exec_result.get("error") or "未能从代码中提取到任何图表。",
             "summary_3": {"title": "数据可视化", "fig_analysis": []},
             "visual_recommendatio": visual_recommendatio,
-            "final_code": final_code,
+            "final_code": "",
+            "_failed_code": final_code,
+            "_code_success": False,
+            "_code_error": (exec_result.get("error") or "未能从代码中提取到任何图表。")[:1000],
             "tu_title": [],
         }
 
@@ -339,6 +306,8 @@ def run_visualizing_phase2(
         "summary_3": composed["summary_3"],
         "visual_recommendatio": visual_recommendatio,
         "final_code": final_code,
+        "_code_success": True,
+        "_code_error": "",
         "tu_title": tu_title,
     }
 
@@ -1231,6 +1200,8 @@ def _empty_result() -> dict[str, Any]:
         "summary_3": {"title": "", "fig_analysis": []},
         "visual_recommendatio": "",
         "final_code": "",
+        "_code_success": False,
+        "_code_error": "",
         "tu_title": [],
     }
 

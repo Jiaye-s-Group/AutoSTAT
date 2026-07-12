@@ -98,6 +98,24 @@ def _normalize_figure(fig):
     return None
 
 
+def _collect_plotly_figures(exec_ns):
+    collected = {}
+
+    fig_dict = exec_ns.get("fig_dict")
+    if isinstance(fig_dict, dict):
+        for key, value in fig_dict.items():
+            normalized = _normalize_figure(value)
+            if normalized is not None:
+                collected[str(key)] = normalized
+
+    if not collected:
+        normalized = _normalize_figure(exec_ns.get("fig"))
+        if normalized is not None:
+            collected["default"] = normalized
+
+    return collected
+
+
 def generate_visualization_code_once(agent) -> bool:
     return _load_workflow_visualization_code(agent)
 
@@ -132,11 +150,11 @@ def execute_visualization_code_once(agent, code_override=None) -> bool:
         )
         return False
 
-    fig_dict = exec_ns.get("fig_dict")
-    if not fig_dict or not isinstance(fig_dict, dict):
+    fig_dict = _collect_plotly_figures(exec_ns)
+    if not fig_dict:
         error_text = (
-            "可视化脚本执行完成，但未产出有效的 `fig_dict`。\n"
-            "请确保代码中创建 `fig_dict`，且其类型为 dict，例如：fig_dict = {'fig_1': fig}。"
+            "可视化脚本执行完成，但未产出有效图表。\n"
+            "请确保代码创建 Plotly Figure，并存入 fig_dict 或变量 fig。"
         )
         agent.save_error(error_text)
         _show_execution_error(
@@ -264,11 +282,11 @@ def vis_execution(agent, auto = False):
                     error_text,
                 )
             else:
-                fig_dict = exec_ns.get("fig_dict")
-                if not fig_dict or not isinstance(fig_dict, dict):
+                fig_dict = _collect_plotly_figures(exec_ns)
+                if not fig_dict:
                     error_text = (
-                        "可视化脚本执行完成，但未产出有效的 `fig_dict`。\n"
-                        "请确保代码中创建 `fig_dict`，且其类型为 dict，例如：fig_dict = {'fig_1': fig}。"
+                        "可视化脚本执行完成，但未产出有效图表。\n"
+                        "请确保代码创建 Plotly Figure，并存入 fig_dict 或变量 fig。"
                     )
                     agent.save_error(error_text)
                     _show_execution_error(
