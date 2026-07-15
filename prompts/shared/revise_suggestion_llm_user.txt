@@ -1,0 +1,15 @@
+建议环节：{{stage_label}}
+
+原始用户要求：
+{{original_requirements}}
+
+当前活动建议：
+{{current_suggestion}}
+
+本轮修改意见：
+{{revision_instruction}}
+
+必须保持的硬约束：
+{{hard_constraints}}
+
+请输出修订后的完整建议，用它直接覆盖当前活动建议。

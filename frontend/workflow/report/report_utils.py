@@ -8,6 +8,8 @@ from pathlib import Path
 
 import streamlit as st
 
+from utils.i18n import bt
+
 
 def html_to_pdf_bytes_playwright(html: str) -> bytes:
     with tempfile.TemporaryDirectory(prefix="report_html_pdf_") as temp_dir:
@@ -242,9 +244,13 @@ def html_dowmload(full_report):
     try:
         pdf_bytes = html_to_pdf_bytes_playwright(full_report)
     except Exception as e:
-        st.error(f"生成 PDF 出错：{e}")
+        st.error(bt("生成 PDF 出错：{error}", "PDF generation failed: {error}", error=e))
     else:
         b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        blocked_download_text = bt(
+            "自动下载被浏览器阻止，请点击下面链接手动下载：",
+            "Automatic download was blocked by the browser. Click the link below to download manually:",
+        )
 
         auto_download_html = f"""
         <html>
@@ -260,7 +266,7 @@ def html_dowmload(full_report):
                 a.click();
                 }} catch (err) {{
                 document.body.innerHTML =
-                    '<p>自动下载被浏览器阻止，请点击下面链接手动下载：</p>' + a.outerHTML;
+                    '<p>{blocked_download_text}</p>' + a.outerHTML;
                 }}
             }})();
             </script>
@@ -271,10 +277,13 @@ def html_dowmload(full_report):
         st.components.v1.html(auto_download_html, height=120)
 
         st.download_button(
-            label="手动下载 PDF（回退）",
+            label=bt("手动下载 PDF（回退）", "Manual PDF Download (Fallback)"),
             data=pdf_bytes,
             file_name="report.pdf",
             mime="application/pdf",
         )
 
-        st.success("PDF 已生成（如未自动下载，请使用上方手动下载按钮）。")
+        st.success(bt(
+            "PDF 已生成（如未自动下载，请使用上方手动下载按钮）。",
+            "The PDF has been generated. If it did not download automatically, use the manual download button above.",
+        ))

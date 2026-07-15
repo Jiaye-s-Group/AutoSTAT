@@ -3,6 +3,9 @@
 详细建模建议：
 {{model_suggestion}}
 
+初步 Analysis Contract（精炼时必须保留其方法约束）：
+{{analysis_contract_json}}
+
 数据预览：
 {{df_head}}
 
@@ -20,6 +23,7 @@
 用户上传的参考资料：{{ref_context}}
 
 输出要求（必须严格遵守）：
+0. Analysis Contract 为 association_inference 时，保留统计推断、样本规则、标准误、预设模型及禁止操作，不得改写为预测任务。
 1. 只输出纯文本，不使用 Markdown 标记、标题、编号、项目符号、代码块或解释。
 2. 每行写一个可执行任务要求。
 3. 必须保留详细建议中出现的所有模型名称、超参数、特征处理、训练/验证方式、评估指标、模型比较和输出产物。

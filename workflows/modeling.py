@@ -1,4 +1,31 @@
-"""Generate modeling recommendations, executable code, metrics, and summaries."""
+"""
+Modeling workflow 本地实现。
+
+Workflow stages:
+    Start → Condition(modeling_auto==True)
+      → Sec4_get_model_suggestion(LLM)   [推荐模型]
+      → Sec4_refine_suggestion(LLM)      [精炼]
+      → get_query(LLM) → Knowledge(RAG) → format_recall(plugin)
+      → sec4_code_generation(LLM)        [生成训练代码]
+      → Variable assign_1: code_modeling = code
+      → Loop(max 5): [修复循环]
+          ├─ code_runner(HTTP→本地)
+          ├─ if success: break
+          └─ sec4_code_fixed(LLM) → 更新 code_modeling
+      → Code_2(取 Loop 的 final_code + result_list)
+      → sec4_result_format_prompt(LLM)   [解析结果]
+      → Sec4_summary_html(LLM)           [章节正文]
+      → Sec4_check_abstract(LLM)         [摘要]
+      → sec4_composer(plugin)
+      → Code(兜底) → End
+
+输出:
+    {
+      "summary_4": {title, desc, result, code},
+      "abstract_4": "...",
+      "model_suggestion": "..."
+    }
+"""
 from __future__ import annotations
 
 import json
@@ -8,12 +35,30 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from core.llm_client import chat
+from core.llm_client import chat, chat_code, submit_with_context
+from core.code_runtime_profile import build_code_runtime_constraints
+from core.modeling_runtime_compat import validate_modeling_runtime_compatibility
+from core.modeling_contract import (
+    build_analysis_contract,
+    contract_as_prompt,
+    format_contract_violations,
+    validate_result_schema,
+    validate_result_against_contract,
+)
 from core.modeling_table_utils import (
     build_model_comparison_table_bundle,
 )
 from core.prompt_template import render_file
+from core.suggestion_revision import normalize_suggestion_output, revise_suggestion
 from core.rag_retriever import retrieve
+from core.report_language import (
+    app_language_instruction,
+    app_language_name,
+    app_language_ref_context_empty,
+    is_english_language,
+    normalize_app_language,
+)
+from core.safe_code import UnsafeCodeError, safe_subprocess_env, validate_code
 from core.workflow_runner import to_str
 from workflows._plugins import (
     format_recall,
@@ -75,6 +120,7 @@ _CORE_RESULT_KEYS = {
     "coef",
     "artifacts",
     "artifact_warning",
+    "analysis_manifest",
 }
 
 
@@ -90,9 +136,20 @@ def _build_modeling_ctx(
     add_preference: str = "",
     preference_selected: str = "",
     ref_context: str = "",
+    language: str = "zh",
+    task_type: str = "auto",
 ) -> dict[str, Any]:
-    """Build shared prompt context for modeling steps."""
-    prompt_columns = _compact_columns_for_prompt(columns, target=target)
+    """构造 modeling workflow 公共上下文。"""
+    language = normalize_app_language(language)
+    full_columns = [str(column) for column in (columns or [])]
+    contract = build_analysis_contract(
+        target=target,
+        columns=full_columns,
+        user_input=user_input or user_prompt,
+        add_preference=add_preference,
+        task_type=task_type,
+    )
+    prompt_columns = _compact_columns_for_prompt(full_columns, target=target)
     return {
         "data": _truncate_prompt_text(data, MODELING_PROMPT_DATA_MAX_CHARS),
         "df_head": _compact_df_head_for_prompt(
@@ -101,15 +158,40 @@ def _build_modeling_ctx(
             max_chars=MODELING_PROMPT_HEAD_MAX_CHARS,
         ),
         "columns": prompt_columns,
+        "_all_columns": full_columns,
         "target": target or "",
         "train_code": _truncate_prompt_text(train_code or "", MODELING_CODE_PROMPT_MAX_CHARS),
         "user_input": _truncate_prompt_text(user_input or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
-        "user_prompt": _truncate_prompt_text(user_prompt or user_input or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
-        "add_preference": _truncate_prompt_text(add_preference or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
-        "additional_preference": _truncate_prompt_text(add_preference or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
-        "preference_selected": _truncate_prompt_text(preference_selected or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
-        "preference_select": _truncate_prompt_text(preference_selected or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS),
-        "ref_context": _truncate_prompt_text(ref_context or "（无参考资料）", MODELING_PROMPT_CONTEXT_MAX_CHARS),
+        "user_prompt": _truncate_prompt_text(
+            user_prompt or user_input or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS
+        ),
+        "add_preference": _truncate_prompt_text(
+            add_preference or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS
+        ),
+        "additional_preference": _truncate_prompt_text(
+            add_preference or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS
+        ),
+        "preference_selected": _truncate_prompt_text(
+            preference_selected or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS
+        ),
+        "preference_select": _truncate_prompt_text(
+            preference_selected or "", MODELING_PROMPT_USER_TEXT_MAX_CHARS
+        ),
+        "ref_context": _truncate_prompt_text(
+            ref_context or app_language_ref_context_empty(language),
+            MODELING_PROMPT_CONTEXT_MAX_CHARS,
+        ),
+        "language": language,
+        "language_name": app_language_name(language),
+        "language_instruction": app_language_instruction(language),
+        "analysis_contract": contract,
+        "analysis_contract_json": contract_as_prompt(contract),
+        "task_type": task_type or "auto",
+        "runtime_constraints_json": build_code_runtime_constraints(
+            data,
+            target=target,
+            include_modeling_library_compatibility=True,
+        ),
     }
 
 
@@ -121,7 +203,7 @@ def _truncate_prompt_text(value: Any, max_chars: int) -> str:
 
 
 def _compact_columns_for_prompt(columns: Any, *, target: str = "") -> list[str]:
-    raw_columns = [str(col) for col in (columns or [])]
+    raw_columns = [str(column) for column in (columns or [])]
     if len(raw_columns) <= MODELING_PROMPT_MAX_COLUMNS:
         return raw_columns
 
@@ -129,17 +211,23 @@ def _compact_columns_for_prompt(columns: Any, *, target: str = "") -> list[str]:
     kept: list[str] = []
     if target_text and target_text in raw_columns:
         kept.append(target_text)
-    for col in raw_columns:
-        if col in kept:
+    for column in raw_columns:
+        if column in kept:
             continue
-        kept.append(col)
+        kept.append(column)
         if len(kept) >= MODELING_PROMPT_MAX_COLUMNS:
             break
-    kept.append(f"...[{len(raw_columns) - len(kept)} omitted columns; full df is still available at runtime]")
+    omitted = len(raw_columns) - len(kept)
+    kept.append(f"...[{omitted} omitted columns; full df is still available at runtime]")
     return kept
 
 
-def _compact_df_head_for_prompt(df_head: Any, *, prompt_columns: list[str], max_chars: int) -> str:
+def _compact_df_head_for_prompt(
+    df_head: Any,
+    *,
+    prompt_columns: list[str],
+    max_chars: int,
+) -> str:
     text = to_str(df_head).strip()
     if len(text) <= max_chars:
         return text
@@ -150,7 +238,7 @@ def _compact_df_head_for_prompt(df_head: Any, *, prompt_columns: list[str], max_
         return _truncate_prompt_text(text, max_chars)
 
     if isinstance(parsed, dict):
-        keep = {col for col in prompt_columns if not col.startswith("...[")}
+        keep = {column for column in prompt_columns if not column.startswith("...[")}
         compacted = {str(key): value for key, value in parsed.items() if str(key) in keep}
         compact_text_value = json.dumps(compacted, ensure_ascii=False, default=str)
         if len(compact_text_value) <= max_chars:
@@ -182,8 +270,10 @@ def run_modeling_phase1(
     add_preference: str = "",
     preference_selected: str = "",
     ref_context: str = "",
+    language: str = "zh",
+    task_type: str = "auto",
 ) -> dict[str, Any]:
-    """Generate modeling recommendations and concise implementation requirements."""
+    """Phase 1: 生成 model_suggestion + refined_suggestions，快速返回给前端展示。"""
     if not modeling_auto:
         return {"model_suggestion": "", "refined_suggestions": "", "_ctx": {}}
 
@@ -191,12 +281,15 @@ def run_modeling_phase1(
         data=data, df_head=df_head, columns=columns, target=target,
         train_code=train_code, user_input=user_input, user_prompt=user_prompt,
         add_preference=add_preference, preference_selected=preference_selected,
-        ref_context=ref_context,
+        ref_context=ref_context, language=language,
+        task_type=task_type,
     )
 
     sug_sys = render_file("modeling/sec4_get_model_suggestion_llm_sys.txt", ctx)
     sug_user = render_file("modeling/sec4_get_model_suggestion_llm_user.txt", ctx)
-    model_suggestion = chat(sug_sys, sug_user, name="model.get_suggestion").strip()
+    model_suggestion = normalize_suggestion_output(
+        chat(sug_sys, sug_user, name="model.get_suggestion")
+    )
     ctx["model_suggestion"] = model_suggestion
 
     ref_sys = render_file("modeling/sec4_refine_suggestion_llm_sys.txt", ctx)
@@ -204,11 +297,211 @@ def run_modeling_phase1(
     refined_suggestions = chat(ref_sys, ref_user, name="model.refine").strip()
     ctx["refined_suggestions"] = refined_suggestions
     ctx["refine_suggestion"] = refined_suggestions
+    contract = build_analysis_contract(
+        target=ctx.get("target", ""),
+        columns=ctx.get("_all_columns") or ctx.get("columns", []),
+        user_input=ctx.get("user_input") or ctx.get("user_prompt", ""),
+        add_preference=ctx.get("add_preference", ""),
+        refined_suggestions=refined_suggestions,
+        task_type=ctx.get("task_type", "auto"),
+    )
+    ctx["analysis_contract"] = contract
+    ctx["analysis_contract_json"] = contract_as_prompt(contract)
+    ctx["runtime_constraints_json"] = build_code_runtime_constraints(
+        data,
+        target=str(contract.get("outcome") or target or ""),
+        include_modeling_library_compatibility=True,
+    )
 
     return {
         "model_suggestion": model_suggestion,
         "refined_suggestions": refined_suggestions,
+        "analysis_contract": contract,
         "_ctx": ctx,
+    }
+
+
+def revise_modeling_phase1(
+    *,
+    ctx: dict[str, Any],
+    original_requirements: str,
+    revision_instruction: str,
+) -> dict[str, Any]:
+    revised_ctx = dict(ctx)
+    revised = revise_suggestion(
+        stage_label="modeling",
+        original_requirements=original_requirements,
+        current_suggestion=str(ctx.get("model_suggestion") or ""),
+        revision_instruction=revision_instruction,
+        hard_constraints=str(ctx.get("analysis_contract_json") or ""),
+        language_instruction=str(ctx.get("language_instruction") or ""),
+    )
+    revised_ctx["model_suggestion"] = revised
+    ref_sys = render_file("modeling/sec4_refine_suggestion_llm_sys.txt", revised_ctx)
+    ref_user = render_file("modeling/sec4_refine_suggestion_llm_user.txt", revised_ctx)
+    refined = chat(ref_sys, ref_user, name="model.refine_revision").strip()
+    revised_ctx["refined_suggestions"] = refined
+    revised_ctx["refine_suggestion"] = refined
+    contract = build_analysis_contract(
+        target=revised_ctx.get("target", ""),
+        columns=revised_ctx.get("_all_columns") or revised_ctx.get("columns", []),
+        user_input=revised_ctx.get("user_input") or revised_ctx.get("user_prompt", ""),
+        add_preference=revised_ctx.get("add_preference", ""),
+        refined_suggestions=refined,
+        task_type=revised_ctx.get("task_type", "auto"),
+    )
+    revised_ctx["analysis_contract"] = contract
+    revised_ctx["analysis_contract_json"] = contract_as_prompt(contract)
+    return {
+        "model_suggestion": revised,
+        "refined_suggestions": refined,
+        "analysis_contract": contract,
+        "_ctx": revised_ctx,
+    }
+
+
+def generate_modeling_code(*, ctx: dict[str, Any]) -> dict[str, Any]:
+    """Generate a modeling code draft without executing the training script."""
+    analysis_contract = ctx.get("analysis_contract") or {}
+    if not analysis_contract.get("valid", False):
+        return {
+            "code": "",
+            "error": format_contract_violations(list(analysis_contract.get("issues") or [])),
+            "_ctx": dict(ctx),
+        }
+
+    working_ctx = dict(ctx)
+    q_sys = render_file("modeling/get_query_llm_sys.txt", working_ctx)
+    q_user = render_file("modeling/get_query_llm_user.txt", working_ctx)
+    rag_query = chat(q_sys, q_user, name="model.get_query", temperature=0).strip()
+    recall_results = retrieve(rag_query, top_k=3)
+    working_ctx["knowledge_results"] = format_recall(output_list=recall_results)["knowledge_results"]
+
+    cg_sys = render_file("modeling/sec4_code_generation_llm_sys.txt", working_ctx, strict=True)
+    cg_user = render_file("modeling/sec4_code_generation_llm_user.txt", working_ctx, strict=True)
+    return {
+        "code": _unwrap_code_block(chat_code(cg_sys, cg_user, name="model.code_generation").strip()),
+        "error": "",
+        "_ctx": working_ctx,
+    }
+
+
+def repair_modeling_code(*, ctx: dict[str, Any], code: str, error: str) -> str:
+    fix_ctx = {
+        **ctx,
+        "code": code,
+        "code_modeling": code,
+        "error_msg": error,
+        "error": error,
+    }
+    fix_sys = render_file("modeling/sec4_code_fixed_llm_sys.txt", fix_ctx, strict=True)
+    fix_user = render_file("modeling/sec4_code_fixed_llm_user.txt", fix_ctx, strict=True)
+    return _unwrap_code_block(
+        chat_code(fix_sys, fix_user, name="model.manual_code_fixer", temperature=0.3).strip()
+    )
+
+
+def validate_modeling_code(
+    *,
+    ctx: dict[str, Any],
+    data: str,
+    df_head: str,
+    initial_code: str = "",
+) -> dict[str, Any]:
+    """Run the shared legacy five-attempt generation/fix loop without publishing analysis text."""
+    working_ctx = dict(ctx)
+    analysis_contract = working_ctx.get("analysis_contract") or {}
+    if not analysis_contract.get("valid", False):
+        return {
+            "code": "",
+            "success": False,
+            "error": format_contract_violations(list(analysis_contract.get("issues") or [])),
+            "contract_violations": list(analysis_contract.get("issues") or []),
+            "result_json": {},
+            "result_stdout": "",
+            "attempts": 0,
+            "_ctx": working_ctx,
+        }
+
+    if initial_code:
+        current_code = _unwrap_code_block(initial_code)
+    else:
+        generation = generate_modeling_code(ctx=working_ctx)
+        if generation.get("error"):
+            return {
+                "code": "",
+                "success": False,
+                "error": str(generation["error"]),
+                "contract_violations": [],
+                "result_json": {},
+                "result_stdout": "",
+                "attempts": 0,
+                "_ctx": working_ctx,
+            }
+        working_ctx = generation["_ctx"]
+        current_code = generation["code"]
+
+    success = False
+    last_error = ""
+    final_result_json: dict[str, Any] = {}
+    final_result_str = ""
+    contract_violations: list[str] = []
+    attempts = 0
+    for attempt in range(MAX_FIX_ATTEMPTS):
+        attempts = attempt + 1
+        compatibility_issues = validate_modeling_runtime_compatibility(current_code)
+        if compatibility_issues:
+            last_error = "Modeling runtime compatibility validation failed:\n- " + "\n- ".join(
+                compatibility_issues
+            )
+            run_result = None
+        else:
+            run_result = _run_modeling_code(code=current_code, data=data)
+        if run_result and run_result["is_success"]:
+            final_result_str = run_result.get("stdout", "")
+            final_result_json = run_result.get("result_json", {})
+            contract_violations = validate_result_against_contract(
+                code=current_code,
+                result_json=final_result_json,
+                contract=analysis_contract,
+            )
+            contract_violations.extend(validate_result_schema(
+                result_json=final_result_json,
+                contract=analysis_contract,
+            ))
+            candidate_table = build_model_comparison_table_bundle(
+                final_result_json,
+                target=working_ctx.get("target", ""),
+                user_input=working_ctx.get("user_input", ""),
+                additional_preference=working_ctx.get("additional_preference", ""),
+                language=working_ctx.get("language", "zh"),
+            )
+            if not candidate_table.get("has_table"):
+                contract_violations.append(
+                    "result_dict must contain model metrics that can produce a comparison table."
+                )
+            if not contract_violations:
+                success = True
+                break
+            last_error = format_contract_violations(contract_violations)
+        elif run_result:
+            last_error = run_result.get("error", "")
+
+        if attempt >= MAX_FIX_ATTEMPTS - 1:
+            break
+        fixed = repair_modeling_code(ctx=working_ctx, code=current_code, error=last_error)
+        if fixed:
+            current_code = fixed
+
+    return {
+        "code": current_code,
+        "success": success,
+        "error": last_error,
+        "contract_violations": contract_violations,
+        "result_json": final_result_json,
+        "result_stdout": final_result_str,
+        "attempts": attempts,
+        "_ctx": working_ctx,
     }
 
 
@@ -218,94 +511,67 @@ def run_modeling_phase2(
     data: str,
     df_head: str,
 ) -> dict[str, Any]:
-    """Run RAG, code generation, repair, result formatting, and summaries."""
+    """Phase 2: RAG + 代码生成 + 验证修复 + 结果格式化 + 摘要。依赖 phase1 产出的 ctx。"""
     model_suggestion = ctx.get("model_suggestion", "")
     refined_suggestions = ctx.get("refined_suggestions", "")
+    analysis_contract = ctx.get("analysis_contract") or {}
 
-    # ---------- RAG ----------
-    q_sys = render_file("modeling/get_query_llm_sys.txt", ctx)
-    q_user = render_file("modeling/get_query_llm_user.txt", ctx)
-    rag_query = chat(q_sys, q_user, name="model.get_query", temperature=0).strip()
-
-    recall_results = retrieve(rag_query, top_k=3)
-    ctx["knowledge_results"] = format_recall(output_list=recall_results)["knowledge_results"]
-
-    # Generate modeling code from the refined requirements.
-    cg_sys = render_file("modeling/sec4_code_generation_llm_sys.txt", ctx)
-    cg_user = render_file("modeling/sec4_code_generation_llm_user.txt", ctx)
-    generated_code = chat(cg_sys, cg_user, name="model.code_generation").strip()
-    generated_code = _unwrap_code_block(generated_code)
-
-    # Execute and repair generated code until it yields a valid metrics table.
-    current_code = generated_code
-    success = False
-    last_error = ""
-    final_result_json: dict = {}
-    final_result_str = ""
-
-    for attempt in range(MAX_FIX_ATTEMPTS):
-        run_result = _run_modeling_code(code=current_code, data=data)
-        if run_result["is_success"]:
-            candidate_result_json = run_result.get("result_json", {})
-            candidate_table = build_model_comparison_table_bundle(
-                candidate_result_json,
-                target=ctx.get("target", ""),
-                user_input=ctx.get("user_input", ""),
-                additional_preference=ctx.get("additional_preference", ""),
-            )
-            if candidate_table.get("has_table"):
-                success = True
-                final_result_str = run_result.get("stdout", "")
-                final_result_json = candidate_result_json
-                break
-
-            last_error = (
-                "代码执行成功，但 result_dict 无法生成模型对比表。"
-                "result_dict 必须包含可解析的 models 列表；每个模型条目必须包含 name/type/metrics，"
-                "metrics 中至少包含一个数值型评价指标。"
-            )
-            if attempt >= MAX_FIX_ATTEMPTS - 1:
-                break
-        else:
-            last_error = run_result.get("error", "")
-
-        if attempt >= MAX_FIX_ATTEMPTS - 1:
-            break
-
-        fix_ctx = {
-            **ctx,
-            "code": current_code,
-            "code_modeling": current_code,
-            "error_msg": last_error,
-            "error": last_error,
-        }
-        fix_sys = render_file("modeling/sec4_code_fixed_llm_sys.txt", fix_ctx)
-        fix_user = render_file("modeling/sec4_code_fixed_llm_user.txt", fix_ctx)
-        fixed = chat(
-            fix_sys, fix_user, name=f"model.code_fixed.{attempt+1}", temperature=0.3
-        ).strip()
-        fixed = _unwrap_code_block(fixed)
-        if fixed:
-            current_code = fixed
-
-    final_code = current_code
-
-    if not success:
+    if not analysis_contract.get("valid", False):
+        error_text = format_contract_violations(list(analysis_contract.get("issues") or []))
+        english = is_english_language(ctx.get("language"))
         return {
             "summary_4": {
-                "title": "建模分析",
-                "desc": f"建模代码执行失败：{last_error[:500]}",
-                "result": "", "code": final_code,
-                "table_title": "", "table_markdown": "", "table_html": "",
+                "title": "Modeling Analysis" if english else "建模分析",
+                "desc": error_text,
+                "result": "",
+                "code": "",
+                "analysis_contract": analysis_contract,
             },
-            "abstract_4": f"建模代码执行失败：{last_error[:200]}",
+            "abstract_4": error_text,
             "model_suggestion": model_suggestion,
-            "_code_success": False,
-            "_code_error": last_error,
-            "_fix_attempts": MAX_FIX_ATTEMPTS,
+            "_status": "failed",
+            "_contract_violations": list(analysis_contract.get("issues") or []),
         }
 
-    # Use the raw result for deterministic tables; pass compact evidence to the LLM.
+    validation = validate_modeling_code(ctx=ctx, data=data, df_head=df_head)
+    ctx = validation["_ctx"]
+    final_code = validation["code"]
+    success = bool(validation["success"])
+    last_error = validation["error"]
+    final_result_json = validation["result_json"]
+    final_result_str = validation["result_stdout"]
+    contract_violations = validation["contract_violations"]
+    attempt = max(0, int(validation["attempts"]) - 1)
+
+    if not success:
+        english = is_english_language(ctx.get("language"))
+        error_desc = (
+            f"Modeling code execution failed: {last_error[:500]}"
+            if english
+            else f"建模代码执行失败：{last_error[:500]}"
+        )
+        error_abstract = (
+            f"Modeling code execution failed: {last_error[:200]}"
+            if english
+            else f"建模代码执行失败：{last_error[:200]}"
+        )
+        return {
+            "summary_4": {
+                "title": "Modeling Analysis" if english else "建模分析",
+                "desc": error_desc,
+                "result": "", "code": final_code,
+                "table_title": "", "table_markdown": "", "table_html": "",
+                "analysis_contract": analysis_contract,
+            },
+            "abstract_4": error_abstract,
+            "model_suggestion": model_suggestion,
+            "_status": "failed",
+            "_contract_violations": contract_violations,
+            "_fix_attempts": validation["attempts"],
+        }
+
+    # ---------- 结果格式化 ----------
+    # 表格/内部逻辑继续使用 raw result；LLM prompt 只接收 compact evidence。
     artifact_metadata = collect_modeling_artifact_metadata(final_result_json)
     compact_result = compact_modeling_result(
         final_result_json,
@@ -324,11 +590,14 @@ def run_modeling_phase2(
     ctx["modeling_artifact_metadata"] = artifact_metadata
     ctx["execution_stdout"] = compact_stdout
     ctx["result"] = compact_stdout
+    ctx["analysis_contract"] = analysis_contract
+    ctx["analysis_contract_json"] = contract_as_prompt(analysis_contract)
     table_bundle = build_model_comparison_table_bundle(
         final_result_json,
         target=ctx.get("target", ""),
         user_input=ctx.get("user_input", ""),
         additional_preference=ctx.get("additional_preference", ""),
+        language=ctx.get("language", "zh"),
     )
     ctx["comparison_table_title"] = table_bundle.get("title", "")
     ctx["comparison_table_markdown"] = table_bundle.get("markdown_table", "")
@@ -340,15 +609,15 @@ def run_modeling_phase2(
     ctx["result_format"] = result_format
     ctx["result"] = result_format
 
-    # Build the report body and abstract in parallel.
+    # ---------- 章节正文 + 摘要 并行 ----------
     sh_sys = render_file("modeling/sec4_summary_html_llm_sys.txt", ctx)
     sh_user = render_file("modeling/sec4_summary_html_llm_user.txt", ctx)
     ab_sys = render_file("modeling/sec4_check_abstract_llm_sys.txt", ctx)
     ab_user = render_file("modeling/sec4_check_abstract_llm_user.txt", ctx)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        f_desc = pool.submit(chat, sh_sys, sh_user, name="model.summary_html")
-        f_abs = pool.submit(chat, ab_sys, ab_user, name="model.check_abstract")
+        f_desc = submit_with_context(pool, chat, sh_sys, sh_user, name="model.summary_html")
+        f_abs = submit_with_context(pool, chat, ab_sys, ab_user, name="model.check_abstract")
         desc = f_desc.result().strip()
         abstract_4 = f_abs.result().strip()
 
@@ -358,6 +627,9 @@ def run_modeling_phase2(
         table_markdown=table_bundle.get("markdown_table", ""),
         table_html=table_bundle.get("html_table", ""),
     )
+    if is_english_language(ctx.get("language")):
+        composed["summary_4"]["title"] = "Modeling Analysis"
+    composed["summary_4"]["analysis_contract"] = analysis_contract
 
     return {
         "summary_4": composed["summary_4"],
@@ -367,9 +639,10 @@ def run_modeling_phase2(
         "_final_code": final_code,
         "_modeling_result_evidence": compact_result,
         "_modeling_artifact_metadata": artifact_metadata,
-        "_code_success": True,
-        "_code_error": "",
         "_fix_attempts": attempt + 1 if success else MAX_FIX_ATTEMPTS,
+        "_status": "succeeded",
+        "_analysis_contract": analysis_contract,
+        "_contract_violations": [],
     }
 
 
@@ -386,8 +659,10 @@ def run_modeling_workflow(
     add_preference: str = "",
     preference_selected: str = "",
     ref_context: str = "",
+    language: str = "zh",
+    task_type: str = "auto",
 ) -> dict[str, Any]:
-    """Run modeling recommendation and code-generation phases in sequence."""
+    """完整执行（兼容旧调用方式，顺序执行 phase1 + phase2）。"""
     if not modeling_auto:
         return _empty_modeling_result()
 
@@ -396,7 +671,8 @@ def run_modeling_workflow(
         modeling_auto=modeling_auto, target=target, train_code=train_code,
         user_input=user_input, user_prompt=user_prompt,
         add_preference=add_preference, preference_selected=preference_selected,
-        ref_context=ref_context,
+        ref_context=ref_context, language=language,
+        task_type=task_type,
     )
     ctx = p1.get("_ctx")
     if not ctx:
@@ -441,6 +717,12 @@ def compact_modeling_result(
     for key in ("dataset", "task", "task_type", "type"):
         if key in payload:
             out[key] = _compact_for_llm(payload.get(key), key=key)
+
+    if "analysis_manifest" in payload:
+        out["analysis_manifest"] = _compact_for_llm(
+            payload.get("analysis_manifest"),
+            key="analysis_manifest",
+        )
 
     models = payload.get("models")
     if isinstance(models, list):
@@ -910,28 +1192,51 @@ def _is_empty_compact_value(value: Any) -> bool:
     return value in ("", None, [], {})
 
 
-# Modeling code runner with structured result capture.
+# ===================================================================
+# 建模代码专用 runner —— 比 preprocessing 多一个 result_json 输出
+# ===================================================================
 
 
 def _run_modeling_code(*, code: str, data: str, timeout_seconds: int = 300) -> dict[str, Any]:
-    """Run generated modeling code and collect its `result_dict` output."""
+    """
+    执行建模训练代码。
+    约定用户代码必须设置 result_dict 变量，与前端执行器保持一致。
+    """
     import json
-    import os
     import subprocess
     import sys
-    import tempfile
     import textwrap
 
     user_code = to_str(code).strip()
     if not user_code:
         return {"is_success": False, "error": "空代码", "stdout": "", "result_json": {}}
 
+    try:
+        validate_code(user_code)
+    except UnsafeCodeError as exc:
+        return {
+            "is_success": False,
+            "error": str(exc),
+            "stdout": "",
+            "result_json": {},
+        }
+
+    compatibility_issues = validate_modeling_runtime_compatibility(user_code)
+    if compatibility_issues:
+        return {
+            "is_success": False,
+            "error": "Modeling runtime compatibility validation failed:\n- " + "\n- ".join(
+                compatibility_issues
+            ),
+            "stdout": "",
+            "result_json": {},
+        }
+
     script = '''import json, sys, traceback
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, LabelEncoder, OrdinalEncoder
-from sklearn.preprocessing import OneHotEncoder as _SklearnOneHotEncoder
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, LabelEncoder, OrdinalEncoder, OneHotEncoder
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor, ExtraTreesClassifier, ExtraTreesRegressor, AdaBoostClassifier, AdaBoostRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge, Lasso, ElasticNet
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
@@ -944,16 +1249,6 @@ if not hasattr(pd.DataFrame, "concat"):
 
 def pd_isna_like(value):
     return pd.isna(value)
-
-def OneHotEncoder(*args, **kwargs):
-    if "sparse" in kwargs and "sparse_output" not in kwargs:
-        kwargs["sparse_output"] = kwargs.pop("sparse")
-    try:
-        return _SklearnOneHotEncoder(*args, **kwargs)
-    except TypeError:
-        if "sparse_output" in kwargs:
-            kwargs["sparse"] = kwargs.pop("sparse_output")
-        return _SklearnOneHotEncoder(*args, **kwargs)
 
 try:
     from xgboost import XGBClassifier, XGBRegressor
@@ -977,14 +1272,14 @@ except Exception as e:
     traceback.print_exc(file=sys.stderr)
     sys.exit(2)
 
-# Collect result_dict using the same contract as the frontend runner.
+# 收集 result_dict 变量。后端 runner 与前端训练执行器保持同一输出协议。
 _out = locals().get("result_dict")
 if not isinstance(_out, dict):
     print("__AUTOSTAT_ERROR__", file=sys.stderr)
     print("代码必须定义 dict 类型的 result_dict", file=sys.stderr)
     sys.exit(3)
 
-# Convert numpy and pandas values into JSON-friendly Python objects.
+# 把 numpy / pandas 类型变成原生 JSON 友好类型
 def _clean(o):
     if hasattr(o, "item"):
         try:
@@ -1023,21 +1318,23 @@ def _strip_transport_heavy_values(o, key=""):
         "model_object", "serialized", "raw_model", "fitted_model",
     )):
         return {"stripped": True, "reason": "model artifact removed before report transport"}
-
     if isinstance(o, dict):
         return {str(k): _strip_transport_heavy_values(v, k) for k, v in o.items()}
-
     if isinstance(o, list):
         if len(o) > 50 and _looks_numeric_list(o):
             return _summarize_numeric_list(o)
         if len(o) > 50:
-            return {"count": len(o), "sample": [_strip_transport_heavy_values(v, key) for v in o[:10]]}
+            return {
+                "count": len(o),
+                "sample": [_strip_transport_heavy_values(v, key) for v in o[:10]],
+            }
         return [_strip_transport_heavy_values(v, key) for v in o]
-
     if isinstance(o, str) and len(o) > 4000:
-        compact = "".join(o.split())
-        if len(compact) > 4000:
-            return {"stripped": True, "chars": len(o), "reason": "large string removed before report transport"}
+        return {
+            "stripped": True,
+            "chars": len(o),
+            "reason": "large string removed before report transport",
+        }
     return o
 
 _cleaned = _strip_transport_heavy_values(_clean(_out))
@@ -1048,15 +1345,13 @@ print("__AUTOSTAT_RESULT__:" + json.dumps(_cleaned, ensure_ascii=False))
     full_script = script.replace("__USER_CODE__", indented)
 
     try:
-        env = dict(os.environ)
-        env.setdefault("MPLCONFIGDIR", tempfile.gettempdir())
         completed = subprocess.run(
             [sys.executable, "-c", full_script],
             input=to_str(data) or "[]",
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
-            env=env,
+            env=safe_subprocess_env(),
         )
     except subprocess.TimeoutExpired:
         return {
@@ -1069,12 +1364,12 @@ print("__AUTOSTAT_RESULT__:" + json.dumps(_cleaned, ensure_ascii=False))
     if completed.returncode != 0:
         return {
             "is_success": False,
-            "error": (completed.stderr or "")[:6000],
+            "error": (completed.stderr or "")[-6000:],
             "stdout": completed.stdout or "",
             "result_json": {},
         }
 
-    # Separate user stdout from the structured result payload.
+    # 分离打印输出和 result
     result_json: dict = {}
     lines = completed.stdout.splitlines()
     stdout_clean_lines = []
@@ -1109,7 +1404,7 @@ def _unwrap_code_block(text: str) -> str:
     return t
 
 
-# CLI smoke-test entry point.
+# ---------- CLI 测试入口 ----------
 
 if __name__ == "__main__":
     import sys

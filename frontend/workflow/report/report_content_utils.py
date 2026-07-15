@@ -280,7 +280,11 @@ def _parse_figure_number_token(value: Any) -> int | None:
 
 
 def normalize_figure_placeholders(text: str) -> str:
-    """Normalize common figure references to `[FIG:n]` placeholders."""
+    """
+    兼容中文模型常见图引用写法，并统一为 [FIG:n]。
+    支持：图1、图表1、图片1、插图1、第1张图、Figure 1、Fig. 1、FIG-1、FIG#1、
+    全角 FIG/数字、中文数字和圈号数字等。
+    """
     if not isinstance(text, str) or not text:
         return text
 
@@ -815,7 +819,7 @@ def _configure_doc_style(doc: Document) -> None:
         list_style.paragraph_format.line_spacing = 1.35
         list_style.paragraph_format.space_after = Pt(4)
 
-    code_style = _get_or_create_paragraph_style(doc, "ChatGPT Code")
+    code_style = _get_or_create_paragraph_style(doc, "AutoSTAT Code")
     code_style.base_style = normal_style
     code_style.font.name = WORD_EXPORT_FONT_MONO
     code_style._element.rPr.rFonts.set(qn("w:eastAsia"), WORD_EXPORT_FONT_MONO)
@@ -827,7 +831,7 @@ def _configure_doc_style(doc: Document) -> None:
     code_style.paragraph_format.space_before = Pt(6)
     code_style.paragraph_format.space_after = Pt(6)
 
-    quote_style = _get_or_create_paragraph_style(doc, "ChatGPT Quote")
+    quote_style = _get_or_create_paragraph_style(doc, "AutoSTAT Quote")
     quote_style.base_style = normal_style
     quote_style.font.name = WORD_EXPORT_FONT_LATIN
     quote_style._element.rPr.rFonts.set(qn("w:eastAsia"), WORD_EXPORT_FONT_EAST_ASIA)
@@ -840,7 +844,7 @@ def _configure_doc_style(doc: Document) -> None:
     quote_style.paragraph_format.space_before = Pt(6)
     quote_style.paragraph_format.space_after = Pt(6)
 
-    caption_style = _get_or_create_paragraph_style(doc, "ChatGPT Caption")
+    caption_style = _get_or_create_paragraph_style(doc, "AutoSTAT Caption")
     caption_style.base_style = normal_style
     caption_style.font.name = WORD_EXPORT_FONT_LATIN
     caption_style._element.rPr.rFonts.set(qn("w:eastAsia"), WORD_EXPORT_FONT_EAST_ASIA)
@@ -852,7 +856,7 @@ def _configure_doc_style(doc: Document) -> None:
     caption_style.paragraph_format.space_before = Pt(0)
     caption_style.paragraph_format.space_after = Pt(10)
 
-    table_title_style = _get_or_create_paragraph_style(doc, "ChatGPT Table Title")
+    table_title_style = _get_or_create_paragraph_style(doc, "AutoSTAT Table Title")
     table_title_style.base_style = normal_style
     table_title_style.font.name = WORD_EXPORT_FONT_LATIN
     table_title_style._element.rPr.rFonts.set(qn("w:eastAsia"), WORD_EXPORT_FONT_EAST_ASIA)
@@ -1016,7 +1020,7 @@ def _apply_three_line_table_style(table, header_rows: set[int], total_rows: int)
 
 
 def _add_table_title(doc: Document, text: str):
-    paragraph = _add_text_paragraph(doc, text, style_name="ChatGPT Table Title")
+    paragraph = _add_text_paragraph(doc, text, style_name="AutoSTAT Table Title")
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     return paragraph
 
@@ -1058,19 +1062,19 @@ def _add_list_item(doc: Document, text: str, ordered: bool = False):
 
 
 def _add_caption(doc: Document, text: str):
-    paragraph = _add_text_paragraph(doc, text, style_name="ChatGPT Caption")
+    paragraph = _add_text_paragraph(doc, text, style_name="AutoSTAT Caption")
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     return paragraph
 
 
 def _add_quote_block(doc: Document, text: str) -> None:
-    paragraph = _add_text_paragraph(doc, text, style_name="ChatGPT Quote")
+    paragraph = _add_text_paragraph(doc, text, style_name="AutoSTAT Quote")
     paragraph.paragraph_format.left_indent = Inches(0.25)
     _set_paragraph_shading(paragraph, WORD_EXPORT_QUOTE_BACKGROUND)
 
 
 def _add_code_block(doc: Document, text: str) -> None:
-    paragraph = doc.add_paragraph(style="ChatGPT Code")
+    paragraph = doc.add_paragraph(style="AutoSTAT Code")
     lines = text.rstrip("\n").splitlines() or [text]
     for index, line in enumerate(lines):
         run = paragraph.add_run(line if line else " ")
@@ -1892,6 +1896,12 @@ def wrap_section_as_markdown(section: Any, content: str) -> str:
     if isinstance(section, dict):
         num = str(section.get("num", "")).strip()
         raw_title = sanitize_section_heading_text(section.get("title", ""))
+        if num:
+            raw_title = re.sub(
+                rf"^\s*{re.escape(num)}(?:[\.．、]|\s+)?\s*",
+                "",
+                raw_title,
+            ).strip()
         level_raw = section.get("level", 1)
 
         try:

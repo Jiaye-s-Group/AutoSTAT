@@ -5,6 +5,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 from pathlib import Path
 
+from utils.i18n import bt
+
 PALETTES = {
     "Classic": [
         "#2B5C8A", "#4F81AF", "#77ACD3", "#D9D5C9", "#F69035"
@@ -857,11 +859,15 @@ def _box_group_medians(trace):
         for anchor, value in zip(position_values, distribution_values):
             if _is_missing_color_value(value):
                 continue
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                continue
             key = _hashable_color_key(anchor)
             if key not in grouped:
                 grouped[key] = {"anchor": anchor, "values": []}
                 order.append(key)
-            grouped[key]["values"].append(float(value))
+            grouped[key]["values"].append(numeric_value)
 
         specs = []
         for key in order:
@@ -1199,7 +1205,12 @@ def apply_palette_to_figure(fig, colors, fig_index=0):
 def vis_palette(agent):
     _initialize_palette_state(agent)
     palette_options = [*PALETTES.keys(), CUSTOM_PALETTE_NAME]
-    choice = st.selectbox("请选择配色方案（内含自定义）", palette_options, key="viz_palette_choice")
+    choice = st.selectbox(
+        bt("请选择配色方案（内含自定义）", "Select a color palette, including custom"),
+        palette_options,
+        key="viz_palette_choice",
+        format_func=lambda option: bt("自定义", "Custom") if option == CUSTOM_PALETTE_NAME else option,
+    )
 
     if choice == CUSTOM_PALETTE_NAME:
         colors = _render_custom_palette_picker()

@@ -1,5 +1,6 @@
 import streamlit as st
 
+from utils.i18n import bt
 from workflow.report.report_content_utils import (
     extract_report_html,
     extract_report_markdown,
@@ -20,9 +21,12 @@ def write_html(report_agent):
         if not markdown_text:
             markdown_text = extract_report_text(workflow_result)
         if not markdown_text:
-            st.error("报告工作流未返回可用于导出 HTML 的内容。")
+            st.error(bt(
+                "报告工作流未返回可用于导出 HTML 的内容。",
+                "The report workflow did not return content that can be exported as HTML.",
+            ))
             return
         html_content = markdown_to_html(markdown_text, title="Analysis Report")
 
     report_agent.save_html(html_content)
-    st.success("HTML 报告已生成。")
+    st.success(bt("HTML 报告已生成。", "The HTML report has been generated."))

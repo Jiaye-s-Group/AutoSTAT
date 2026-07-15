@@ -17,15 +17,7 @@
 
 结合上述数据特征和绘图建议，生成最终的 `fig_dict`。请尽可能生成正确代码，确保代码逻辑严密，处理好可能的缺失值或异常列名。
 
-硬性输出协议：
-- 代码必须显式创建 `fig_dict = {}`，并把每一张最终图保存为 `fig_dict["descriptive_unique_key"] = fig`。
-- `fig_dict` 的 value 必须是 Plotly Figure 对象。
-- 禁止只使用 `fig`、`figs`、`figures`、`charts`、`plots`、列表或函数内部变量保存图。
-- 禁止调用 `.show()`、`print()`、`write_html()`、`write_image()` 或任何外部 IO。
-- 如果生成了多张图，全部都必须进入同一个全局 `fig_dict`。
-- 最终代码执行结束时，`fig_dict` 必须是非空字典。
-
-重点：在代码编写时，严谨给df重新赋值，数据头部信息{{def_head}}的数据只是全局数据的前5行，编写代码时需要使用全局数据。
+重点：不得给 `df` 重新赋值；`def_head` 只是全量数据的前 5 行预览，代码必须使用运行时提供的全量 `df`。
 
 大数据绘图约束：
 - 如果全量数据超过 5000 行，散点图、折线图、蜂群图、逐点时间序列等行级图表必须先采样、聚合或重采样，不要把全量行级数据直接放进 Plotly trace。
@@ -34,11 +26,24 @@
 - 相关性、热力图、分布图、箱线图等可使用统计聚合结果，不要生成包含大量原始点的图对象。
 - 采样时使用 `random_state=42`，例如 `plot_df = df.sample(n=min(len(df), 5000), random_state=42)`；不要覆盖 `df`。
 
+图形完整性约束：
+- 绘制小提琴图、分组小提琴图、密度图或箱线叠加分布图时，必须保证每个可视主体完整显示在绘图区内，不得只显示左半边、右半边，或被坐标轴、子图边界、图例、标题裁剪。
+- 即使建议或标题中出现 `split violin`、`split violin plots`、`分裂小提琴图` 等词，只要用户没有明确要求半边小提琴展示，就必须绘制完整小提琴形状。优先使用 `px.violin(...)` 或 `go.Violin(..., side='both')`，不要使用 `side='positive'`、`side='negative'` 来生成半边图形。
+- 需要比较两个或多个分组时，优先使用完整小提琴图并排展示、分面展示或设置 `fig.update_layout(violinmode='group')`；不要为了对比而把每个分组画成单侧半小提琴。
+- 为防止裁剪，给每个 figure 设置足够的 `height`、`width`、`margin`。自动边距只能写为 `fig.update_xaxes(automargin=True)` 和/或 `fig.update_yaxes(automargin=True)`；严禁写 `fig.update_layout(automargin=True)`。多子图时合理设置 `horizontal_spacing`、`vertical_spacing` 和整体边距；需要子图时必须显式 `from plotly.subplots import make_subplots`。
+
+颜色约束：若上方颜色方案为空，省略 `color_discrete_sequence`、`color_continuous_scale` 等颜色参数并使用 Plotly 默认颜色；不得构造空颜色列表。若颜色方案非空，才从提供的颜色中选择。
+
+图表文本语言约束：
+- 当前界面语言：{{language_name}}。
+- 如果当前界面语言为 English，代码中所有用户可见的图表标题、坐标轴标题、图例标题、注释、hover label、按钮/菜单文字都必须使用专业英文；不得硬编码中文标题或中文连接词，除非它们是原始数据字段名、用户提供术语或专有名词。
+- 如果当前界面语言为中文，代码中用户可见的图表文本应使用专业中文，并保留原始字段名。
+
 编写代码满足具体绘图建议时，尽可能绘制精美的高水平科研图。
 
 保证严格输出纯 Python 代码，不要输出任何解释性文字、注释、示例以及每段代码实现的功能解释。
 补充硬性要求：
 - 运行时已经直接提供全量 `df`，不要写任何 `df = ...`。
-- `{{def_head}}` 只是全量数据的前 5 行预览，只能用于理解列名、类型和示例值，绝不能据此重新构造 `df`。
+- `def_head` 只是全量数据的前 5 行预览，只能用于理解列名、类型和示例值，绝不能据此重新构造 `df`。
 - 如果需要筛选、聚合、清洗，请使用新变量名，例如 `plot_df = df.copy()`、`agg_df = ...`。
 - 一旦输出中出现 `df = pd.DataFrame(...)`、`df = pd.read_*...`、`df = df.head(...)`、`df = {...}`、`df = [...]`，都视为错误代码。

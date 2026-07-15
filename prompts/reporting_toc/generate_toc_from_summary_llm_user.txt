@@ -1,5 +1,8 @@
 请根据以下具体信息生成目录：
 
+【报告语言要求】
+{{language_instruction}}
+
 用户选择的目录详细程度为：{{outline_length}}
 === 用户需求与偏好 ===
 - 用户需求：{{user_input}}

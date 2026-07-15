@@ -1,4 +1,14 @@
-"""Write report sections from the generated outline and stage evidence."""
+"""
+Reporting_partly workflow 本地实现。
+
+修正版目标：
+1. history_content 只作为 writer 的上文参考，不再污染最终成品；
+2. 每个章节最终只写入“当前节内容”，避免 1 / 1+2 / 1+2+3 叠加；
+3. Markdown 标题层级本地统一包装，保证前端显示与下载一致；
+4. 保留 [FIG:x] 占位符，交给 report_render / 导出层替换成真实图片；
+5. 不再优先使用 validator 结果，避免 [FIG:x] 被吃掉；
+6. 避免“模型已经写了标题 + 本地又包一层标题”导致标题重复。
+"""
 from __future__ import annotations
 
 import json
@@ -8,7 +18,14 @@ from typing import Any, Callable
 
 from core.llm_client import chat
 from core.prompt_template import render_file
-from workflow.report.report_content_utils import (
+from core.report_language import (
+    REPORT_LANGUAGE_ZH,
+    is_english_report,
+    normalize_report_language,
+    report_language_instruction,
+    report_language_name,
+)
+from frontend.workflow.report.report_content_utils import (
     normalize_part,
     normalize_for_dedup,
     sanitize_section_heading_text,
@@ -37,8 +54,8 @@ NATURAL_FIGURE_REFERENCE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
-# No numerical figure cap by default. Set the corresponding environment
-# variables to positive integers when a deployment needs explicit limits.
+# Limits are opt-in. Set the corresponding environment variables to positive
+# integers when a deployment needs an explicit report-size guardrail.
 DEFAULT_MAX_REPORT_FIGURES: int | None = None
 DEFAULT_MAX_REPORT_FIGURES_PER_SECTION: int | None = None
 DEFAULT_FIGURE_MATCH_CANDIDATE_SECTIONS = 5
@@ -50,6 +67,14 @@ CORE_REPORT_SECTION_TITLES = {
     "3": "可视化分析",
     "4": "模型构建与评估",
     "5": "结论与应用展望",
+}
+
+CORE_REPORT_SECTION_TITLES_EN = {
+    "1": "Data Loading and Structure Review",
+    "2": "Data Preprocessing",
+    "3": "Visualization Analysis",
+    "4": "Modeling and Evaluation",
+    "5": "Conclusions and Practical Implications",
 }
 
 
@@ -69,6 +94,18 @@ def _is_report_cancelled(cancel_check: Callable[[], bool] | None) -> bool:
 def _raise_if_report_cancelled(cancel_check: Callable[[], bool] | None) -> None:
     if _is_report_cancelled(cancel_check):
         raise ReportGenerationCancelled()
+
+
+def _emit_report_progress(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    payload: dict[str, Any],
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(payload)
+    except Exception as exc:
+        print("[REPORT][PROGRESS] callback failed:", repr(exc))
 
 
 def _clean_report_title(raw_title: Any) -> str:
@@ -136,16 +173,6 @@ def _extract_fig_numbers_from_text(text: Any) -> list[int]:
             seen.add(figure)
             figures.append(figure)
     return figures
-
-
-def _strip_natural_figure_references(text: str) -> str:
-    text = normalize_part(text or "")
-    if not text:
-        return ""
-    text = NATURAL_FIGURE_REFERENCE_RE.sub("", text)
-    text = re.sub(r"\s+([，,。.!！?？；;：:、])", r"\1", text)
-    text = re.sub(r"[，,、；;：:]\s*([。.!！?？])", r"\1", text)
-    return normalize_part(text)
 
 
 def _coerce_figures(value: Any) -> list[int]:
@@ -303,16 +330,27 @@ def _toc_section_has_visual_ancestor(toc_list: list, index: int) -> bool:
 def _visual_toc_section_score(toc_list: list, index: int) -> int:
     section = toc_list[index]
     text = _toc_section_text(section)
-    text_no_space = re.sub(r"\s+", "", text)
+    text_no_space = re.sub(r"\s+", "", text).lower()
 
-    negative_keywords = ("结论", "总结", "展望", "建议", "数据加载", "数据导入", "预处理", "建模", "模型")
+    negative_keywords = (
+        "结论", "总结", "展望", "建议", "数据加载", "数据导入", "预处理", "建模", "模型",
+        "conclusion", "summary", "implication", "recommendation", "dataloading",
+        "dataimport", "preprocessing", "modeling", "model",
+    )
     if any(keyword in text_no_space for keyword in negative_keywords):
         score = -20
     else:
         score = 0
 
-    strong_keywords = ("可视化", "图表", "图像", "图片", "可视分析")
-    analysis_keywords = ("分布", "趋势", "关系", "相关", "对比", "比较", "差异", "特征", "占比")
+    strong_keywords = (
+        "可视化", "图表", "图像", "图片", "可视分析",
+        "visualization", "chart", "figure", "image", "plot",
+    )
+    analysis_keywords = (
+        "分布", "趋势", "关系", "相关", "对比", "比较", "差异", "特征", "占比",
+        "distribution", "trend", "relationship", "association", "correlation",
+        "comparison", "difference", "feature", "proportion",
+    )
     if any(keyword in text_no_space for keyword in strong_keywords):
         score += 30
     if any(keyword in text_no_space for keyword in analysis_keywords):
@@ -606,7 +644,7 @@ def _positive_int_env(name: str, default: int) -> int:
 
 
 def _report_figure_limit_env(name: str, default: int | None) -> int | None:
-    """Read a report figure limit; missing or zero values mean no limit."""
+    """Read an optional figure limit; missing or zero means unlimited."""
     raw = os.getenv(name, "").strip()
     if not raw:
         return default
@@ -1120,15 +1158,32 @@ def _best_available_record_for_figure(
     toc_list: list,
     figure_contexts: dict[int, str],
 ) -> dict[str, Any] | None:
+    if _figure_context_filter_score(figure, figure_contexts) <= -40:
+        return None
+
     scored: list[dict[str, Any]] = []
     for section_index, section in enumerate(toc_list):
+        is_modeling_figure_section = (
+            _is_modeling_section(section)
+            and _figure_is_modeling_result(figure, figure_contexts)
+        )
+        if (
+            figure not in _section_figures(section)
+            and _visual_toc_section_score(toc_list, section_index) < 10
+            and not is_modeling_figure_section
+        ):
+            continue
         score = _figure_section_alignment_score(
             figure=figure,
             figure_contexts=figure_contexts,
             toc_list=toc_list,
             section_index=section_index,
         )
-        if score < 0:
+        # -100 marks a hard-incompatible section (for example, a raw-data
+        # setup section or a non-model figure inside a modeling section).
+        # Other negative scores only mean weak title overlap; a valid figure
+        # still needs a deterministic placement when no stronger pair exists.
+        if score <= -100:
             continue
         scored.append(
             {
@@ -1452,6 +1507,16 @@ def _make_core_section(num: str, title: str) -> dict[str, Any]:
     }
 
 
+def _core_report_section_titles(ctx: dict[str, Any]) -> dict[str, str]:
+    return CORE_REPORT_SECTION_TITLES_EN if is_english_report(ctx.get("report_language")) else CORE_REPORT_SECTION_TITLES
+
+
+def _fallback_core_title(num: str, ctx: dict[str, Any]) -> str:
+    if is_english_report(ctx.get("report_language")):
+        return f"{num} Analysis Results"
+    return f"{num} 分析结果"
+
+
 def _ensure_core_report_sections(toc_list: list, ctx: dict[str, Any]) -> list:
     if not toc_list:
         return toc_list
@@ -1465,26 +1530,27 @@ def _ensure_core_report_sections(toc_list: list, ctx: dict[str, Any]) -> list:
     if not by_num:
         return normalized
 
+    core_titles = _core_report_section_titles(ctx)
     required: dict[str, str] = {}
     stage_refs = ctx.get("stage_reference_contexts")
     if not isinstance(stage_refs, dict):
         stage_refs = {}
     if ctx.get("load_abstract") or stage_refs.get("loading"):
-        required["1"] = CORE_REPORT_SECTION_TITLES["1"]
+        required["1"] = core_titles["1"]
     if ctx.get("preproc_abstract") or stage_refs.get("preprocessing"):
-        required["2"] = CORE_REPORT_SECTION_TITLES["2"]
+        required["2"] = core_titles["2"]
     if ctx.get("visual_abstract") or stage_refs.get("visualization") or by_num.get("3") or any(num.startswith("3.") for num in by_num):
-        required["3"] = CORE_REPORT_SECTION_TITLES["3"]
+        required["3"] = core_titles["3"]
     if ctx.get("coding_abstract") or stage_refs.get("modeling"):
-        required["4"] = CORE_REPORT_SECTION_TITLES["4"]
-    required["5"] = CORE_REPORT_SECTION_TITLES["5"]
+        required["4"] = core_titles["4"]
+    required["5"] = core_titles["5"]
 
     for num in list(by_num):
         if "." not in num:
             continue
         parent = num.rsplit(".", 1)[0]
         while parent:
-            required.setdefault(parent, CORE_REPORT_SECTION_TITLES.get(parent, f"{parent} 分析结果"))
+            required.setdefault(parent, core_titles.get(parent, _fallback_core_title(parent, ctx)))
             parent = parent.rsplit(".", 1)[0] if "." in parent else ""
 
     combined: dict[str, Any] = {}
@@ -1566,6 +1632,13 @@ def _strip_fig_placeholders_for_context(text: str) -> str:
     )
 
 
+def _strip_natural_figure_references(text: str) -> str:
+    value = NATURAL_FIGURE_REFERENCE_RE.sub("", normalize_part(text or ""))
+    value = re.sub(r"\s+([，,。.!！?？；;：:、])", r"\1", value)
+    value = re.sub(r"[，,、；;：:]\s*([。.!！?？])", r"\1", value)
+    return normalize_part(value)
+
+
 def _section_modules(section: Any) -> list[int]:
     if not isinstance(section, dict):
         return []
@@ -1594,7 +1667,7 @@ def _section_default_modules(section: Any) -> list[int]:
         return [1]
     if num.startswith("3") or any(token in text for token in ("visual", "figure", "可视化", "图表", "分布")):
         return [2]
-    if num.startswith("4") or any(token in text for token in ("model", "模型", "建模", "评估", "预测")):
+    if num.startswith("4") or any(token in text for token in ("model", "模型", "建模", "评估", "预测", "推断", "回归")):
         return [3]
     if num.startswith("5") or any(token in text for token in ("conclusion", "summary", "结论", "总结", "展望")):
         return [0, 1, 2, 3]
@@ -1605,8 +1678,7 @@ def _stage_reference(ctx: dict[str, Any], key: str) -> str:
     refs = ctx.get("stage_reference_contexts")
     if not isinstance(refs, dict):
         return ""
-    value = refs.get(key)
-    return str(value or "").strip()
+    return str(refs.get(key) or "").strip()
 
 
 def _build_section_reference_context(
@@ -1620,41 +1692,33 @@ def _build_section_reference_context(
     parts: list[str] = []
 
     if 0 in modules:
-        parts.append(
-            _strip_fig_placeholders_for_context(
-                _stage_reference(ctx, "loading") or str(ctx.get("load_abstract", ""))
-            )
-        )
+        parts.append(_strip_fig_placeholders_for_context(
+            _stage_reference(ctx, "loading") or str(ctx.get("load_abstract", ""))
+        ))
     if 1 in modules:
-        parts.append(
-            _strip_fig_placeholders_for_context(
-                _stage_reference(ctx, "preprocessing") or str(ctx.get("preproc_abstract", ""))
-            )
-        )
+        parts.append(_strip_fig_placeholders_for_context(
+            _stage_reference(ctx, "preprocessing") or str(ctx.get("preproc_abstract", ""))
+        ))
 
     figure_context = _format_figure_contexts(figures, figure_contexts)
     if figure_context:
         parts.append(figure_context)
     elif 2 in modules:
-        parts.append(
-            _strip_fig_placeholders_for_context(
-                _stage_reference(ctx, "visualization") or str(ctx.get("visual_abstract", ""))
-            )
-        )
+        parts.append(_strip_fig_placeholders_for_context(
+            _stage_reference(ctx, "visualization") or str(ctx.get("visual_abstract", ""))
+        ))
 
     if 3 in modules:
-        parts.append(
-            _strip_fig_placeholders_for_context(
-                _stage_reference(ctx, "modeling") or str(ctx.get("coding_abstract", ""))
-            )
-        )
+        parts.append(_strip_fig_placeholders_for_context(
+            _stage_reference(ctx, "modeling") or str(ctx.get("coding_abstract", ""))
+        ))
 
     if not parts:
+        fallback_context = ctx.get("selected_full_conten", "")
         if figures:
             parts.append(_format_figure_contexts(figures, figure_contexts))
         else:
-            fallback_context = truncate_text(_strip_fig_placeholders_for_context(str(ctx.get("selected_full_conten", ""))), 1800)
-            parts.append(fallback_context)
+            parts.append(truncate_text(_strip_fig_placeholders_for_context(str(fallback_context)), 1800))
 
     return "\n\n".join(part for part in parts if normalize_part(part)).strip()
 
@@ -1698,7 +1762,7 @@ def _dedupe_required_figures(text: str, figures: list[int]) -> str:
     text = FIG_PLACEHOLDER_CAPTURE_RE.sub(replace, text)
     text = re.sub(r"\s+([，,。.!！?？；;：:、])", r"\1", text)
     text = re.sub(r"[，,、；;：:]\s*([。.!！?？])", r"\1", text)
-    return normalize_part(text)
+    return text.strip()
 
 
 def _log_final_figure_ledger(final_html: str, expected_figures: list[int]) -> None:
@@ -1811,13 +1875,14 @@ def _preserve_required_figures(
     fallback: str,
     section: Any,
     figure_contexts: dict[int, str] | None = None,
+    report_language: Any = REPORT_LANGUAGE_ZH,
 ) -> str:
     figures = _section_figures(section)
     figure_contexts = figure_contexts or {}
     primary = normalize_figure_placeholders(normalize_part(primary))
     fallback = normalize_figure_placeholders(normalize_part(fallback))
     if not figures:
-        return _strip_natural_figure_references(remove_figure_placeholders(primary))
+        return normalize_part(remove_figure_placeholders(primary))
 
     if _contains_all_figures(primary, figures):
         return normalize_part(_dedupe_required_figures(primary, figures))
@@ -1840,7 +1905,7 @@ def _preserve_required_figures(
 
     base = _dedupe_required_figures(base, figures).rstrip()
     if not re.search(r"[。！？!?\.]$", base):
-        base += "。"
+        base += "." if is_english_report(report_language) else "。"
     return normalize_part(_dedupe_required_figures(f"{base} {suffix}", figures))
 
 
@@ -1857,9 +1922,12 @@ def run_reporting_partly_workflow(
     preference_select: str = "",
     ref_context: str = "",
     stage_reference_contexts: dict[str, str] | None = None,
+    respect_user_toc: bool = False,
+    report_language: str = REPORT_LANGUAGE_ZH,
     cancel_check: Callable[[], bool] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    report_language = normalize_report_language(report_language)
     selected_full_conten = _ensure_visual_fig_placeholders(selected_full_conten or "")
     candidate_figures = _extract_fig_numbers_from_text(selected_full_conten)
     candidate_figure_contexts = _extract_figure_contexts(selected_full_conten)
@@ -1893,17 +1961,19 @@ def run_reporting_partly_workflow(
         "preference_select": preference_select or "",
         "ref_context": ref_context or "（无参考资料）",
         "stage_reference_contexts": stage_reference_contexts or {},
+        "report_language": report_language,
+        "language_name": report_language_name(report_language),
+        "language_instruction": report_language_instruction(report_language),
     }
 
-    # Start from the outline produced by the TOC workflow.
-    toc_list = _ensure_core_report_sections(
-        _dedupe_toc_sections(_normalize_toc_figures(authoritative_toc)),
-        ctx,
-    )
+    # ---------- 节点 1: base_toc ----------
+    toc_list = _dedupe_toc_sections(_normalize_toc_figures(authoritative_toc))
+    if not respect_user_toc:
+        toc_list = _ensure_core_report_sections(toc_list, ctx)
     _log_toc_figure_state("toc_list before module planning", toc_list)
     ctx["toc_list"] = toc_list
 
-    # Ask the LLM to map sections to analysis modules.
+    # ---------- 节点 2: update_toc_with_relevant_sections ----------
     _raise_if_report_cancelled(cancel_check)
     up_sys = render_file("reporting_partly/update_toc_with_relevant_sections_llm_sys.txt", ctx)
     up_user = render_file("reporting_partly/update_toc_with_relevant_sections_llm_user.txt", ctx)
@@ -1922,7 +1992,8 @@ def run_reporting_partly_workflow(
 
     toc_list_final = _clear_toc_figures(_normalize_toc_figures(toc_list_final))
     toc_list_final = _dedupe_toc_sections(toc_list_final)
-    toc_list_final = _ensure_core_report_sections(toc_list_final, ctx)
+    if not respect_user_toc:
+        toc_list_final = _ensure_core_report_sections(toc_list_final, ctx)
     _log_toc_figure_state("toc_list before figure matching", toc_list_final)
     toc_list_final, planned_figures, figure_insert_plan = _build_figure_insert_plan(
         toc_list=toc_list_final,
@@ -1938,17 +2009,40 @@ def run_reporting_partly_workflow(
     history_parts_for_prompt: list[str] = []
     total_sections = len(toc_list_final)
 
+    def emit_progress(
+        phase: str,
+        *,
+        section: Any | None = None,
+        section_index: int = 0,
+        markdown: str = "",
+        completed_sections: int | None = None,
+        status: str = "writing",
+        draft: bool | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "status": status,
+            "phase": phase,
+            "section_index": section_index,
+            "total_sections": total_sections,
+            "completed_sections": len(report_parts) if completed_sections is None else completed_sections,
+            "markdown": markdown,
+        }
+        if section is not None:
+            payload["section_num"] = _toc_section_num(section)
+            payload["section_title"] = _extract_section_title(section)
+        payload["report_language"] = report_language
+        if draft is not None:
+            payload["draft"] = draft
+        _emit_report_progress(progress_callback, payload)
+
+    emit_progress("ready", completed_sections=0)
+
     for idx, section in enumerate(toc_list_final):
         _raise_if_report_cancelled(cancel_check)
-        section_title = _extract_section_title(section)
-        _emit_progress(
-            progress_callback,
-            phase="section_started",
+        emit_progress(
+            "section_started",
+            section=section,
             section_index=idx + 1,
-            total_sections=total_sections,
-            completed_sections=len(report_parts),
-            section_num=_toc_section_num(section),
-            section_title=section_title,
             markdown="\n\n".join(report_parts).strip(),
         )
         section_reference_context = _build_section_reference_context(
@@ -1972,49 +2066,54 @@ def run_reporting_partly_workflow(
             "total_sections": len(toc_list_final),
         }
 
-        # Draft the current section body.
+        # ---------- writer ----------
         w_sys = render_file("reporting_partly/writer_llm_sys.txt", section_ctx)
         w_user = render_file("reporting_partly/writer_llm_user.txt", section_ctx)
         content = chat(w_sys, w_user, name=f"report_partly.writer.{idx+1}").strip()
         _raise_if_report_cancelled(cancel_check)
         content = _unwrap_code_block(content)
         content = normalize_part(content)
-        content = _preserve_required_figures(content, "", section, figure_contexts)
+        content = _preserve_required_figures(content, "", section, figure_contexts, report_language)
         section_ctx["content"] = content
-        _emit_progress(
-            progress_callback,
-            phase="section_draft",
-            section_index=idx + 1,
-            total_sections=total_sections,
-            completed_sections=len(report_parts),
-            section_num=_toc_section_num(section),
-            section_title=section_title,
-            markdown="\n\n".join(report_parts + [wrap_section_as_markdown(section, content)]).strip(),
-        )
+        draft_part = normalize_part(wrap_section_as_markdown(section, content))
+        if draft_part:
+            emit_progress(
+                "section_draft",
+                section=section,
+                section_index=idx + 1,
+                markdown="\n\n".join([*report_parts, draft_part]).strip(),
+                draft=True,
+            )
 
-        # Normalize the drafted body into the final section format.
+        # ---------- fill_report ----------
         f_sys = render_file("reporting_partly/fill_report_llm_sys.txt", section_ctx)
         f_user = render_file("reporting_partly/fill_report_llm_user.txt", section_ctx)
         filled = chat(f_sys, f_user, name=f"report_partly.fill.{idx+1}").strip()
         _raise_if_report_cancelled(cancel_check)
         filled = _unwrap_code_block(filled)
         filled = normalize_part(filled)
-        filled = _preserve_required_figures(filled, content, section, figure_contexts)
+        filled = _preserve_required_figures(filled, content, section, figure_contexts, report_language)
 
         final_part = filled or content
         final_part = normalize_part(final_part)
-        final_part = _preserve_required_figures(final_part, content, section, figure_contexts)
+        final_part = _preserve_required_figures(final_part, content, section, figure_contexts, report_language)
 
-        # Use the outline heading and remove duplicated generated headings.
+        # 统一用目录标题，避免正文开头重复标题。
         original_final_part = final_part
         final_part = _strip_redundant_heading(final_part, section)
         final_part = normalize_part(final_part)
         if original_final_part and not final_part:
             final_part = original_final_part
-        final_part = _preserve_required_figures(final_part, original_final_part, section, figure_contexts)
+        final_part = _preserve_required_figures(final_part, original_final_part, section, figure_contexts, report_language)
 
         dedup_key = normalize_for_dedup(_extract_section_title(section))
         if dedup_key in seen_parts:
+            emit_progress(
+                "section_skipped",
+                section=section,
+                section_index=idx + 1,
+                markdown="\n\n".join(report_parts).strip(),
+            )
             continue
 
         seen_parts.add(dedup_key)
@@ -2025,15 +2124,12 @@ def run_reporting_partly_workflow(
         if wrapped_part:
             report_parts.append(wrapped_part)
             report_part_sections.append(section)
-            _emit_progress(
-                progress_callback,
-                phase="section_completed",
+            emit_progress(
+                "section_completed",
+                section=section,
                 section_index=idx + 1,
-                total_sections=total_sections,
-                completed_sections=len(report_parts),
-                section_num=_toc_section_num(section),
-                section_title=section_title,
                 markdown="\n\n".join(report_parts).strip(),
+                draft=False,
             )
 
         history_parts_for_prompt.append(truncate_text(final_part, 800))
@@ -2047,16 +2143,15 @@ def run_reporting_partly_workflow(
     )
     final_html = "\n\n".join(report_parts).strip()
     _log_final_figure_ledger(final_html, planned_figures)
-    _emit_progress(
-        progress_callback,
-        phase="body_completed",
-        status="finalizing",
-        total_sections=total_sections,
-        completed_sections=len(report_parts),
+    emit_progress(
+        "body_completed",
+        section_index=total_sections,
         markdown=final_html,
+        status="finalizing",
     )
 
-    # Generate only the report title; the body already contains section headings.
+    # ---------- title_maker ----------
+    # 只生成 title 字段返回，不再把 title 注入正文，避免前端额外装饰
     _raise_if_report_cancelled(cancel_check)
     title_ctx = {**ctx, "final_html": final_html}
     t_sys = render_file("reporting_partly/title_maker_llm_sys.txt", title_ctx)
@@ -2067,21 +2162,18 @@ def run_reporting_partly_workflow(
     return {
         "final_html": final_html,
         "final_html_parts": report_parts,
-        "title": title or "数据分析报告",
+        "title": title or ("Data Analysis Report" if is_english_report(report_language) else "数据分析报告"),
+        "report_language": report_language,
     }
 
 
-def _emit_progress(progress_callback: Callable[[dict[str, Any]], None] | None, **payload: Any) -> None:
-    if progress_callback is None:
-        return
-    try:
-        progress_callback(payload)
-    except Exception as exc:
-        print("[REPORT][PROGRESS] callback failed:", repr(exc))
-
-
 def _parse_toc_list(text: str) -> list:
-    """Parse JSON, fenced JSON, or plain-text outline output."""
+    """
+    兼容：
+    - JSON array<object>
+    - markdown/code block 包裹的 JSON
+    - 普通纯文本逐行目录
+    """
     if not text:
         return []
 
@@ -2149,7 +2241,11 @@ def _extract_section_title(section: Any) -> str:
 
 
 def _strip_redundant_heading(text: str, section: Any) -> str:
-    """Remove duplicate headings at the start of a generated section."""
+    """
+    去掉开头重复的标题：
+    - '## 1 数据加载...\\n\\n## 1 数据加载...'
+    - '1 数据加载...\\n1 数据加载...'
+    """
     if not text:
         return ""
 
@@ -2169,7 +2265,7 @@ def _strip_redundant_heading(text: str, section: Any) -> str:
         if expected_title_norm and first_line_norm == expected_title_norm:
             del lines[first_non_empty_idx]
 
-    # Drop the second of the first two non-empty lines when they match.
+    # 取前两条非空行看看是否重复
     non_empty_indices = [i for i, line in enumerate(lines) if line.strip()]
     if len(non_empty_indices) >= 2:
         first_idx = non_empty_indices[0]
@@ -2180,7 +2276,7 @@ def _strip_redundant_heading(text: str, section: Any) -> str:
         if first_norm and second_norm and first_norm == second_norm:
             del lines[second_idx]
 
-    # Also handle repeated expected headings after intervening blank lines.
+    # 若第一行和预期标题一致，而第二行也是同标题，也删除第二个
     non_empty_lines = [line for line in lines if line.strip()]
     if len(non_empty_lines) >= 2:
         first_norm = _normalize_heading_text(non_empty_lines[0])

@@ -1,4 +1,20 @@
-"""Plan which AutoSTAT stages should run for a dataset."""
+"""
+Planning workflow 本地实现。
+
+Workflow stages:
+    Start(data, preferences)
+      → Data_to_url(Code) → Loading_Data(plugin) → planner(LLM) → analysis_path(LLM) → End
+
+本地流程（输入直接是 DataFrame）：
+    df → df_to_meta → planner(LLM, JSON) → analysis_path(LLM) → 返回
+
+Returns a stable workflow payload:
+    {
+      loading_auto, prep_auto, vis_auto, modeling_auto, report_auto,
+      plan,
+      shape_0, shape_1, dtype_info_str, head_dict_str, df
+    }
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -6,7 +22,15 @@ from typing import Any
 import pandas as pd
 
 from core.llm_client import chat, chat_json
+from core.planning_contract import DEFAULT_STAGE_PLAN
 from core.prompt_template import render_file
+from core.report_language import (
+    app_language_instruction,
+    app_language_name,
+    app_language_ref_context_empty,
+    is_english_language,
+    normalize_app_language,
+)
 from core.workflow_runner import as_bool
 from workflows._plugins import df_to_meta
 
@@ -17,18 +41,28 @@ def run_planning_workflow(
     add_preference: str = "",
     preference_selected: str = "",
     ref_context: str = "",
+    language: str = "zh",
 ) -> dict[str, Any]:
-    """Return stage switches, dataset metadata, and a short analysis plan."""
-    # Build compact dataset metadata for the planner prompt.
+    """
+    Run Planning: 根据 df 元信息让 LLM 决定 5 个阶段开关 + 生成分析路径说明。
+    """
+    language = normalize_app_language(language)
+
+    # ---------- 节点 1: df_to_meta（替代 Data_to_url + Loading_Data） ----------
     meta = df_to_meta(df)
     if not meta["is_success"]:
+        error_text = (
+            f"Data loading failed: {meta['error']}"
+            if is_english_language(language)
+            else f"数据加载失败：{meta['error']}"
+        )
         return {
             "loading_auto": False,
             "prep_auto": False,
             "vis_auto": False,
             "modeling_auto": False,
             "report_auto": False,
-            "plan": f"数据加载失败：{meta['error']}",
+            "plan": error_text,
             "shape_0": 0,
             "shape_1": 0,
             "dtype_info_str": "",
@@ -43,12 +77,15 @@ def run_planning_workflow(
         "head_dict_str": meta["head_dict_str"],
         "add_preference": add_preference or "",
         "preference_selected": preference_selected or "",
-        # Keep the legacy prompt variable name for compatibility.
+        # analysis_path prompt 里写的是 preference_select（少了 ed）
         "preference_select": preference_selected or "",
-        "ref_context": ref_context or "（无参考资料）",
+        "ref_context": ref_context or app_language_ref_context_empty(language),
+        "language": language,
+        "language_name": app_language_name(language),
+        "language_instruction": app_language_instruction(language),
     }
 
-    # Ask the LLM for the stage switches as strict JSON.
+    # ---------- 节点 2: planner LLM（输出 5 个开关 JSON） ----------
     planner_sys = render_file("planning/planner_llm_sys.txt", ctx)
     planner_user = render_file("planning/planner_llm_user.txt", ctx)
     planner_result = chat_json(
@@ -58,13 +95,13 @@ def run_planning_workflow(
         temperature=1.0,
     )
 
-    loading_auto = as_bool(planner_result.get("loading_auto"), default=True)
-    prep_auto = as_bool(planner_result.get("prep_auto"), default=True)
-    vis_auto = as_bool(planner_result.get("vis_auto"), default=True)
-    modeling_auto = as_bool(planner_result.get("modeling_auto"), default=False)
-    report_auto = as_bool(planner_result.get("report_auto"), default=True)
+    loading_auto = as_bool(planner_result.get("loading_auto"), default=DEFAULT_STAGE_PLAN["loading_auto"])
+    prep_auto = as_bool(planner_result.get("prep_auto"), default=DEFAULT_STAGE_PLAN["prep_auto"])
+    vis_auto = as_bool(planner_result.get("vis_auto"), default=DEFAULT_STAGE_PLAN["vis_auto"])
+    modeling_auto = as_bool(planner_result.get("modeling_auto"), default=DEFAULT_STAGE_PLAN["modeling_auto"])
+    report_auto = as_bool(planner_result.get("report_auto"), default=DEFAULT_STAGE_PLAN["report_auto"])
 
-    # Generate the user-facing analysis plan text.
+    # ---------- 节点 3: analysis_path LLM（写一段分析路径说明） ----------
     ctx.update(
         {
             "loading_auto": loading_auto,
@@ -99,7 +136,7 @@ def run_planning_workflow(
     }
 
 
-# CLI smoke-test entry point.
+# ---------- CLI 测试入口 ----------
 
 if __name__ == "__main__":
     import sys

@@ -1,5 +1,6 @@
 import streamlit as st
 
+from utils.i18n import bt
 from workflow.report.report_content_utils import (
     extract_report_markdown,
     extract_report_text,
@@ -22,8 +23,11 @@ def write_markdown(report_agent):
         markdown_content = extract_report_text(workflow_result)
 
     if not markdown_content:
-        st.error("报告工作流未返回可用于导出 Markdown 的内容。")
+        st.error(bt(
+            "报告工作流未返回可用于导出 Markdown 的内容。",
+            "The report workflow did not return content that can be exported as Markdown.",
+        ))
         return
 
     report_agent.save_markdown(markdown_content)
-    st.success("Markdown 报告已生成。")
+    st.success(bt("Markdown 报告已生成。", "The Markdown report has been generated."))

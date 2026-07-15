@@ -4,6 +4,9 @@
 以下内容由系统从完整 result_dict 中确定性提取：完整保留模型名称、核心指标和 best_model；base64/artifacts 已从 prompt 中移除；长数组和逐行记录已压缩为 count/sample/统计摘要。
 {{result_json}}
 
+Analysis Contract：
+{{analysis_contract_json}}
+
 === 建模背景上下文 ===
 - 建模代码摘要：{{modeling_code}}
 - 用户偏好：{{preference_select}}

@@ -6,10 +6,34 @@ import pandas as pd
 import streamlit as st
 import streamlit_antd_components as sac
 
+from utils.i18n import bt, get_language
 from utils.page_paths import page_file
-from workflow.dataloading.dataloading_core import process_complex_data, load_concat_file, PathFileWrapper
+from utils.suggestion_state import (
+    add_requirement,
+    base_requirements_text,
+    get_suggestion_state,
+    queue_revision_request,
+    replace_active_suggestion,
+    take_pending_revision,
+    visible_messages,
+)
+from utils.workflow_state import (
+    commit_dataset_fingerprint,
+    current_dataset_fingerprint,
+    dataframe_fingerprint,
+    invalidate_from,
+    record_stage_status,
+    stable_fingerprint,
+)
+from workflow.dataloading.dataloading_core import (
+    PathFileWrapper,
+    build_file_manifest,
+    file_manifest_fingerprint,
+    load_concat_file,
+    process_complex_data,
+)
 
-# --- Local workflow configuration ---
+# --- Local workflow ---
 def _maybe_json_loads(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -79,6 +103,12 @@ def _extract_summary_1_fields(summary_1: Any) -> dict[str, Any]:
 
 
 def _save_loading_workflow_outputs(agent, workflow_result: dict[str, Any]) -> None:
+    invalidate_from(
+        st.session_state,
+        "loading",
+        include_source=True,
+        reason="loading summary replaced",
+    )
     summary_1 = workflow_result.get("summary_1", {})
     abstract_1 = workflow_result.get("abstract_1", "")
     summary_fields = _extract_summary_1_fields(summary_1)
@@ -95,6 +125,13 @@ def _save_loading_workflow_outputs(agent, workflow_result: dict[str, Any]) -> No
         save_method(workflow_result)
     else:
         agent.loading_workflow_result = workflow_result
+    record_stage_status(
+        st.session_state,
+        "loading",
+        "succeeded",
+        input_fingerprint=current_dataset_fingerprint(st.session_state),
+        output_fingerprint=stable_fingerprint(summary_1, abstract_1),
+    )
 
 
 def call_loading_workflow(
@@ -103,7 +140,8 @@ def call_loading_workflow(
     loading_auto: bool = True,
 ):
     """
-    Call the local loading workflow and return {summary_1, abstract_1}.
+    Run the local loading workflow.
+    返回结构与原版一致：{summary_1, abstract_1}
     """
     from workflows.loading import run_loading_workflow
     from workflows._plugins import df_to_meta
@@ -119,128 +157,378 @@ def call_loading_workflow(
             user_input=user_input or "",
             add_preference=st.session_state.get("add_preference") or "",
             preference_selected=st.session_state.get("preference_selected") or "",
+            language=get_language(),
         )
         normalized = _normalize_loading_workflow_result(result)
         if normalized is None:
-            st.error("数据导入工作流返回结构异常，未解析到有效结果。")
+            st.error(bt(
+                "数据导入工作流返回结构异常，未解析到有效结果。",
+                "The data import workflow returned an invalid structure and no valid result could be parsed.",
+            ))
             return None
         return normalized
     except Exception as e:
-        st.error(f"本地 Loading workflow 执行异常：{e}")
+        st.error(bt(f"本地 Loading workflow 执行异常：{e}", f"Local loading workflow error: {e}"))
         return None
+
+def _commit_reference_fingerprint_change(reason: str) -> None:
+    fingerprints = st.session_state.get("learned_doc_fingerprints") or {}
+    reference_fingerprint = stable_fingerprint(fingerprints)
+    if reference_fingerprint == st.session_state.get("reference_fingerprint"):
+        return
+    invalidate_from(st.session_state, "references", reason=reason)
+    st.session_state.reference_fingerprint = reference_fingerprint
+
 
 def loading_reference_docs(agent):
     """
     专门处理参考资料的上传逻辑
     """
-    st.info("💡 提示：在此处上传业务背景、算法说明或数据手册 (PDF/Docx)，AI 会学习这些内容。")
+    st.info(bt(
+        "💡 提示：在此处上传业务背景、算法说明或数据手册，AI 会学习这些内容。",
+        "💡 Tip: Upload business context, algorithm notes, or data manuals here. The AI will learn from them.",
+    ))
+    if not isinstance(st.session_state.get("learned_doc_names"), set):
+        st.session_state.learned_doc_names = set(st.session_state.get("learned_doc_names") or [])
+    if not isinstance(st.session_state.get("learned_doc_fingerprints"), dict):
+        st.session_state.learned_doc_fingerprints = {}
+    if not isinstance(st.session_state.get("reference_doc_statuses"), dict):
+        st.session_state.reference_doc_statuses = {}
     
     uploaded_docs = st.file_uploader(
-        "上传参考文档",
+        bt("上传参考文档", "Upload Reference Documents"),
         type=['pdf', 'docx', 'txt', 'names'],
         accept_multiple_files=True,
         key="ref_doc_uploader"
     )
 
     if uploaded_docs:
-        if 'learned_doc_names' not in st.session_state:
-            st.session_state.learned_doc_names = set()
+        doc_manifest = build_file_manifest(uploaded_docs)
+        uploaded_by_name = {str(file_obj.name): file_obj for file_obj in uploaded_docs}
+        fingerprints_by_name = {
+            str(item.get("name") or ""): str(item.get("sha256") or "")
+            for item in doc_manifest
+        }
+        known_hash_owners = {
+            digest: name
+            for name, digest in st.session_state.learned_doc_fingerprints.items()
+            if digest
+        }
+        files_to_process = []
+        for item in doc_manifest:
+            name = str(item.get("name") or "")
+            digest = str(item.get("sha256") or "")
+            current_digest = st.session_state.learned_doc_fingerprints.get(name)
+            duplicate_owner = known_hash_owners.get(digest)
 
-        new_files = [f for f in uploaded_docs if f.name not in st.session_state.learned_doc_names]
+            if current_digest == digest:
+                st.session_state.reference_doc_statuses[name] = {
+                    "name": name,
+                    "status": "success",
+                    "chunk_count": sum(
+                        1
+                        for chunk in st.session_state.retriever.ref_chunks
+                        if str(chunk.get("source", "")) == name
+                    ),
+                    "error": "",
+                    "sha256": digest,
+                }
+            elif duplicate_owner and duplicate_owner != name:
+                st.session_state.reference_doc_statuses[name] = {
+                    "name": name,
+                    "status": "duplicate",
+                    "chunk_count": 0,
+                    "error": bt(
+                        f"内容与 {duplicate_owner} 相同，已跳过去重。",
+                        f"Same content as {duplicate_owner}; skipped as a duplicate.",
+                    ),
+                    "sha256": digest,
+                }
+            else:
+                files_to_process.append(uploaded_by_name[name])
+                known_hash_owners[digest] = name
+                existing_status = st.session_state.reference_doc_statuses.get(name) or {}
+                if existing_status.get("sha256") != digest:
+                    st.session_state.reference_doc_statuses[name] = {
+                        "name": name,
+                        "status": "pending",
+                        "chunk_count": 0,
+                        "error": "",
+                        "sha256": digest,
+                    }
         
-        if new_files:
-            if st.button("🧠 学习选中的资料", use_container_width=True):
-                with st.spinner("正在解析文档并提取知识点..."):
-                    count = st.session_state.retriever.add_uploaded_files(new_files)
-                    for f in new_files:
-                        st.session_state.learned_doc_names.add(f.name)
-                st.success(f"学习成功！新增 {len(new_files)} 份文档，提取了 {count} 条知识片段。")
+        if files_to_process:
+            if st.button(bt("🧠 学习资料", "🧠 Learn Documents"), use_container_width=True):
+                with st.spinner(bt("正在解析文档并提取知识点...", "Parsing documents and extracting knowledge...")):
+                    results = st.session_state.retriever.add_uploaded_files_detailed(files_to_process)
+                    successful_results = []
+                    failed_results = []
+                    for result in results:
+                        name = str(result.get("name") or "")
+                        result = dict(result)
+                        result["sha256"] = fingerprints_by_name.get(name, "")
+                        st.session_state.reference_doc_statuses[name] = result
+                        if result.get("status") == "success":
+                            successful_results.append(result)
+                            st.session_state.learned_doc_names.add(name)
+                            st.session_state.learned_doc_fingerprints[name] = fingerprints_by_name[name]
+                        else:
+                            failed_results.append(result)
+
+                    if successful_results:
+                        _commit_reference_fingerprint_change("reference documents changed")
+
+                if successful_results:
+                    chunk_count = sum(int(result.get("chunk_count") or 0) for result in successful_results)
+                    st.success(bt(
+                        f"成功学习 {len(successful_results)} 份文档，提取了 {chunk_count} 条知识片段。",
+                        f"Learned {len(successful_results)} document(s) and extracted {chunk_count} knowledge chunk(s).",
+                    ))
+                for result in failed_results:
+                    st.error(f"{result.get('name')}: {result.get('error') or bt('未提取到有效内容', 'No usable content was extracted')}")
         else:
-            st.caption("✅ 当前上传的文件已全部在知识库中。")
+            st.caption(bt("✅ 当前上传的文件已全部在知识库中。", "✅ All uploaded files are already in the knowledge base."))
+
+        current_statuses = [
+            st.session_state.reference_doc_statuses.get(str(item.get("name") or ""), {})
+            for item in doc_manifest
+        ]
+        status_labels = {
+            "success": bt("成功", "Success"),
+            "failed": bt("失败", "Failed"),
+            "empty": bt("空文档", "Empty"),
+            "duplicate": bt("重复", "Duplicate"),
+            "pending": bt("待处理", "Pending"),
+        }
+        status_rows = [
+            {
+                bt("文件", "File"): status.get("name", ""),
+                bt("状态", "Status"): status_labels.get(status.get("status"), status.get("status", "")),
+                bt("知识片段", "Chunks"): int(status.get("chunk_count") or 0),
+                bt("说明", "Details"): status.get("error", ""),
+            }
+            for status in current_statuses
+            if status
+        ]
+        if status_rows:
+            st.dataframe(pd.DataFrame(status_rows), use_container_width=True, hide_index=True)
 
     if 'learned_doc_names' in st.session_state and st.session_state.learned_doc_names:
-        st.markdown("**已加载的外部资料：**")
-        for name in st.session_state.learned_doc_names:
-            st.write(f"- 📄 {name}")
+        st.markdown(bt("**已加载的外部资料：**", "**Loaded external references:**"))
+        for name in sorted(st.session_state.learned_doc_names):
+            label_col, delete_col = st.columns([5, 1])
+            label_col.write(f"- 📄 {name}")
+            if delete_col.button(bt("删除", "Delete"), key=f"delete_reference_{stable_fingerprint(name)[:12]}"):
+                removed, error = st.session_state.retriever.remove_document(name)
+                if removed:
+                    st.session_state.learned_doc_names.discard(name)
+                    st.session_state.learned_doc_fingerprints.pop(name, None)
+                    st.session_state.reference_doc_statuses.pop(name, None)
+                    _commit_reference_fingerprint_change("reference document removed")
+                    st.rerun()
+                else:
+                    st.error(f"{name}: {error}")
+
+        if st.button(bt("重建参考资料索引", "Rebuild Reference Index"), use_container_width=True):
+            rebuilt, error = st.session_state.retriever.rebuild_index()
+            if rebuilt:
+                st.success(bt("参考资料索引已重建。", "Reference index rebuilt."))
+            else:
+                st.error(bt(f"索引重建失败：{error}", f"Index rebuild failed: {error}"))
+
+
+def _replace_agent_file_names(agent, names: list[str]) -> None:
+    agent.file_names = list(names)
+
+
+def _commit_loaded_dataset(
+    agent,
+    *,
+    df: pd.DataFrame,
+    dfs,
+    manifest: list[dict[str, object]],
+    source: str,
+    combine_mode: str = "vertical",
+) -> bool:
+    manifest_fingerprint = file_manifest_fingerprint(manifest, combine_mode=combine_mode)
+    dataset_fingerprint = stable_fingerprint(
+        manifest_fingerprint,
+        dataframe_fingerprint(df),
+    )
+    changed = commit_dataset_fingerprint(st.session_state, dataset_fingerprint)
+
+    agent.add_df(df)
+    agent.save_dfs(dfs)
+    _replace_agent_file_names(
+        agent,
+        [str(item.get("source") or item.get("name") or "") for item in manifest],
+    )
+    st.session_state.data_file_manifest = manifest
+    st.session_state.data_file_manifest_fingerprint = manifest_fingerprint
+    st.session_state.data_file_snapshot_fingerprint = file_manifest_fingerprint(
+        manifest,
+        combine_mode="snapshot",
+    )
+    st.session_state.data_source_kind = source
+    st.session_state.data_combine_mode = combine_mode
+    return changed
+
+
+def _clear_loaded_dataset(agent) -> None:
+    commit_dataset_fingerprint(st.session_state, "")
+    agent.add_df(None)
+    agent.save_dfs(None)
+    _replace_agent_file_names(agent, [])
+    for key in (
+        "data_file_manifest",
+        "data_file_manifest_fingerprint",
+        "data_file_snapshot_fingerprint",
+        "data_source_kind",
+        "data_combine_mode",
+    ):
+        st.session_state.pop(key, None)
 
 def loading_data_file(agent):
     """ """
     st.info(
-        "💡 提示：\n"
-        "1. 支持一次上传多个数据文件\n"
-        "2. 自动使用大模型分析并处理数据\n"
-        "3. 支持多种格式的文件类型上传\n"
+        bt(
+            "💡 提示：\n"
+            "1. 自动使用大模型分析并处理数据\n"
+            "2. 支持多种格式的文件类型上传\n",
+            "💡 Tip:\n"
+            "1. Automatically analyze and process data with the LLM\n"
+            "2. Supports multiple file formats\n",
+        )
     )
 
-    selected_index = sac.tabs([
-        sac.TabsItem(label='本地上传'),
-        sac.TabsItem(label='路径导入'),
-    ], color='#5980AE',)
+    local_upload_tab = bt("本地上传", "Local Upload")
+    path_import_tab = bt("路径导入", "Path Import")
+    public_deployment = os.getenv("AUTOSTAT_PUBLIC_DEPLOYMENT", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    selected_index = (
+        local_upload_tab
+        if public_deployment
+        else sac.tabs([
+            sac.TabsItem(label=local_upload_tab),
+            sac.TabsItem(label=path_import_tab),
+        ], color='#5980AE',)
+    )
 
-    if selected_index == "本地上传":
+    if selected_index == local_upload_tab:
+        uploader_generation = int(st.session_state.get("data_file_uploader_generation", 0))
         uploaded_files = st.file_uploader(
-            "选择新文件",
+            bt("选择新文件", "Select New Files"),
+            type=["csv", "data", "txt", "xlsx", "xls", "mat", "arff", "tsv", "dat", "tst", "names"],
             accept_multiple_files=True,
-            help="拖拽或点击上传多个文件",
+            help=bt("拖拽或点击上传多个文件", "Drag or click to upload multiple files"),
+            key=f"data_file_uploader_{uploader_generation}",
         )
 
+        persisted_manifest = st.session_state.get("data_file_manifest") or []
+        persisted_names = [
+            str(item.get("source") or item.get("name") or "").strip()
+            for item in persisted_manifest
+            if isinstance(item, dict)
+        ]
+        persisted_names = [name for name in persisted_names if name]
+        if (
+            not uploaded_files
+            and persisted_names
+            and st.session_state.get("data_source_kind") == "upload"
+            and agent.load_df() is not None
+        ):
+            loaded_col, clear_col = st.columns([6, 1])
+            with loaded_col:
+                st.success(
+                    bt("当前已加载数据文件：", "Currently loaded data files: ")
+                    + ", ".join(persisted_names)
+                )
+            with clear_col:
+                if st.button(
+                    bt("删除", "Remove"),
+                    key="clear_loaded_dataset",
+                    use_container_width=True,
+                ):
+                    _clear_loaded_dataset(agent)
+                    st.session_state.data_file_uploader_generation = uploader_generation + 1
+                    st.rerun()
+
         if uploaded_files:
-            current_memory_file_name = agent.load_file_name()
-            new_files = [f for f in uploaded_files if f.name not in current_memory_file_name]
-            if new_files:
+            manifest = build_file_manifest(uploaded_files)
+            snapshot_fingerprint = file_manifest_fingerprint(manifest, combine_mode="snapshot")
+            if snapshot_fingerprint != st.session_state.get("data_file_snapshot_fingerprint"):
                 try:
-                    with st.spinner("正在处理数据..."):
-                        df, dfs = process_complex_data(new_files, agent)
+                    with st.spinner(bt("正在处理数据...", "Processing data...")):
+                        df, dfs = process_complex_data(uploaded_files, agent)
                     if df is not None:
-                        agent.add_df(df)
-                        agent.save_dfs(dfs)
-                        for f in new_files:
-                            agent.save_file_name(f.name)
+                        _commit_loaded_dataset(
+                            agent,
+                            df=df,
+                            dfs=dfs,
+                            manifest=manifest,
+                            source="upload",
+                        )
                         st.rerun()
                 except Exception as err:
-                    st.error(f"导入失败：{err}")
+                    st.error(bt(f"导入失败：{err}", f"Import failed: {err}"))
+        # ``st.file_uploader`` is reset when this multipage app navigates away
+        # from the import page. An empty widget value therefore does not mean
+        # that the user requested deletion of the imported dataset.
 
-    elif selected_index == "路径导入":
+    elif not public_deployment and selected_index == path_import_tab:
         raw_paths = st.text_area(
-            "从路径导入数据 (每行一个文件路径)",
+            bt("从路径导入数据 (每行一个文件路径)", "Import Data From Paths (one file path per line)"),
             placeholder="C:\\data\\iris.names\nC:\\data\\iris.data",
             height=100
         )
 
-        if st.button("从路径加载文件", use_container_width=True):
+        if st.button(bt("从路径加载文件", "Load Files From Paths"), use_container_width=True):
             if raw_paths:
                 path_list = [p.strip().strip("'\"") for p in raw_paths.strip().split('\n') if p.strip()]
                 valid_paths = [p for p in path_list if os.path.exists(p)]
                 invalid_paths = [p for p in path_list if not os.path.exists(p)]
 
                 if invalid_paths:
-                    st.warning(f"路径不存在，已跳过：\n- " + "\n- ".join(invalid_paths))
+                    st.warning(bt("路径不存在，已跳过：\n- ", "Paths not found and skipped:\n- ") + "\n- ".join(invalid_paths))
 
                 if not valid_paths:
-                    st.error("未找到任何有效的本地文件路径。")
+                    st.error(bt("未找到任何有效的本地文件路径。", "No valid local file paths were found."))
                 else:
-                    current_memory_file_name = agent.load_file_name()
-                    new_paths = [p for p in valid_paths if p not in current_memory_file_name]
-
-                    if not new_paths:
-                        st.info("所有指定的路径文件均已加载。")
+                    files_to_process = [PathFileWrapper(p) for p in valid_paths]
+                    manifest = build_file_manifest(files_to_process)
+                    snapshot_fingerprint = file_manifest_fingerprint(manifest, combine_mode="snapshot")
+                    if snapshot_fingerprint == st.session_state.get("data_file_snapshot_fingerprint"):
+                        st.info(bt("当前路径文件快照已加载。", "The current path-file snapshot is already loaded."))
                     else:
-                        files_to_process = [PathFileWrapper(p) for p in new_paths]
                         try:
-                            with st.spinner("正在处理数据..."):
+                            with st.spinner(bt("正在处理数据...", "Processing data...")):
                                 df, dfs = process_complex_data(files_to_process, agent)
                             if df is not None:
-                                agent.add_df(df)
-                                agent.save_dfs(dfs)
-                                for p in new_paths:
-                                    agent.save_file_name(p)
+                                _commit_loaded_dataset(
+                                    agent,
+                                    df=df,
+                                    dfs=dfs,
+                                    manifest=manifest,
+                                    source="path",
+                                )
                                 st.rerun()
                         except Exception as err:
-                            st.error(f"本地文件读取失败：{err}")
+                            st.error(bt(f"本地文件读取失败：{err}", f"Local file read failed: {err}"))
     
     dfs = agent.load_dfs()
     if dfs is not None and len(dfs) >= 2:
-        load_concat_file(dfs, agent)
+        combined_df, combine_mode = load_concat_file(dfs, agent)
+        manifest = st.session_state.get("data_file_manifest") or []
+        if combined_df is not None and manifest:
+            _commit_loaded_dataset(
+                agent,
+                df=combined_df,
+                dfs=dfs,
+                manifest=manifest,
+                source=str(st.session_state.get("data_source_kind") or "upload"),
+                combine_mode=combine_mode,
+            )
 
 def loading_basic_info(agent):
     """ """
@@ -249,27 +537,29 @@ def loading_basic_info(agent):
         r, c = df.shape
         missing = int(df.isnull().sum().sum())
         col1, col2, col3 = st.columns(3)
-        col1.metric("行数", r)
-        col2.metric("列数", c)
-        col3.metric("缺失值总数", missing)
+        col1.metric(bt("行数", "Rows"), r)
+        col2.metric(bt("列数", "Columns"), c)
+        col3.metric(bt("缺失值总数", "Missing Values"), missing)
 
         dtype_info = pd.DataFrame({
-            "列名": df.columns,
-            "类型": df.dtypes.astype(str),
-            "非空": df.count().values,
-            "缺失%": (df.isnull().mean() * 100).round(2).values,
+            bt("列名", "Column"): df.columns,
+            bt("类型", "Type"): df.dtypes.astype(str),
+            bt("非空", "Non-null"): df.count().values,
+            bt("缺失%", "Missing %"): (df.isnull().mean() * 100).round(2).values,
         }).reset_index(drop=True)
 
+        dtype_tab = bt("数据类型概览", "Data Type Overview")
+        preview_tab = bt("数据预览", "Data Preview")
         selected_index = sac.tabs([
-            sac.TabsItem(label='数据类型概览'),
-            sac.TabsItem(label='数据预览'),
+            sac.TabsItem(label=dtype_tab),
+            sac.TabsItem(label=preview_tab),
         ],color='#5980AE',)
 
-        if selected_index == "数据类型概览":
+        if selected_index == dtype_tab:
             st.dataframe(dtype_info, use_container_width=True)
-        elif selected_index == "数据预览":
-            if st.button("🎲 随机抽样"):
-                display_df = df.sample(10)
+        elif selected_index == preview_tab:
+            if st.button(bt("🎲 随机抽样", "🎲 Random Sample")):
+                display_df = df.sample(min(10, len(df)))
                 st.dataframe(display_df, use_container_width=True)
             else:
                 st.dataframe(df.head(10), use_container_width=True)
@@ -280,7 +570,10 @@ def _extract_loading_display_text(workflow_result: dict[str, Any]) -> str:
     if desc:
         return desc
 
-    return "工作流已运行，但 summary_1.desc 为空。"
+    return bt(
+        "工作流已运行，但 summary_1.desc 为空。",
+        "The workflow has run, but summary_1.desc is empty.",
+    )
 
 
 def _has_loading_result(agent) -> bool:
@@ -304,8 +597,23 @@ def _has_loading_result(agent) -> bool:
     return False
 
 
-def _request_loading_analysis(agent, df: pd.DataFrame, user_input: str) -> None:
-    with st.spinner("正在解析数据，请耐心等待..."):
+def _publish_loading_suggestion(agent, state: dict[str, Any]) -> None:
+    workflow_result = state.get("pending_payload")
+    if not isinstance(workflow_result, dict) or not state.get("active_suggestion"):
+        return
+    _save_loading_workflow_outputs(agent, workflow_result)
+    agent.finish_auto()
+
+
+def _request_loading_analysis(
+    agent,
+    df: pd.DataFrame,
+    user_input: str,
+    *,
+    auto: bool,
+) -> None:
+    state = get_suggestion_state(st.session_state, "loading")
+    with st.spinner(bt("正在解析数据，请耐心等待...", "Analyzing the data. Please wait...")):
         workflow_result = call_loading_workflow(
             df,
             user_input=user_input,
@@ -315,10 +623,127 @@ def _request_loading_analysis(agent, df: pd.DataFrame, user_input: str) -> None:
     if not workflow_result:
         return
 
-    agent.finish_auto()
-    _save_loading_workflow_outputs(agent, workflow_result)
-    agent.add_memory({"role": "assistant", "content": workflow_result})
+    state["pending_payload"] = workflow_result
+    replace_active_suggestion(state, _extract_loading_display_text(workflow_result))
+    _publish_loading_suggestion(agent, state)
     st.rerun()
+
+
+def _revise_loading_suggestion(agent, revision_instruction: str) -> None:
+    from core.report_language import app_language_instruction
+    from workflows.loading import revise_loading_result
+
+    state = get_suggestion_state(st.session_state, "loading")
+    current_result = state.get("pending_payload")
+    if not isinstance(current_result, dict):
+        return
+    with st.spinner(bt("正在根据修改意见更新数据理解...", "Revising the data interpretation...")):
+        revised_result = revise_loading_result(
+            current_result=current_result,
+            original_requirements=base_requirements_text(state),
+            revision_instruction=revision_instruction,
+            language_instruction=app_language_instruction(get_language()),
+        )
+    if state.get("confirmed_version") is not None:
+        invalidate_from(
+            st.session_state,
+            "loading",
+            include_source=True,
+            reason="confirmed data interpretation is being revised",
+        )
+    state["pending_payload"] = revised_result
+    replace_active_suggestion(
+        state,
+        _extract_loading_display_text(revised_result),
+        revision_instruction=revision_instruction,
+    )
+    _publish_loading_suggestion(agent, state)
+    st.rerun()
+
+
+def _render_auto_planning_status() -> None:
+    if not st.session_state.get("auto_planning"):
+        return
+
+    status_text = bt("正在规划自动分析流程，请耐心等待。", "Planning the automated analysis flow. Please wait.")
+    st.markdown(
+        """
+        <style>
+        .auto-planning-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.55rem;
+            margin: 0.1rem 0 0.2rem 0;
+            padding: 0.5rem 0.75rem;
+            color: #24527a;
+            background: #f3f8fc;
+            border: 1px solid #d9e8f4;
+            border-radius: 8px;
+            font-weight: 600;
+            line-height: 1.35;
+            scroll-margin-top: 1rem;
+        }
+        .auto-planning-dot {
+            width: 0.5rem;
+            height: 0.5rem;
+            border-radius: 999px;
+            background: #5980ae;
+            animation: autoPlanningPulse 1.1s ease-in-out infinite;
+            flex: 0 0 auto;
+        }
+        @keyframes autoPlanningPulse {
+            0%, 100% { opacity: 0.35; transform: scale(0.85); }
+            50% { opacity: 1; transform: scale(1); }
+        }
+        </style>
+        <div id="auto-planning-status" class="auto-planning-status">
+            <span class="auto-planning-dot"></span>
+        """
+        f"            <span>{status_text}</span>\n"
+        """
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.components.v1.html(
+        """
+        <script>
+        (() => {
+          const parentWindow = window.parent;
+          const doc = parentWindow.document;
+          const frame = window.frameElement;
+          if (frame) {
+            const host = frame.closest('[data-testid="stElementContainer"]');
+            [frame, host].filter(Boolean).forEach((element) => {
+              element.style.setProperty("height", "0", "important");
+              element.style.setProperty("min-height", "0", "important");
+              element.style.setProperty("max-height", "0", "important");
+              element.style.setProperty("margin", "0", "important");
+              element.style.setProperty("padding", "0", "important");
+              element.style.setProperty("overflow", "hidden", "important");
+            });
+          }
+
+          let attempts = 0;
+          function scrollToStatus() {
+            const status = doc.getElementById("auto-planning-status");
+            if (status) {
+              status.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+              return;
+            }
+
+            attempts += 1;
+            if (attempts < 20) {
+              parentWindow.setTimeout(scrollToStatus, 50);
+            }
+          }
+
+          parentWindow.requestAnimationFrame(scrollToStatus);
+        })();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def loading_chat(agent, auto=False) -> None:
@@ -326,46 +751,58 @@ def loading_chat(agent, auto=False) -> None:
     if df is None:
         return
 
+    state = get_suggestion_state(st.session_state, "loading")
+
     with st.chat_message("assistant"):
         st.write(
-            "我是 Autostat 数据分析助手，很高兴为您服务；\n\n"
-            "请先上传您的数据文件，上传完成后，您可以在下方和我对话，也可以直接点击按钮解析数据含义。"
+            bt(
+                "我是 Autostat 数据分析助手，很高兴为您服务；\n\n"
+                "请先上传您的数据文件，上传完成后，您可以在下方和我对话，也可以直接点击按钮解析数据含义。",
+                "I am the Autostat data analysis assistant. Glad to help.\n\n"
+                "Upload your data file first. After the upload finishes, you can chat below or click the button to analyze field meanings.",
+            )
         )
-        analyze_btn = st.button("🔍 解析含义")
+        analyze_btn = st.button(
+            bt("🔍 生成数据解析", "🔍 Generate Data Interpretation"),
+            disabled=bool(state.get("active_suggestion")),
+        )
 
-    chat_history = agent.load_memory()
-    for entry in chat_history:
+    for entry in visible_messages(state):
         role = entry["role"]
         content = entry["content"]
-
         with st.chat_message(role):
-            if isinstance(content, dict) and "summary_1" in content:
-                st.write(_extract_loading_display_text(content))
-            else:
-                st.write(str(content))
+            st.write(str(content))
 
-    already_generated = any(
-        entry["role"] == "assistant" and isinstance(entry.get("content"), dict)
-        for entry in chat_history
-    )
+    pending_revision = take_pending_revision(state)
+    if pending_revision:
+        _revise_loading_suggestion(agent, pending_revision)
+        return
+
+    already_generated = bool(state.get("active_suggestion"))
 
     if auto and _has_loading_result(agent) and not agent.finish_auto_task:
         agent.finish_auto()
         st.rerun()
 
     if analyze_btn or (auto and not already_generated):
-        prompt_text = "请帮我解析数据含义"
-        st.chat_message("user").write(prompt_text)
-        agent.add_memory({"role": "user", "content": prompt_text})
-
-        _request_loading_analysis(agent, df, prompt_text)
+        prompt_text = bt("请帮我解析数据含义", "Please analyze the meaning of this dataset")
+        if not state.get("base_requirements"):
+            add_requirement(state, prompt_text)
+        request_text = base_requirements_text(state, prompt_text)
+        _request_loading_analysis(agent, df, request_text, auto=auto)
         return
 
-    user_input = st.chat_input("请输入需求，例如“帮我分析 x 列”")
+    user_input = st.chat_input(bt(
+        "请输入要求；建议生成后可在这里继续提出修改意见",
+        "Enter requirements; after generation, use this box to request revisions",
+    ))
     if user_input:
-        st.chat_message("user").write(user_input)
-        agent.add_memory({"role": "user", "content": user_input})
-        _request_loading_analysis(agent, df, user_input)
+        if state.get("active_suggestion"):
+            queue_revision_request(state, user_input)
+            st.rerun()
+        else:
+            add_requirement(state, user_input)
+            st.rerun()
         return
 
 
@@ -376,28 +813,32 @@ if __name__ == "__main__":
 
     if st.session_state.auto_mode == True:
         if planner.loading_auto and _has_loading_result(agent):
-            planner.finish_loading_auto()
-            st.switch_page(page_file("preprocessing", "preprocessing_render.py"))
+            next_page = planner.finish_loading_auto()
+            if next_page is not None:
+                st.switch_page(next_page)
+            st.session_state.auto_mode = False
+            st.rerun()
 
     c1,c2 = st.columns(2)
     with c1:
-        st.title("数据导入")
+        st.title(bt("数据导入", "Data Import"))
+        _render_auto_planning_status()
     with c2:
         st.write("")  
         st.write("")  
         sac.buttons([
-            sac.ButtonsItem(label='Github', icon='github', href='https://github.com/Jiaye-s-Group/AutoSTAT'),
-            sac.ButtonsItem(label='Doc', icon=sac.BsIcon(name='bi bi-file-earmark-post-fill', size=16), href='https://autostat.cc/docs/'),
-            sac.ButtonsItem(label='Web', icon=sac.BsIcon(name='bi bi-globe', size=16), href='https://autostat.cc/'),
+            # sac.ButtonsItem(label='Github', icon='github', href='https://github.com/Jiaye-s-Group/AutoSTAT'),
+            # sac.ButtonsItem(label='Doc', icon=sac.BsIcon(name='bi bi-file-earmark-post-fill', size=16), href='https://autostat.cc/docs/'),
+            sac.ButtonsItem(label='Web', icon=sac.BsIcon(name='bi bi-globe', size=16), href='https://autostat.cc/docs/examples.html'),
         ], align='end', color='dark', variant='filled', index=None)
     st.markdown("---")
 
     c = st.columns(3)
-    with c[0].expander('数据上传', True):
+    with c[0].expander(bt("数据上传", "Data Upload"), True):
         loading_data_file(agent)
-    with c[0].expander('数据展示', True):
+    with c[0].expander(bt("数据展示", "Data Display"), True):
         loading_basic_info(agent)
-    with c[1].expander('参考资料pdf/docx上传', True):
+    with c[1].expander(bt("参考资料上传", "Reference Material Upload"), True):
         loading_reference_docs(agent)
-    with c[2].expander('数据建议', True):
+    with c[2].expander(bt("数据解析", "Data Interpretation"), True):
         loading_chat(agent, auto)

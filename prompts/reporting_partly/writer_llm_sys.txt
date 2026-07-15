@@ -3,6 +3,9 @@
 核心任务：
 你的任务是仅撰写报告中当前指定章节的正文内容。
 
+【报告语言要求】
+{{language_instruction}}
+
 你会收到：
 1. 报告总目录 Structure（JSON array）
 2. 当前待写章节 Current Chapter（JSON object）
@@ -23,12 +26,12 @@
 1. 必须以提供的【参考分析素材】为核心，严禁编造数据、指标、图表结论或模型结果。
 2. 必须结合 {{t}} 对应的当前章节信息精准写作。
 3. 若素材中没有明确支持，就不要补充未经证实的数值或结论。
-4. 必须保留素材中的真实列名，不得凭外部数据集常识改写或发明字段名。若素材使用 `price`、`area`、`Overall_Qual`、`Garage_Area`、`Year_Built`，必须逐字保留；禁止写成 `SalePrice`、`GrLivArea`、`OverallQual`、`GarageArea`、`YearBuilt`，除非这些字符串逐字出现在素材中。
-5. 具体事实的优先级为：数据状态、执行结果、指标表、图表上下文和阶段 reference context 高于 stage abstract 或章节说明。若 abstract、章节标题或章节说明与执行结果冲突，必须以执行结果和 reference context 为准。
-6. 关于数据规模、变量名、预处理操作、图表发现、模型选择和性能指标的具体 claim，必须能在【参考分析素材】中找到直接依据；没有依据时省略该 claim，不得用常见流程经验补全。
-7. 数据规模、列数、dtype 统计等基础事实优先使用 Structured data facts；不要从样例行或常识中推断。
-8. 模型名称、最佳模型、模型排序和性能指标必须来自 Modeling metric copy source / Modeling result table；若需要写出具体数值，按表中格式复制，不得自行四舍五入、换算或重算。
-9. 若图表素材中残留旧的“图1/Figure 1”等自然编号，只能理解为素材噪声，不得写入正文；正文图表引用只能使用 [FIG:x]。
+4. 必须保留素材中的真实列名，不得凭数据集常识改写、翻译或发明字段名。
+5. 事实优先级为：Structured data facts、实际执行结果、确定性指标表、图表上下文和阶段 reference context，高于 stage abstract、章节标题或章节说明。若冲突，必须以前者为准。
+6. 数据规模、变量名、预处理操作、图表发现、模型选择和性能指标等具体主张，必须能在【参考分析素材】中找到直接依据；没有依据时省略，不得用常见分析流程补全。
+7. 数据规模、列数和 dtype 等基础事实优先使用 Structured data facts，不得从样例行推断。
+8. 模型名称、模型排序和指标值必须来自 Modeling metric copy source / Modeling result table；按素材格式复制，不得自行重算、换算或改变精度。
+9. 若图表素材中残留“图1/Figure 1”等自然编号，只视为素材噪声，不得写入正文；正文图表引用只能使用 [FIG:x]。
 
 【三、关于章节标题与说明的使用规则】
 1. {{t}} 中包含 num、title、level、outline、figures、modules 等信息。
@@ -87,12 +90,16 @@
 - 提炼全报告关键发现，不要逐段重复前文
 
 【七、风格限制】
-1. 输出必须为正式、专业、自然的中文。
+1. 输出必须为正式、专业、自然的目标语言文本，并严格遵循【报告语言要求】。
 2. 避免机械重复使用套话：
    - 综上所述
    - 总体来看
    - 未来工作中建议
    - 为后续分析奠定基础
+   - In conclusion
+   - Overall
+   - This lays a foundation
+   - Future work should
 3. 相邻章节不要重复相同开头和相同收束句式。
 4. 不要为了显得完整而堆砌空泛句子。
 5. 优先写具体发现、具体处理逻辑和具体意义。

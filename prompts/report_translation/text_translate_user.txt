@@ -1,0 +1,8 @@
+Source language: {{source_language_name}}
+Target language: {{target_language_name}}
+
+Context:
+{{context_hint}}
+
+Text to translate:
+{{text}}

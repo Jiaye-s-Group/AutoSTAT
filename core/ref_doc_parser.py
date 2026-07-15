@@ -1,4 +1,12 @@
-"""Parse uploaded reference documents into retrievable text chunks."""
+"""
+参考资料文档解析器。
+
+支持 PDF、DOCX、TXT 三种格式。
+解析后将文档内容按段落拆分为 chunk 列表，供 RefDocRetriever 检索。
+
+公开 API：
+    parse_and_chunk(files, chunk_size=800, overlap=100) -> list[dict]
+"""
 from __future__ import annotations
 
 import io
@@ -6,12 +14,14 @@ import re
 from typing import Any, BinaryIO
 
 
-# Text extraction.
+# ---- 文本提取 ----
 
 
 def _extract_pdf_text(file_obj: BinaryIO) -> str:
-    """Extract PDF text, preferring PyMuPDF with pdfplumber as fallback."""
+    """从 PDF 文件提取文本。优先 PyMuPDF，降级 pdfplumber。"""
     raw = file_obj.read()
+    errors: list[str] = []
+    # 尝试 PyMuPDF (fitz)
     try:
         import fitz  # type: ignore
 
@@ -22,10 +32,11 @@ def _extract_pdf_text(file_obj: BinaryIO) -> str:
         if text.strip():
             return text
     except ImportError:
-        pass
-    except Exception:
-        pass
+        errors.append("PyMuPDF is not installed")
+    except Exception as exc:
+        errors.append(f"PyMuPDF: {exc}")
 
+    # 降级 pdfplumber
     try:
         import pdfplumber  # type: ignore
 
@@ -35,29 +46,30 @@ def _extract_pdf_text(file_obj: BinaryIO) -> str:
         if text.strip():
             return text
     except ImportError:
-        pass
-    except Exception:
-        pass
+        errors.append("pdfplumber is not installed")
+    except Exception as exc:
+        errors.append(f"pdfplumber: {exc}")
 
-    return ""
+    detail = "; ".join(errors) if errors else "no extractable text"
+    raise ValueError(f"PDF parsing failed ({detail})")
 
 
 def _extract_docx_text(file_obj: BinaryIO) -> str:
-    """Extract text from a DOCX file."""
+    """从 DOCX 文件提取文本。"""
     try:
         from docx import Document  # type: ignore
 
         doc = Document(file_obj)
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         return "\n\n".join(paragraphs)
-    except ImportError:
-        return ""
-    except Exception:
-        return ""
+    except ImportError as exc:
+        raise RuntimeError("python-docx is not installed") from exc
+    except Exception as exc:
+        raise ValueError(f"DOCX parsing failed ({exc})") from exc
 
 
 def _extract_txt_text(file_obj: BinaryIO) -> str:
-    """Extract text from a plain-text file."""
+    """从 TXT 文件提取文本。"""
     raw = file_obj.read()
     for enc in ("utf-8", "gbk", "gb2312", "latin-1"):
         try:
@@ -67,11 +79,11 @@ def _extract_txt_text(file_obj: BinaryIO) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-# Chunking.
+# ---- 分块 ----
 
 
 def _split_paragraphs(text: str) -> list[str]:
-    """Split text into non-empty paragraphs."""
+    """按空行 / 换行分段，过滤空段落。"""
     paragraphs = re.split(r"\n{2,}", text)
     return [p.strip() for p in paragraphs if p.strip()]
 
@@ -79,7 +91,11 @@ def _split_paragraphs(text: str) -> list[str]:
 def _sliding_window_chunks(
     paragraphs: list[str], chunk_size: int, overlap: int
 ) -> list[str]:
-    """Merge paragraphs and split them into overlapping character windows."""
+    """
+    将段落列表合并后，按字符数滑窗切分。
+    - chunk_size: 每个 chunk 的目标字符数
+    - overlap: 相邻 chunk 的重叠字符数
+    """
     if not paragraphs:
         return []
 
@@ -93,8 +109,9 @@ def _sliding_window_chunks(
         end = start + chunk_size
         chunk = full_text[start:end]
 
+        # 尝试在自然分割点（句号、换行）截断
         if end < len(full_text):
-            # Prefer ending chunks at a sentence or paragraph boundary.
+            # 寻找最后一个自然分割点
             for sep in ["\n\n", "\n", "。", ".", "；", ";", "！", "!"]:
                 last = chunk.rfind(sep)
                 if last > chunk_size // 2:
@@ -110,7 +127,7 @@ def _sliding_window_chunks(
     return [c for c in chunks if c]
 
 
-# Public parser.
+# ---- 主函数 ----
 
 
 def parse_and_chunk(
@@ -118,39 +135,103 @@ def parse_and_chunk(
     chunk_size: int = 800,
     overlap: int = 100,
 ) -> list[dict[str, Any]]:
-    """Parse uploaded files into chunks for reference-document retrieval."""
-    all_chunks: list[dict[str, Any]] = []
+    """
+    解析多个上传文件，返回 chunk 列表。
 
-    for f in files:
-        name = getattr(f, "name", str(f))
-        # Reset the file pointer before reading uploaded files.
-        if hasattr(f, "seek"):
-            f.seek(0)
+    Parameters
+    ----------
+    files : list
+        Streamlit UploadedFile 对象列表（需具有 .name 和 .read() 方法）
+    chunk_size : int
+        每个 chunk 的目标字符数
+    overlap : int
+        相邻 chunk 的重叠字符数
 
-        lower_name = name.lower()
-        if lower_name.endswith(".pdf"):
-            text = _extract_pdf_text(f)
-        elif lower_name.endswith(".docx"):
-            text = _extract_docx_text(f)
-        elif lower_name.endswith((".txt", ".names", ".md")):
-            text = _extract_txt_text(f)
-        else:
-            # Treat unknown file types as plain text when possible.
-            text = _extract_txt_text(f)
+    Returns
+    -------
+    list[dict]
+        [{"text": "...", "source": "filename.pdf", "chunk_id": "filename.pdf::0"}, ...]
+    """
+    return [
+        chunk
+        for result in parse_and_chunk_results(files, chunk_size=chunk_size, overlap=overlap)
+        if result["status"] == "success"
+        for chunk in result["chunks"]
+    ]
 
-        if not text.strip():
-            continue
 
-        paragraphs = _split_paragraphs(text)
-        chunks = _sliding_window_chunks(paragraphs, chunk_size, overlap)
+def parse_and_chunk_results(
+    files: list[Any],
+    chunk_size: int = 800,
+    overlap: int = 100,
+) -> list[dict[str, Any]]:
+    """逐文件解析并返回明确的成功、空文档或失败状态。"""
+    results: list[dict[str, Any]] = []
 
-        for i, chunk_text in enumerate(chunks):
-            all_chunks.append(
+    for file_obj in files:
+        name = str(getattr(file_obj, "name", str(file_obj)))
+        try:
+            if hasattr(file_obj, "seek"):
+                file_obj.seek(0)
+
+            lower_name = name.lower()
+            if lower_name.endswith(".pdf"):
+                text = _extract_pdf_text(file_obj)
+            elif lower_name.endswith(".docx"):
+                text = _extract_docx_text(file_obj)
+            else:
+                text = _extract_txt_text(file_obj)
+
+            if not text.strip():
+                results.append({
+                    "name": name,
+                    "status": "empty",
+                    "chunks": [],
+                    "chunk_count": 0,
+                    "error": "No usable text was extracted.",
+                })
+                continue
+
+            paragraphs = _split_paragraphs(text)
+            chunk_texts = _sliding_window_chunks(paragraphs, chunk_size, overlap)
+            chunks = [
                 {
                     "text": chunk_text,
                     "source": name,
-                    "chunk_id": f"{name}::{i}",
+                    "chunk_id": f"{name}::{index}",
                 }
-            )
+                for index, chunk_text in enumerate(chunk_texts)
+            ]
+            if not chunks:
+                results.append({
+                    "name": name,
+                    "status": "empty",
+                    "chunks": [],
+                    "chunk_count": 0,
+                    "error": "The document contained no chunkable text.",
+                })
+                continue
 
-    return all_chunks
+            results.append({
+                "name": name,
+                "status": "success",
+                "chunks": chunks,
+                "chunk_count": len(chunks),
+                "error": "",
+            })
+        except Exception as exc:
+            results.append({
+                "name": name,
+                "status": "failed",
+                "chunks": [],
+                "chunk_count": 0,
+                "error": str(exc),
+            })
+        finally:
+            if hasattr(file_obj, "seek"):
+                try:
+                    file_obj.seek(0)
+                except Exception:
+                    pass
+
+    return results

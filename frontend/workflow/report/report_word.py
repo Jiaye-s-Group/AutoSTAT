@@ -1,5 +1,6 @@
 import streamlit as st
 
+from utils.i18n import bt
 from workflow.report.report_content_utils import (
     build_docx_from_html,
     build_docx_from_markdown,
@@ -25,7 +26,10 @@ def write_word(report_agent):
         if not markdown_text:
             markdown_text = extract_report_text(workflow_result)
         if not markdown_text:
-            st.error("报告工作流未返回可用于导出 Word 的内容。")
+            st.error(bt(
+                "报告工作流未返回可用于导出 Word 的内容。",
+                "The report workflow did not return content that can be exported as Word.",
+            ))
             return
         if html_content:
             try:
@@ -36,4 +40,4 @@ def write_word(report_agent):
             word_bytes = build_docx_from_markdown(markdown_text)
 
     report_agent.save_word(word_bytes)
-    st.success("Word 报告已生成。")
+    st.success(bt("Word 报告已生成。", "The Word report has been generated."))

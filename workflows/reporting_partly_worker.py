@@ -33,9 +33,19 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _configure_llm(llm_config: dict[str, Any]) -> None:
-    api_key = str(llm_config.get("api_key") or os.getenv("OPENAI_API_KEY") or "").strip()
-    base_url = str(llm_config.get("base_url") or os.getenv("OPENAI_BASE_URL") or "").strip()
-    model = str(llm_config.get("model") or os.getenv("OPENAI_MODEL") or "").strip()
+    api_key = str(llm_config.get("api_key") or "").strip()
+    base_url = str(llm_config.get("base_url") or "").strip()
+    model = str(llm_config.get("model") or "").strip()
+    api_key = api_key or str(os.getenv("OPENAI_API_KEY") or "").strip()
+    base_url = base_url or str(os.getenv("OPENAI_BASE_URL") or "").strip()
+    model = model or str(os.getenv("OPENAI_MODEL") or "").strip()
+
+    if not (api_key and base_url and model):
+        from core.llm_client import LLMClient
+
+        reason = "未配置 API Key、Base URL 或 Model。请在侧边栏保存配置后重试。"
+        LLMClient.block_context(reason)
+        raise RuntimeError(reason)
 
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
@@ -44,13 +54,14 @@ def _configure_llm(llm_config: dict[str, Any]) -> None:
     if model:
         os.environ["OPENAI_MODEL"] = model
 
-    if api_key and base_url and model:
-        from core.llm_client import LLMClient
+    from core.llm_client import LLMClient
 
-        LLMClient.reconfigure(base_url=base_url, api_key=api_key, model=model)
+    LLMClient.reconfigure(base_url=base_url, api_key=api_key, model=model)
 
 
-def _build_progress_callback(progress_path: Path | None) -> Callable[[dict[str, Any]], None] | None:
+def _build_progress_callback(
+    progress_path: Path | None,
+) -> Callable[[dict[str, Any]], None] | None:
     if progress_path is None:
         return None
 
@@ -76,14 +87,23 @@ def _run_reporting_partly(inputs: dict[str, Any], progress_path: Path | None = N
         add_preference=str(inputs.get("add_preference", "")),
         preference_select=str(inputs.get("preference_select") or inputs.get("preference_selected") or ""),
         ref_context=str(inputs.get("ref_context", "")),
-        stage_reference_contexts=inputs.get("stage_reference_contexts") if isinstance(inputs.get("stage_reference_contexts"), dict) else None,
+        stage_reference_contexts=(
+            inputs.get("stage_reference_contexts")
+            if isinstance(inputs.get("stage_reference_contexts"), dict)
+            else None
+        ),
+        respect_user_toc=bool(inputs.get("respect_user_toc")),
+        report_language=str(inputs.get("report_language", "zh")),
         progress_callback=_build_progress_callback(progress_path),
     )
 
 
 def main(argv: list[str]) -> int:
     if len(argv) not in (3, 4):
-        print("Usage: python -m workflows.reporting_partly_worker <input.json> <output.json> [progress.json]", file=sys.stderr)
+        print(
+            "Usage: python -m workflows.reporting_partly_worker <input.json> <output.json> [progress.json]",
+            file=sys.stderr,
+        )
         return 2
 
     input_path = Path(argv[1])

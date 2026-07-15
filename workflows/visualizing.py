@@ -4,7 +4,6 @@ Visualizing workflow local implementation.
 
 from __future__ import annotations
 
-import base64
 import json
 import math
 import os
@@ -14,11 +13,21 @@ import subprocess
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import ContextVar
 from typing import Any
 
-from core.llm_client import chat, chat_multimodal
+from core.llm_client import chat, chat_code, chat_multimodal, submit_with_context
+from core.code_runtime_profile import build_code_runtime_constraints
 from core.prompt_template import render_file
 from core.visualization_code_sanitizer import sanitize_visualization_code
+from core.suggestion_revision import normalize_suggestion_output, revise_suggestion
+from core.report_language import (
+    app_language_instruction,
+    app_language_name,
+    app_language_ref_context_empty,
+    is_english_language,
+    normalize_app_language,
+)
 from core.workflow_runner import to_str
 from workflows._plugins import (
     desc_fig_prompt,
@@ -47,7 +56,11 @@ DISABLE_FIGURE_IMAGES_AFTER_TIMEOUT = (
     os.getenv("AUTOSTAT_DISABLE_FIGURE_IMAGES_AFTER_TIMEOUT", "1").strip().lower()
     not in {"0", "false", "no", "off"}
 )
-_FIGURE_IMAGE_RENDER_DISABLED = False
+FIGURE_IMAGE_RENDER_STATE_SESSION_KEY = "_figure_image_render_state"
+_figure_image_render_state: ContextVar[dict[str, bool] | None] = ContextVar(
+    "autostat_figure_image_render_state",
+    default=None,
+)
 _PLOTLY_IMAGE_RENDER_SCRIPT = r"""
 import base64
 import sys
@@ -66,6 +79,25 @@ image_bytes = fig_obj.to_image(
 )
 sys.stdout.write(base64.b64encode(image_bytes).decode("ascii"))
 """
+
+
+def bind_figure_image_render_state(
+    state: dict[str, bool] | None = None,
+) -> dict[str, bool]:
+    """Bind image-render timeout state to the current Streamlit session context."""
+    bound_state = state if isinstance(state, dict) else {}
+    bound_state["disabled"] = bool(bound_state.get("disabled", False))
+    _figure_image_render_state.set(bound_state)
+    return bound_state
+
+
+def _get_figure_image_render_state() -> dict[str, bool]:
+    state = _figure_image_render_state.get()
+    if state is None:
+        state = bind_figure_image_render_state()
+    return state
+
+
 VAGUE_VIS_TITLES = {
     "变量关系与分布特征",
     "变量关系",
@@ -84,6 +116,90 @@ VAGUE_VIS_TITLES = {
     "数据展示",
     "模型表现",
 }
+VAGUE_VIS_TITLES_EN = {
+    "key variable distribution",
+    "variable distribution",
+    "variable relationship",
+    "data visualization",
+    "visualization result",
+    "analysis chart",
+    "chart result",
+}
+INSTRUCTION_ECHO_MARKERS = (
+    "i understand the requirement",
+    "i understand your requirement",
+    "as a senior data visualization expert",
+    "as requested",
+    "chart generated",
+    "field type overview",
+    "here is",
+    "i will",
+    "the following",
+    "visualization recommendation",
+    "user-facing response",
+    "chart title, report excerpt",
+    "polished professional english",
+    "preserving all dataset field names",
+    "please provide the data",
+    "language requirement",
+    "output language",
+    "output requirement",
+    "system prompt",
+    "图表已生成",
+    "字段类型概览",
+    "可视化建议",
+    "我理解",
+    "以下是",
+    "好的",
+    "系统提示",
+    "用户指令",
+    "语言要求",
+    "输出要求",
+    "输出规则",
+)
+CHINESE_TITLE_ENGLISH_REPLACEMENTS = (
+    ("relationship between", "关系"),
+    ("distribution of", "分布"),
+    ("comparison of", "比较"),
+    ("changes in", "变化"),
+    ("change in", "变化"),
+    ("relationship", "关系"),
+    ("comparison", "比较"),
+    ("distribution", "分布"),
+    ("correlation", "相关性"),
+    ("accuracy", "准确率"),
+    ("monetary", "金额"),
+    ("amount", "金额"),
+    ("revenue", "收入"),
+    ("income", "收入"),
+    ("profit", "利润"),
+    ("sales", "销售额"),
+    ("price", "价格"),
+    ("cost", "成本"),
+    ("quantity", "数量"),
+    ("frequency", "频次"),
+    ("recency", "近度"),
+    ("duration", "时长"),
+    ("score", "得分"),
+    ("gender", "性别"),
+    ("category", "类别"),
+    ("class", "类别"),
+    ("group", "组别"),
+    ("cluster", "聚类"),
+    ("trend", "变化趋势"),
+    ("rate", "率"),
+    ("count", "计数"),
+    ("value", "数值"),
+    ("time", "时间"),
+    ("date", "日期"),
+    ("year", "年份"),
+    ("month", "月份"),
+    ("day", "日期"),
+)
+
+
+def _sanitize_visualization_code(code: str) -> str:
+    return sanitize_visualization_code(code)
 
 
 def _truncate_prompt_text(value: Any, max_chars: int) -> str:
@@ -91,10 +207,6 @@ def _truncate_prompt_text(value: Any, max_chars: int) -> str:
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     return text[:max_chars] + "\n...[truncated for visualization prompt]"
-
-
-def _sanitize_visualization_code(code: str) -> str:
-    return sanitize_visualization_code(code)
 
 
 def _build_ctx(
@@ -109,8 +221,10 @@ def _build_ctx(
     add_preference: str = "",
     preference_selected: str = "",
     ref_context: str = "",
+    language: str = "zh",
 ) -> dict[str, Any]:
-    """Build shared prompt context for visualization steps."""
+    """构造 visualizing workflow 公共上下文。"""
+    language = normalize_app_language(language)
     return {
         "data": _truncate_prompt_text(data, MAX_PROMPT_DATA_CHARS),
         "shape_0": shape0,
@@ -124,7 +238,18 @@ def _build_ctx(
         "user_input": _truncate_prompt_text(user_input, MAX_PROMPT_USER_TEXT_CHARS),
         "add_preference": _truncate_prompt_text(add_preference, MAX_PROMPT_USER_TEXT_CHARS),
         "preference_selected": _truncate_prompt_text(preference_selected, MAX_PROMPT_USER_TEXT_CHARS),
-        "ref_context": _truncate_prompt_text(ref_context or "（无参考资料）", MAX_PROMPT_CONTEXT_CHARS),
+        "ref_context": _truncate_prompt_text(
+            ref_context or app_language_ref_context_empty(language),
+            MAX_PROMPT_CONTEXT_CHARS,
+        ),
+        "language": language,
+        "language_name": app_language_name(language),
+        "language_instruction": app_language_instruction(language),
+        "runtime_constraints_json": build_code_runtime_constraints(
+            data,
+            fallback_rows=shape0,
+            fallback_columns=shape1,
+        ),
     }
 
 
@@ -141,8 +266,9 @@ def run_visualizing_phase1(
     add_preference: str = "",
     preference_selected: str = "",
     ref_context: str = "",
+    language: str = "zh",
 ) -> dict[str, Any]:
-    """Generate visualization recommendations and implementation requirements."""
+    """Phase 1: 生成 visual_recommendation + refined_suggestions，快速返回给前端展示。"""
     if not vis_auto:
         return {"visual_recommendatio": "", "refined_suggestions": "", "_ctx": {}}
 
@@ -150,14 +276,14 @@ def run_visualizing_phase1(
         data=data, shape0=shape0, shape1=shape1, cols=cols,
         def_head=def_head, color=color, user_input=user_input,
         add_preference=add_preference, preference_selected=preference_selected,
-        ref_context=ref_context,
+        ref_context=ref_context, language=language,
     )
 
     vr_sys = render_file("visualizing/sec3_get_visual_recommendation_llm_sys.txt", ctx)
     vr_user = render_file("visualizing/sec3_get_visual_recommendation_llm_user.txt", ctx)
-    visual_recommendatio = chat(
-        vr_sys, vr_user, name="viz.get_visual_recommendation"
-    ).strip()
+    visual_recommendatio = normalize_suggestion_output(
+        chat(vr_sys, vr_user, name="viz.get_visual_recommendation")
+    )
     ctx["visual_recommendation"] = _truncate_prompt_text(
         visual_recommendatio,
         MAX_PROMPT_CONTEXT_CHARS,
@@ -179,6 +305,114 @@ def run_visualizing_phase1(
     }
 
 
+def revise_visualizing_phase1(
+    *,
+    ctx: dict[str, Any],
+    original_requirements: str,
+    revision_instruction: str,
+) -> dict[str, Any]:
+    revised_ctx = dict(ctx)
+    revised = revise_suggestion(
+        stage_label="visualization",
+        original_requirements=original_requirements,
+        current_suggestion=str(ctx.get("visual_recommendatio") or ctx.get("visual_recommendation") or ""),
+        revision_instruction=revision_instruction,
+        hard_constraints=f"Available columns: {ctx.get('cols', [])}",
+        language_instruction=str(ctx.get("language_instruction") or ""),
+    )
+    revised_ctx["visual_recommendation"] = _truncate_prompt_text(
+        revised,
+        MAX_PROMPT_CONTEXT_CHARS,
+    )
+    revised_ctx["visual_recommendatio"] = revised_ctx["visual_recommendation"]
+    rs_sys = render_file("visualizing/sec3_refine_suggestions_llm_sys.txt", revised_ctx)
+    rs_user = render_file("visualizing/sec3_refine_suggestions_llm_user.txt", revised_ctx)
+    refined = chat(rs_sys, rs_user, name="viz.refine_revision").strip()
+    revised_ctx["refined_suggestions"] = _truncate_prompt_text(
+        refined,
+        MAX_PROMPT_CONTEXT_CHARS,
+    )
+    return {
+        "visual_recommendatio": revised,
+        "refined_suggestions": refined,
+        "_ctx": revised_ctx,
+    }
+
+
+def generate_visualizing_code(*, ctx: dict[str, Any]) -> str:
+    """Generate a visualization code draft without executing it."""
+    cg_sys = render_file("visualizing/sec3_code_generation_llm_sys.txt", ctx, strict=True)
+    cg_user = render_file("visualizing/sec3_code_generation_llm_user.txt", ctx, strict=True)
+    return _sanitize_visualization_code(
+        chat_code(cg_sys, cg_user, name="viz.code_generation").strip()
+    )
+
+
+def repair_visualizing_code(*, ctx: dict[str, Any], code: str, error: str) -> str:
+    fix_ctx = {
+        **ctx,
+        "code": code,
+        "code_vis": code,
+        "error_msg": error,
+        "error": error,
+    }
+    fix_sys = render_file("visualizing/sec3_fixed_code_llm_sys.txt", fix_ctx, strict=True)
+    fix_user = render_file("visualizing/sec3_fixed_code_llm_user.txt", fix_ctx, strict=True)
+    return _sanitize_visualization_code(
+        chat_code(fix_sys, fix_user, name="viz.manual_code_fixer", temperature=0.3).strip()
+    )
+
+
+def validate_visualizing_code(
+    *,
+    ctx: dict[str, Any],
+    data: str,
+    def_head: str,
+    initial_code: str = "",
+) -> dict[str, Any]:
+    """Run the shared legacy five-attempt generation/fix loop without chart narration."""
+    current_code = _sanitize_visualization_code(initial_code) if initial_code else generate_visualizing_code(ctx=ctx)
+    success = False
+    last_error = ""
+    failure_stage = "preview"
+    exec_result: dict[str, Any] = {}
+    attempts = 0
+    for attempt in range(MAX_FIX_ATTEMPTS):
+        attempts = attempt + 1
+        validate = validate_viz_code(code=current_code, df_data=def_head)
+        if validate["is_success"]:
+            current_code = validate["final_code"]
+            exec_result = execute_and_extract(code=current_code, df_data=data)
+            full_error = str(exec_result.get("error") or "")
+            if not full_error and exec_result.get("fig_task_list"):
+                success = True
+                break
+            failure_stage = "full"
+            last_error = full_error or "全量数据执行未生成任何图表"
+        else:
+            failure_stage = "preview"
+            last_error = validate.get("error_msg", "")
+
+        if attempt >= MAX_FIX_ATTEMPTS - 1:
+            break
+        fixed = repair_visualizing_code(
+            ctx=ctx,
+            code=current_code,
+            error=f"[{failure_stage}] {last_error}",
+        )
+        if fixed:
+            current_code = fixed
+
+    return {
+        "code": current_code,
+        "success": success,
+        "error": last_error,
+        "execution_stage": failure_stage,
+        "fig_task_list": exec_result.get("fig_task_list", []),
+        "attempts": attempts,
+    }
+
+
 def run_visualizing_phase2(
     *,
     ctx: dict[str, Any],
@@ -186,86 +420,54 @@ def run_visualizing_phase2(
     cols: list,
     def_head: str,
 ) -> dict[str, Any]:
-    """Generate, validate, repair, execute, and summarize visualization code."""
+    """Phase 2: 代码生成 + 验证修复 + 图表分析。依赖 phase1 产出的 ctx。"""
     visual_recommendatio = ctx.get("visual_recommendatio", "")
 
-    cg_sys = render_file("visualizing/sec3_code_generation_llm_sys.txt", ctx)
-    cg_user = render_file("visualizing/sec3_code_generation_llm_user.txt", ctx)
-    generation_code = chat(cg_sys, cg_user, name="viz.code_generation").strip()
-    generation_code = _sanitize_visualization_code(generation_code)
-
-    current_code = generation_code
-    success = False
-    last_error = ""
-    for attempt in range(MAX_FIX_ATTEMPTS):
-        validate = validate_viz_code(code=current_code, df_data=def_head)
-        if validate["is_success"]:
-            current_code = validate["final_code"]
-            success = True
-            break
-
-        last_error = validate.get("error_msg", "")
-        fix_ctx = {
-            **ctx,
-            "code": current_code,
-            "code_vis": current_code,
-            "error_msg": last_error,
-            "error": last_error,
-        }
-        fix_sys = render_file("visualizing/sec3_fixed_code_llm_sys.txt", fix_ctx)
-        fix_user = render_file("visualizing/sec3_fixed_code_llm_user.txt", fix_ctx)
-        fixed = chat(
-            fix_sys,
-            fix_user,
-            name=f"viz.fixed_code.{attempt + 1}",
-            temperature=0.3,
-        ).strip()
-        fixed = _sanitize_visualization_code(fixed)
-        if fixed:
-            current_code = fixed
-
+    validation = validate_visualizing_code(ctx=ctx, data=data, def_head=def_head)
+    final_code = validation["code"]
+    success = bool(validation["success"])
+    last_error = validation["error"]
+    failure_stage = validation["execution_stage"]
+    exec_result = {"fig_task_list": validation["fig_task_list"]}
     if not success:
+        english = is_english_language(ctx.get("language"))
         return {
             "full": "",
-            "abstract_3": f"可视化代码生成失败：{last_error[:500]}",
-            "summary_3": {"title": "数据可视化", "fig_analysis": []},
+            "abstract_3": (
+                f"Visualization code generation failed: {last_error[:500]}"
+                if english
+                else f"可视化代码生成失败：{last_error[:500]}"
+            ),
+            "summary_3": {
+                "title": "Data Visualization" if english else "数据可视化",
+                "fig_analysis": [],
+            },
             "visual_recommendatio": visual_recommendatio,
-            "final_code": "",
-            "_failed_code": current_code,
-            "_code_success": False,
-            "_code_error": last_error[:1000],
+            "final_code": final_code,
             "tu_title": [],
+            "_status": "failed",
+            "_execution_stage": failure_stage,
+            "_code_error": last_error,
+            "_fix_attempts": validation["attempts"],
         }
 
-    final_code = current_code
     ctx["final_code"] = final_code
-    exec_result = execute_and_extract(code=final_code, df_data=data)
     fig_task_list = exec_result.get("fig_task_list", [])
     fig_task_list = _attach_figure_llm_artifacts(fig_task_list)
-    if not fig_task_list:
-        return {
-            "full": "",
-            "abstract_3": exec_result.get("error") or "未能从代码中提取到任何图表。",
-            "summary_3": {"title": "数据可视化", "fig_analysis": []},
-            "visual_recommendatio": visual_recommendatio,
-            "final_code": "",
-            "_failed_code": final_code,
-            "_code_success": False,
-            "_code_error": (exec_result.get("error") or "未能从代码中提取到任何图表。")[:1000],
-            "tu_title": [],
-        }
 
     cols_wo_id = _filter_id_columns(cols)
     dtype_info = to_str(def_head)
 
-    # Each figure can generate its title and summary independently.
+    # 每张图独立并行：desc → (title ‖ summary)
     def _process_single_fig(item: dict) -> dict[str, Any]:
         pack = _desc_fig_single(item, dtype_info, ctx)
         with ThreadPoolExecutor(max_workers=2) as inner_pool:
-            title_fut = inner_pool.submit(
+            title_fut = submit_with_context(
+                inner_pool,
                 _generate_title_single, pack, cols_wo_id, ctx
             )
-            summary_fut = inner_pool.submit(
+            summary_fut = submit_with_context(
+                inner_pool,
                 _summary_fig_single, pack, cols_wo_id, ctx
             )
             title = title_fut.result()
@@ -300,16 +502,19 @@ def run_visualizing_phase2(
     abstract_3 = chat(abs_sys, abs_user, name="viz.abstract").strip()
 
     composed = sec3_composer(fig_analysis=aggregate_results)
+    if is_english_language(ctx.get("language")):
+        composed["summary_3"]["title"] = "Data Visualization"
     return {
         "full": full,
         "abstract_3": abstract_3,
         "summary_3": composed["summary_3"],
         "visual_recommendatio": visual_recommendatio,
         "final_code": final_code,
-        "_code_success": True,
-        "_code_error": "",
         "tu_title": tu_title,
-    }
+            "_status": "succeeded",
+            "_execution_stage": "full",
+            "_fix_attempts": validation["attempts"],
+        }
 
 
 def run_visualizing_workflow(
@@ -325,8 +530,9 @@ def run_visualizing_workflow(
     add_preference: str = "",
     preference_selected: str = "",
     ref_context: str = "",
+    language: str = "zh",
 ) -> dict[str, Any]:
-    """Run visualization recommendation and code-generation phases in sequence."""
+    """完整执行（兼容旧调用方式，顺序执行 phase1 + phase2）。"""
     if not vis_auto:
         return _empty_result()
 
@@ -335,6 +541,7 @@ def run_visualizing_workflow(
         def_head=def_head, vis_auto=vis_auto, color=color,
         user_input=user_input, add_preference=add_preference,
         preference_selected=preference_selected, ref_context=ref_context,
+        language=language,
     )
     ctx = p1["_ctx"]
     if not ctx:
@@ -442,15 +649,15 @@ def _coerce_plotly_payload(fig: Any) -> tuple[dict[str, Any] | None, str]:
 
 
 def render_plotly_image_data_url(fig: Any) -> str:
-    global _FIGURE_IMAGE_RENDER_DISABLED
-    if _FIGURE_IMAGE_RENDER_DISABLED or FIG_IMAGE_TIMEOUT_SECONDS <= 0:
+    render_state = _get_figure_image_render_state()
+    if render_state["disabled"] or FIG_IMAGE_TIMEOUT_SECONDS <= 0:
         return ""
     payload, raw_text = _coerce_plotly_payload(fig)
     if not isinstance(payload, dict):
         return ""
     status, encoded = _render_plotly_image_base64(raw_text)
     if status == "timeout" and DISABLE_FIGURE_IMAGES_AFTER_TIMEOUT:
-        _FIGURE_IMAGE_RENDER_DISABLED = True
+        render_state["disabled"] = True
     if not encoded:
         return ""
     return f"data:image/jpeg;base64,{encoded}"
@@ -545,6 +752,123 @@ def _chat_with_optional_figure_image(
             **kwargs,
         )
     return chat(sys_prompt, user_prompt, name=name, **kwargs)
+
+
+def _contains_cjk(text: Any) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff]", to_str(text)))
+
+
+def _looks_like_instruction_echo(text: Any) -> bool:
+    cleaned = re.sub(r"\s+", " ", to_str(text)).strip().lower()
+    if not cleaned:
+        return True
+    return any(marker in cleaned for marker in INSTRUCTION_ECHO_MARKERS)
+
+
+def _is_usable_chart_explanation(text: Any, language: Any) -> bool:
+    cleaned = re.sub(r"\s+", " ", to_str(text)).strip()
+    if not cleaned or _looks_like_instruction_echo(cleaned):
+        return False
+    if is_english_language(language):
+        return not _contains_cjk(cleaned)
+    return _contains_cjk(cleaned)
+
+
+def _artifact_meta_from_text(fig_artifact_text: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(to_str(fig_artifact_text) or "{}")
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _fallback_chart_analysis(
+    *,
+    fig_artifact_text: str,
+    base_ctx: dict[str, Any],
+    cols_wo_id: list | None = None,
+) -> str:
+    meta = _artifact_meta_from_text(fig_artifact_text)
+    chart_types = [str(item).lower() for item in meta.get("chart_types", [])]
+    if is_english_language(base_ctx.get("language")):
+        x_axis = _clean_english_title_token(meta.get("x_axis_title", ""))
+        y_axis = _clean_english_title_token(meta.get("y_axis_title", ""))
+        if _has_chart_type(chart_types, ("histogram",)):
+            variable = x_axis or y_axis or _first_meaningful_english_token(cols_wo_id or [])
+        elif _has_chart_type(chart_types, ("box", "violin")):
+            variable = y_axis or x_axis or _first_meaningful_english_token(cols_wo_id or [])
+        else:
+            variable = y_axis or x_axis or _first_meaningful_english_token(cols_wo_id or [])
+        if _has_chart_type(chart_types, ("histogram", "box", "violin")) and variable:
+            return (
+                f"This chart summarizes the distribution of {variable}. "
+                "It highlights the visible spread, concentration, and potential outlying values."
+            )
+        if x_axis and y_axis:
+            return (
+                f"This chart shows {y_axis} in relation to {x_axis}. "
+                "It helps identify the visible pattern, spread, and potential association between the variables."
+            )
+        if variable:
+            return (
+                f"This chart summarizes {variable}. "
+                "It highlights the variable's visible distribution, grouping, or trend in the generated visualization."
+            )
+        return (
+            "This chart summarizes the selected variables and highlights the visible "
+            "distribution, relationship, or trend in the generated visualization."
+        )
+
+    x_axis = _clean_title_token(meta.get("x_axis_title", ""))
+    y_axis = _clean_title_token(meta.get("y_axis_title", ""))
+    if _has_chart_type(chart_types, ("histogram",)):
+        variable = x_axis or y_axis or _first_meaningful_token(cols_wo_id or [])
+    elif _has_chart_type(chart_types, ("box", "violin")):
+        variable = y_axis or x_axis or _first_meaningful_token(cols_wo_id or [])
+    else:
+        variable = y_axis or x_axis or _first_meaningful_token(cols_wo_id or [])
+    if _has_chart_type(chart_types, ("histogram", "box", "violin")) and variable:
+        return (
+            f"\u8fd9\u5f20\u56fe\u6982\u62ec\u4e86{variable}\u7684\u5206\u5e03"
+            "\u7279\u5f81\uff0c\u53ef\u7528\u4e8e\u8bc6\u522b\u6570\u503c\u7684"
+            "\u96c6\u4e2d\u533a\u95f4\u3001\u79bb\u6563\u7a0b\u5ea6\u548c\u53ef\u80fd\u7684"
+            "\u6781\u7aef\u503c\u3002"
+        )
+    if x_axis and y_axis:
+        return (
+            f"\u8fd9\u5f20\u56fe\u5c55\u793a\u4e86{y_axis}\u4e0e{x_axis}"
+            "\u4e4b\u95f4\u7684\u5173\u7cfb\uff0c\u53ef\u7528\u4e8e\u8bc6\u522b"
+            "\u4e24\u4e2a\u53d8\u91cf\u7684\u53ef\u89c1\u6a21\u5f0f\u3001\u79bb\u6563"
+            "\u7a0b\u5ea6\u548c\u6f5c\u5728\u5173\u8054\u3002"
+        )
+    if variable:
+        return (
+            f"\u8fd9\u5f20\u56fe\u6982\u62ec\u4e86{variable}\u7684\u53ef\u89c1"
+            "\u5206\u5e03\u3001\u5206\u7ec4\u6216\u53d8\u5316\u8d8b\u52bf\uff0c"
+            "\u6709\u52a9\u4e8e\u7406\u89e3\u6570\u636e\u4e2d\u7684\u4e3b\u8981\u7279\u5f81\u3002"
+        )
+    return (
+        "\u8fd9\u5f20\u56fe\u6982\u62ec\u4e86\u6240\u9009\u53d8\u91cf\u7684"
+        "\u5206\u5e03\u3001\u5173\u7cfb\u6216\u53d8\u5316\u8d8b\u52bf\uff0c"
+        "\u53ef\u7528\u4e8e\u8f85\u52a9\u5224\u65ad\u6570\u636e\u4e2d\u7684\u4e3b\u8981\u6a21\u5f0f\u3002"
+    )
+
+
+def _clean_chart_explanation(
+    text: Any,
+    *,
+    fig_artifact_text: str,
+    base_ctx: dict[str, Any],
+    cols_wo_id: list | None = None,
+) -> str:
+    cleaned = to_str(text).strip()
+    if _is_usable_chart_explanation(cleaned, base_ctx.get("language")):
+        return cleaned
+    return _fallback_chart_analysis(
+        fig_artifact_text=fig_artifact_text,
+        base_ctx=base_ctx,
+        cols_wo_id=cols_wo_id,
+    )
 
 
 def _summarize_values(values: Any) -> dict[str, Any]:
@@ -644,6 +968,12 @@ def _clean_artifact_scalar(value: Any) -> Any:
     return text
 
 
+def _viz_assistant_prompt(language: Any) -> str:
+    if is_english_language(language):
+        return "You are a data visualization analysis assistant."
+    return "你是数据可视化分析助手。"
+
+
 def _desc_fig_single(
     item: dict, dtype_info: str, base_ctx: dict[str, Any]
 ) -> dict[str, Any]:
@@ -667,11 +997,16 @@ def _desc_fig_single(
     if not g_user.strip():
         g_user = prompt_content
     desc = _chat_with_optional_figure_image(
-        g_sys or "你是数据可视化分析助手。",
+        g_sys or _viz_assistant_prompt(base_ctx.get("language")),
         g_user,
         image_data_url=fig_image,
         name="viz.generate_desc",
     ).strip()
+    desc = _clean_chart_explanation(
+        desc,
+        fig_artifact_text=fig_artifact_text,
+        base_ctx=base_ctx,
+    )
 
     return {
         "fig": fig,
@@ -715,6 +1050,33 @@ def _generate_title_single(
         name="viz.title",
         temperature=0.2,
     ).strip()
+
+    if is_english_language(base_ctx.get("language")):
+        parsed_title = _normalize_english_title(_parse_single_title(title_text))
+        if _is_usable_english_title(parsed_title):
+            return parsed_title
+
+        polished_title = _polish_title_to_english(
+            candidate_title=parsed_title or _parse_single_title(title_text),
+            item=item,
+            cols_wo_id=cols_wo_id,
+            base_ctx=base_ctx,
+            fig_meta=fig_meta,
+        )
+        polished_title = _normalize_english_title(polished_title)
+        if _is_usable_english_title(polished_title):
+            return polished_title
+
+        fallback = _fallback_english_title_from_context(
+            desc=desc,
+            raw_title=raw_title,
+            fig_meta=fig_meta,
+            cols_wo_id=cols_wo_id,
+        )
+        if _is_usable_english_title(fallback):
+            return fallback
+
+        return "Key Variable Distribution"
 
     parsed_title = _normalize_academic_title(_parse_single_title(title_text))
     if _is_usable_chinese_title(parsed_title):
@@ -768,11 +1130,17 @@ def _summary_fig_single(
     if not sfd_user.strip():
         sfd_user = prompt
     analysis = _chat_with_optional_figure_image(
-        sfd_sys or "你是数据可视化分析助手。",
+        sfd_sys or _viz_assistant_prompt(base_ctx.get("language")),
         sfd_user,
         image_data_url=fig_image,
         name="viz.summary_fig_desc",
     ).strip()
+    analysis = _clean_chart_explanation(
+        analysis,
+        fig_artifact_text=fig_artifact_text,
+        base_ctx=base_ctx,
+        cols_wo_id=cols_wo_id,
+    )
 
     return {
         "fig": fig,
@@ -788,7 +1156,7 @@ def _batch_run(items: list, func, concurrency: int = 10) -> list:
 
     results: list = [None] * len(items)
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = {pool.submit(func, item): i for i, item in enumerate(items)}
+        futures = {submit_with_context(pool, func, item): i for i, item in enumerate(items)}
         for future in as_completed(futures):
             idx = futures[future]
             try:
@@ -899,25 +1267,7 @@ def _normalize_academic_title(title: str) -> str:
         text = text.replace(src, dst)
     text = re.sub(r"的(分布|关系|比较|变化趋势|趋势|特征)", r"\1", text)
 
-    english_map = {
-        "relationship between": "关系",
-        "relationship": "关系",
-        "comparison of": "比较",
-        "comparison": "比较",
-        "distribution of": "分布",
-        "distribution": "分布",
-        "trend of": "变化趋势",
-        "trend": "变化趋势",
-        "change in": "变化",
-        "changes in": "变化",
-        "accuracy": "准确率",
-        "correlation": "相关性",
-    }
-    lowered = text.lower()
-    for src, dst in english_map.items():
-        lowered = lowered.replace(src, dst)
-    if _contains_ascii_letters(text):
-        text = lowered
+    text = _replace_english_title_terms_for_chinese(text)
 
     text = re.sub(r"\s+", " ", text).strip()
     text = text.strip("，,。.;；:：")
@@ -926,6 +1276,25 @@ def _normalize_academic_title(title: str) -> str:
 
 def _contains_ascii_letters(text: str) -> bool:
     return any(("a" <= ch.lower() <= "z") for ch in text)
+
+
+def _replace_english_title_terms_for_chinese(text: str) -> str:
+    out = str(text or "")
+    for src, dst in CHINESE_TITLE_ENGLISH_REPLACEMENTS:
+        pattern = rf"(?<![A-Za-z]){re.escape(src)}(?![A-Za-z])"
+        out = re.sub(pattern, dst, out, flags=re.IGNORECASE)
+    return out
+
+
+def _has_disallowed_english_words_for_chinese_title(text: Any) -> bool:
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_]*", to_str(text))
+    for token in tokens:
+        if len(token) == 1 and token.isupper():
+            continue
+        if 2 <= len(token) <= 8 and token.isupper():
+            continue
+        return True
+    return False
 
 
 def _limit_title_length(title: str) -> str:
@@ -957,6 +1326,41 @@ def _limit_title_length(title: str) -> str:
     return text[:MAX_VIS_TITLE_CHARS].strip("，,。.;；:：")
 
 
+def _normalize_english_title(title: str) -> str:
+    text = _parse_single_title(title)
+    if not text:
+        return ""
+
+    text = text.replace("_", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^(figure|fig\.?|chart|plot)\s*[:：-]\s*", "", text, flags=re.IGNORECASE)
+    text = text.strip(" ,.;:：")
+    if not text:
+        return ""
+    return _limit_english_title_length(text)
+
+
+def _limit_english_title_length(title: str, max_words: int = 14) -> str:
+    text = re.sub(r"\s+", " ", _parse_single_title(title)).strip(" ,.;:：")
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words]).strip(" ,.;:：")
+
+
+def _is_usable_english_title(title: str) -> bool:
+    text = _normalize_english_title(title)
+    if not text:
+        return False
+    if _contains_cjk(text):
+        return False
+    if not _contains_ascii_letters(text):
+        return False
+    if len(text.split()) > 14:
+        return False
+    return text.lower() not in VAGUE_VIS_TITLES_EN
+
+
 def _is_vague_visualization_title(title: str) -> bool:
     text = re.sub(r"[\s，,。.;；:：]+", "", _parse_single_title(title))
     if not text:
@@ -968,6 +1372,8 @@ def _is_usable_chinese_title(title: str) -> bool:
     if not title:
         return False
     if _contains_ascii_letters(title) and not re.search(r"[\u4e00-\u9fff]", title):
+        return False
+    if _has_disallowed_english_words_for_chinese_title(title):
         return False
     if len(title) > MAX_VIS_TITLE_CHARS:
         return False
@@ -993,6 +1399,7 @@ def _polish_title_to_chinese(
         "请将候选标题改写为统一中文、正式、准确、简洁的论文图标题。"
         "不要解释，不要保留中英文混杂，不要把图类型词作为标题主体。"
         "标题必须不超过20个汉字或中文字符，且必须包含具体变量、指标、对象或组别。"
+        "普通英文变量词应改写为中文语义表达；无法可靠翻译的数据字段专名、缩写或用户指定术语可以保留。"
         "禁止输出“变量关系与分布特征”“变量关系”“分布特征”等泛化标题。"
         "如果候选标题不合格，请依据图表信息直接重写。"
     )
@@ -1025,6 +1432,54 @@ def _polish_title_to_chinese(
     return _limit_title_length(_parse_single_title(rewritten))
 
 
+def _polish_title_to_english(
+    *,
+    candidate_title: str,
+    item: dict,
+    cols_wo_id: list,
+    base_ctx: dict[str, Any],
+    fig_meta: dict[str, Any],
+) -> str:
+    desc = item.get("desc", "") if isinstance(item, dict) else ""
+    raw_title = item.get("raw_title", "") if isinstance(item, dict) else ""
+    fig_artifact_text = _figure_artifact_text(item)
+
+    sys_prompt = (
+        "You are an academic chart-title editor. Rewrite the candidate as one formal, "
+        "accurate, concise English figure title. Do not explain. Do not use generic "
+        "titles such as 'Key Variable Distribution' unless there is no usable evidence. "
+        "Include the concrete variable, metric, cohort, or grouping shown in the chart. "
+        "Keep original dataset field names unchanged. Use 14 words or fewer."
+    )
+    user_prompt = (
+        f"Candidate title: {candidate_title}\n"
+        f"User request: {base_ctx.get('user_input', '')}\n"
+        f"Visualization recommendation: {base_ctx.get('visual_recommendation', '')}\n"
+        f"Refined plan: {base_ctx.get('refined_suggestions', '')}\n"
+        f"Data fields: {', '.join(str(c) for c in (cols_wo_id or []))}\n"
+        f"Series or groups: {', '.join(fig_meta.get('trace_names', []))}\n"
+        f"X axis: {fig_meta.get('x_axis_title', '')}\n"
+        f"Y axis: {fig_meta.get('y_axis_title', '')}\n"
+        f"Legend: {fig_meta.get('legend_title', '')}\n"
+        f"Existing title: {fig_meta.get('existing_title', '')}\n"
+        f"Task label: {raw_title}\n"
+        f"Chart description: {desc}\n"
+        f"Chart types: {', '.join(fig_meta.get('chart_types', []))}\n"
+        f"Compressed chart evidence: {fig_artifact_text[:5000]}\n\n"
+        "Return only one final English title, 14 words or fewer."
+    )
+    try:
+        rewritten = chat(
+            sys_prompt,
+            user_prompt,
+            name="viz.title.polish",
+            temperature=0.2,
+        ).strip()
+    except Exception:
+        return ""
+    return _limit_english_title_length(_parse_single_title(rewritten))
+
+
 def _fallback_title_from_context(
     *,
     desc: str,
@@ -1039,7 +1494,7 @@ def _fallback_title_from_context(
     ]
     for candidate in source_candidates:
         title = _normalize_academic_title(candidate)
-        if title and not _is_vague_visualization_title(title):
+        if _is_usable_chinese_title(title):
             return title
 
     x_axis = _clean_title_token(fig_meta.get("x_axis_title", ""))
@@ -1076,9 +1531,73 @@ def _fallback_title_from_context(
     return "主要变量分布"
 
 
+def _fallback_english_title_from_context(
+    *,
+    desc: str,
+    raw_title: str,
+    fig_meta: dict[str, Any],
+    cols_wo_id: list,
+) -> str:
+    source_candidates = [
+        fig_meta.get("existing_title", ""),
+        raw_title,
+        desc,
+    ]
+    for candidate in source_candidates:
+        title = _normalize_english_title(candidate)
+        if _is_usable_english_title(title):
+            return title
+
+    x_axis = _clean_english_title_token(fig_meta.get("x_axis_title", ""))
+    y_axis = _clean_english_title_token(fig_meta.get("y_axis_title", ""))
+    legend = _clean_english_title_token(fig_meta.get("legend_title", ""))
+    trace_names = [_clean_english_title_token(name) for name in fig_meta.get("trace_names", [])]
+    chart_types = [str(item).lower() for item in fig_meta.get("chart_types", [])]
+
+    if _has_chart_type(chart_types, ("box", "histogram", "violin")):
+        variable = y_axis or x_axis or _first_meaningful_english_token(cols_wo_id)
+        if variable:
+            return _limit_english_title_length(f"{variable} Distribution")
+
+    if _has_chart_type(chart_types, ("scatter",)):
+        if x_axis and y_axis:
+            return _limit_english_title_length(f"{y_axis} vs {x_axis}")
+
+    if _has_chart_type(chart_types, ("bar", "pie")):
+        metric = y_axis or _first_meaningful_english_token(trace_names) or _first_meaningful_english_token(cols_wo_id)
+        group = x_axis or legend
+        if group and metric and group != metric:
+            return _limit_english_title_length(f"{metric} by {group}")
+        if metric:
+            return _limit_english_title_length(f"{metric} Comparison")
+
+    if _has_chart_type(chart_types, ("line",)):
+        variable = y_axis or _first_meaningful_english_token(cols_wo_id)
+        if variable:
+            return _limit_english_title_length(f"{variable} Trend")
+
+    variable = y_axis or x_axis or _first_meaningful_english_token(cols_wo_id)
+    if variable:
+        return _limit_english_title_length(f"{variable} Distribution")
+    return "Key Variable Distribution"
+
+
 def _clean_title_token(value: Any) -> str:
     text = _normalize_academic_title(to_str(value))
-    if not text or _is_vague_visualization_title(text):
+    if (
+        not text
+        or _is_vague_visualization_title(text)
+        or _has_disallowed_english_words_for_chinese_title(text)
+    ):
+        return ""
+    return text
+
+
+def _clean_english_title_token(value: Any) -> str:
+    text = _normalize_english_title(to_str(value))
+    if _contains_cjk(text):
+        return ""
+    if not text or text.lower() in VAGUE_VIS_TITLES_EN:
         return ""
     return text
 
@@ -1089,6 +1608,17 @@ def _first_meaningful_token(values: Any) -> str:
     generic_tokens = {"id", "index", "count", "value", "variable", "class", "类别", "数量", "计数", "变量", "数值"}
     for value in values:
         text = _clean_title_token(value)
+        if text and text.lower() not in generic_tokens:
+            return text
+    return ""
+
+
+def _first_meaningful_english_token(values: Any) -> str:
+    if not isinstance(values, list):
+        values = [values]
+    generic_tokens = {"id", "index", "count", "value", "variable", "class", "category", "number"}
+    for value in values:
+        text = _clean_english_title_token(value)
         if text and text.lower() not in generic_tokens:
             return text
     return ""
@@ -1200,15 +1730,11 @@ def _empty_result() -> dict[str, Any]:
         "summary_3": {"title": "", "fig_analysis": []},
         "visual_recommendatio": "",
         "final_code": "",
-        "_code_success": False,
-        "_code_error": "",
         "tu_title": [],
     }
 
 
 if __name__ == "__main__":
-    import sys
-
     import pandas as pd
 
     from workflows._plugins import df_to_meta

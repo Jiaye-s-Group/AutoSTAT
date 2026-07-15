@@ -6,6 +6,8 @@ import math
 import re
 from typing import Any
 
+from core.report_language import is_english_language, normalize_app_language
+
 
 _METRIC_LABELS = {
     "accuracy": "准确率",
@@ -32,6 +34,31 @@ _METRIC_LABELS = {
     "calinski_harabasz": "Calinski-Harabasz",
 }
 
+_METRIC_LABELS_EN = {
+    "accuracy": "Accuracy",
+    "precision": "Precision",
+    "recall": "Recall",
+    "f1": "F1",
+    "f1_score": "F1",
+    "auc": "AUC",
+    "roc_auc": "AUC",
+    "pr_auc": "PR-AUC",
+    "logloss": "LogLoss",
+    "loss": "Loss",
+    "mse": "MSE",
+    "rmse": "RMSE",
+    "mae": "MAE",
+    "mape": "MAPE",
+    "smape": "SMAPE",
+    "r2": "R2",
+    "explained_variance": "Explained Variance",
+    "silhouette": "Silhouette",
+    "ari": "ARI",
+    "nmi": "NMI",
+    "davies_bouldin": "Davies-Bouldin",
+    "calinski_harabasz": "Calinski-Harabasz",
+}
+
 _AUX_LABELS = {
     "experiment_setting": "实验设置",
     "setting": "实验设置",
@@ -47,6 +74,23 @@ _AUX_LABELS = {
     "param_count": "参数量",
     "params": "参数量",
     "parameters": "参数量",
+}
+
+_AUX_LABELS_EN = {
+    "experiment_setting": "Experiment Setting",
+    "setting": "Experiment Setting",
+    "feature_set": "Feature Set",
+    "feature_combo": "Feature Set",
+    "feature_combination": "Feature Set",
+    "dataset": "Dataset",
+    "data_split": "Data Split",
+    "train_time": "Training Time",
+    "training_time": "Training Time",
+    "inference_time": "Inference Time",
+    "parameter_count": "Parameter Count",
+    "param_count": "Parameter Count",
+    "params": "Parameter Count",
+    "parameters": "Parameter Count",
 }
 
 _CLASSIFICATION_PRIORITY = [
@@ -174,7 +218,9 @@ def build_model_comparison_table_bundle(
     target: str = "",
     user_input: str = "",
     additional_preference: str = "",
+    language: str = "zh",
 ) -> dict[str, Any]:
+    language = normalize_app_language(language)
     parsed = maybe_json_loads(result_json)
     if not isinstance(parsed, dict):
         return _empty_bundle()
@@ -193,7 +239,7 @@ def build_model_comparison_table_bundle(
         if not isinstance(model, dict):
             continue
 
-        model_name = _extract_model_name(model, index)
+        model_name = _extract_model_name(model, index, language=language)
         metrics = _extract_metrics(model)
         aux_fields = _extract_aux_fields(model)
 
@@ -225,17 +271,21 @@ def build_model_comparison_table_bundle(
 
     column_keys = ["model_name", *aux_keys, *metric_keys]
     column_labels = [
-        "方法/模型",
-        *[_label_for_aux(key) for key in aux_keys],
-        *[_label_for_metric(key) for key in metric_keys],
+        "Method / Model" if is_english_language(language) else "方法/模型",
+        *[_label_for_aux(key, language=language) for key in aux_keys],
+        *[_label_for_metric(key, language=language) for key in metric_keys],
     ]
 
     rendered_rows: list[list[str]] = []
     for row_index, row in enumerate(rows):
-        rendered = [_format_cell_value(row["model_name"])]
-        rendered.extend(_format_column_value(row["aux_fields"].get(key)) for key in aux_keys)
+        rendered = [_format_cell_value(row["model_name"], language=language)]
+        rendered.extend(_format_column_value(row["aux_fields"].get(key), language=language) for key in aux_keys)
         rendered.extend(
-            _format_metric_value(row["metrics"].get(key), mark_best=best_marks.get((row_index, key), False))
+            _format_metric_value(
+                row["metrics"].get(key),
+                mark_best=best_marks.get((row_index, key), False),
+                language=language,
+            )
             for key in metric_keys
         )
         rendered_rows.append(rendered)
@@ -245,16 +295,18 @@ def build_model_comparison_table_bundle(
         target=target,
         user_input=user_input,
         additional_preference=additional_preference,
+        language=language,
     )
 
     markdown_table = _build_markdown_table(column_labels, rendered_rows)
     html_table = _build_html_table(column_labels, rendered_rows)
-    best_model_text = _extract_best_model_text(parsed)
+    best_model_text = _extract_best_model_text(parsed, language=language)
 
     return {
         "has_table": bool(markdown_table),
         "title": title,
-        "caption": f"表1 {title}" if title else "",
+        "caption": (f"Table 1. {title}" if is_english_language(language) else f"表1 {title}") if title else "",
+        "language": language,
         "task_type": task_type,
         "column_keys": column_keys,
         "column_labels": column_labels,
@@ -274,10 +326,11 @@ def append_model_comparison_table(markdown_text: str, bundle: dict[str, Any]) ->
     if not markdown_table:
         return text
 
-    if "内容汇总表格" in text and markdown_table in text:
+    heading = "Summary Table" if is_english_language(bundle.get("language")) else "内容汇总表格"
+    if heading in text and markdown_table in text:
         return text
 
-    appendix = f"内容汇总表格\n\n{markdown_table}"
+    appendix = f"{heading}\n\n{markdown_table}"
     if not text:
         return appendix
     return f"{text}\n\n{appendix}".strip()
@@ -339,12 +392,12 @@ def _extract_models(result_dict: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _extract_model_name(model_dict: dict[str, Any], index: int) -> str:
+def _extract_model_name(model_dict: dict[str, Any], index: int, *, language: str = "zh") -> str:
     for key in _MODEL_NAME_KEYS:
         value = model_dict.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    return f"模型{index}"
+    return f"Model {index}" if is_english_language(language) else f"模型{index}"
 
 
 def _extract_metrics(model_dict: dict[str, Any]) -> dict[str, Any]:
@@ -474,9 +527,21 @@ def _build_table_title(
     target: str,
     user_input: str,
     additional_preference: str,
+    language: str = "zh",
 ) -> str:
     target_text = _clean_context_text(target)
     _ = user_input, additional_preference
+
+    if is_english_language(language):
+        if task_type == "classification":
+            return "Performance Comparison Across Classification Models"
+        if task_type == "regression":
+            if target_text:
+                return f"Performance Comparison Across Models for Predicting {target_text}"
+            return "Performance Comparison Across Regression Models"
+        if task_type == "clustering":
+            return "Result Comparison Across Clustering Models"
+        return "Result Comparison Across Modeling Methods"
 
     if task_type == "classification":
         return "不同模型在分类任务上的性能比较"
@@ -489,10 +554,14 @@ def _build_table_title(
     return "不同模型在建模任务上的结果比较"
 
 
-def _extract_best_model_text(result_dict: dict[str, Any]) -> str:
+def _extract_best_model_text(result_dict: dict[str, Any], *, language: str = "zh") -> str:
     best_model = result_dict.get("best_model")
     if isinstance(best_model, str) and best_model.strip():
-        return f"最佳模型：{best_model.strip()}。"
+        return (
+            f"Best model: {best_model.strip()}."
+            if is_english_language(language)
+            else f"最佳模型：{best_model.strip()}。"
+        )
 
     if not isinstance(best_model, dict):
         return ""
@@ -519,19 +588,27 @@ def _extract_best_model_text(result_dict: dict[str, Any]) -> str:
             break
 
     if best_name and metric_key and metric_value is not None:
-        return f"最佳模型：{best_name}，{_label_for_metric(metric_key)}为{_format_plain_value(metric_value)}。"
+        metric_label = _label_for_metric(metric_key, language=language)
+        metric_value_text = _format_plain_value(metric_value, language=language)
+        if is_english_language(language):
+            return f"Best model: {best_name}, with {metric_label} = {metric_value_text}."
+        return f"最佳模型：{best_name}，{metric_label}为{metric_value_text}。"
     if best_name:
-        return f"最佳模型：{best_name}。"
+        return f"Best model: {best_name}." if is_english_language(language) else f"最佳模型：{best_name}。"
     return ""
 
 
-def _label_for_metric(metric_key: str) -> str:
+def _label_for_metric(metric_key: str, *, language: str = "zh") -> str:
     normalized_key = _normalize_key(metric_key)
+    if is_english_language(language):
+        return _METRIC_LABELS_EN.get(normalized_key, str(metric_key).strip() or normalized_key)
     return _METRIC_LABELS.get(normalized_key, str(metric_key).strip() or normalized_key)
 
 
-def _label_for_aux(aux_key: str) -> str:
+def _label_for_aux(aux_key: str, *, language: str = "zh") -> str:
     normalized_key = _normalize_key(aux_key)
+    if is_english_language(language):
+        return _AUX_LABELS_EN.get(normalized_key, str(aux_key).strip() or normalized_key)
     return _AUX_LABELS.get(normalized_key, str(aux_key).strip() or normalized_key)
 
 
@@ -570,6 +647,8 @@ def _build_model_detail_markdown(bundle: dict[str, Any]) -> str:
     column_labels = bundle.get("column_labels")
     rows = bundle.get("rows")
     task_type = str(bundle.get("task_type") or "").strip()
+    language = normalize_app_language(bundle.get("language"))
+    english = is_english_language(language)
 
     if not isinstance(column_keys, list) or not isinstance(column_labels, list) or not isinstance(rows, list):
         return ""
@@ -582,13 +661,20 @@ def _build_model_detail_markdown(bundle: dict[str, Any]) -> str:
     ]
     aux_indexes = [index for index in range(1, len(column_keys)) if index not in metric_indexes]
 
-    task_type_text = {
-        "classification": "分类",
-        "regression": "回归",
-        "clustering": "聚类",
-    }.get(task_type, "建模")
-
-    lines = ["模型展示细节"]
+    if english:
+        task_type_text = {
+            "classification": "Classification",
+            "regression": "Regression",
+            "clustering": "Clustering",
+        }.get(task_type, "Modeling")
+        lines = ["Model Details"]
+    else:
+        task_type_text = {
+            "classification": "分类",
+            "regression": "回归",
+            "clustering": "聚类",
+        }.get(task_type, "建模")
+        lines = ["模型展示细节"]
     for row in rows:
         if not isinstance(row, list) or not row:
             continue
@@ -597,8 +683,12 @@ def _build_model_detail_markdown(bundle: dict[str, Any]) -> str:
         if not model_name:
             continue
 
-        lines.append(f"- 模型名称：{model_name}")
-        lines.append(f"  - 模型类型：{task_type_text}")
+        if english:
+            lines.append(f"- Model name: {model_name}")
+            lines.append(f"  - Task type: {task_type_text}")
+        else:
+            lines.append(f"- 模型名称：{model_name}")
+            lines.append(f"  - 模型类型：{task_type_text}")
 
         for index in aux_indexes:
             if index >= len(row):
@@ -606,7 +696,8 @@ def _build_model_detail_markdown(bundle: dict[str, Any]) -> str:
             value = str(row[index]).strip()
             if not value or value == "—":
                 continue
-            lines.append(f"  - {column_labels[index]}：{value}")
+            separator = ": " if english else "："
+            lines.append(f"  - {column_labels[index]}{separator}{value}")
 
         metric_lines: list[str] = []
         for index in metric_indexes:
@@ -615,37 +706,40 @@ def _build_model_detail_markdown(bundle: dict[str, Any]) -> str:
             value = str(row[index]).strip()
             if not value or value == "—":
                 continue
-            metric_lines.append(f"    - {column_labels[index]}：{value}")
+            separator = ": " if english else "："
+            metric_lines.append(f"    - {column_labels[index]}{separator}{value}")
 
         if metric_lines:
-            lines.append("  - 主要性能指标：")
+            lines.append("  - Key performance metrics:" if english else "  - 主要性能指标：")
             lines.extend(metric_lines)
 
     return "\n".join(lines).strip()
 
 
-def _format_metric_value(value: Any, *, mark_best: bool = False) -> str:
-    text = _format_plain_value(value)
+def _format_metric_value(value: Any, *, mark_best: bool = False, language: str = "zh") -> str:
+    text = _format_plain_value(value, language=language)
     if text == "—":
         return text
     if mark_best:
-        return f"{text}（最优）"
+        return f"{text} (best)" if is_english_language(language) else f"{text}（最优）"
     return text
 
 
-def _format_column_value(value: Any) -> str:
-    return _format_plain_value(value)
+def _format_column_value(value: Any, *, language: str = "zh") -> str:
+    return _format_plain_value(value, language=language)
 
 
-def _format_cell_value(value: Any) -> str:
-    return _format_plain_value(value)
+def _format_cell_value(value: Any, *, language: str = "zh") -> str:
+    return _format_plain_value(value, language=language)
 
 
-def _format_plain_value(value: Any) -> str:
+def _format_plain_value(value: Any, *, language: str = "zh") -> str:
     if value is None:
         return "—"
 
     if isinstance(value, bool):
+        if is_english_language(language):
+            return "Yes" if value else "No"
         return "是" if value else "否"
 
     if _is_numeric(value):

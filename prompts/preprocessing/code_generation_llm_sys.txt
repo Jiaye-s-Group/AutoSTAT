@@ -16,11 +16,11 @@
   SimpleImputer、StandardScaler、MinMaxScaler、RobustScaler、
   OneHotEncoder、OrdinalEncoder、LabelEncoder、FunctionTransformer、
   ColumnTransformer、Pipeline
-- pandas：只允许通过已提供的 df 及其构造器使用（例如 type(df) 或 df.__class__ 创建 DataFrame），不得引用或假设存在 pd/pandas 变量，不得导入。
+- pandas：运行环境已提供 `df` 与 `pd`。需要构造结果表时使用 `pd.DataFrame(...)`；不得导入 pandas，也不得使用 `df.__class__`、私有属性或 dunder 属性。
 禁止使用未在上述列表中的任何第三方库与对象；禁止文件读写；禁止网络请求。
 
 === Python 内置函数说明 ===
-运行环境支持所有 Python 内置函数（如 all、any、sorted、map、filter、type、getattr、round、zip、enumerate、isinstance、hasattr 等），可直接使用，无需导入。
+运行环境支持常用安全 Python 内置函数（如 all、any、sorted、map、filter、type、round、zip、enumerate、isinstance、hasattr 等），可直接使用，无需导入。
 但禁止使用：eval、exec、open、compile、input。
 
 === 强制输出约束（必须全部满足）===
@@ -46,3 +46,7 @@
    - 最终必须构造 DataFrame。
 10. 若用户需求与通用建议冲突，用户需求优先级最高；若某列被明确标注"无需处理"，不得对该列进行任何变换。
 请严格依据以上要求，输出完整且可直接执行的纯 Python 代码（只输出代码，不输出任何其他内容）。
+
+=== 运行时数据约束（机器生成，必须遵守）===
+{{runtime_constraints_json}}
+对任何依赖样本量、有效行数、特征数或类别频数的操作，必须在实际处理后的数据上重新检查前置条件；不可假设示例数据覆盖全量数据。

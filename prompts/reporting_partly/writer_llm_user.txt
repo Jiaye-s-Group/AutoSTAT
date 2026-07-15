@@ -1,5 +1,8 @@
 请根据以下具体数据执行写作任务：
 
+【报告语言要求】
+{{language_instruction}}
+
 ### 1. 结构上下文
 【报告总目录 Structure（JSON array）】
 {{toc}}

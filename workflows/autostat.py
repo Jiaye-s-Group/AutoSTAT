@@ -1,12 +1,12 @@
 """
-Top-level AutoSTAT workflow orchestration.
+AutoSTAT 总编排 workflow。
 
-The local engine runs six workflow stages in order:
+Coordinates the AutoSTAT analysis stages.
+但本地版本不做单次大调用，而是按顺序串起 6 个子 workflow：
 
     Planning → Loading → Preprocessing → Visualizing → Modeling → Reporting
 
-Each stage follows the switches returned by Planning and can report progress
-through the optional `on_step` callback.
+每步都会尊重 Planning 的 auto 开关（False 时跳过对应阶段）。
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from workflows.modeling import run_modeling_workflow
 from workflows.reporting_toc import run_reporting_toc_workflow
 from workflows.reporting_partly import run_reporting_partly_workflow
 from workflows.reporting_reference_context import build_stage_reference_contexts
+from core.report_language import is_english_language, normalize_app_language
 
 
 def run_autostat(
@@ -36,19 +37,18 @@ def run_autostat(
     add_preference: str = "",
     preference_selected: str = "",
     target_column: str = "",
-    visualization_color: str = "",
     outline_length: str = "标准",
+    language: str = "zh",
     ref_retriever=None,
     on_step: Callable[[str, dict], None] | None = None,
 ) -> dict[str, Any]:
-    """Run the full AutoSTAT workflow once."""
+    """
+    一次性跑完整流程。
 
-    def _get_ref(query: str) -> str:
-        """Retrieve reference-document snippets for a workflow prompt."""
-        if ref_retriever is None or ref_retriever.is_empty:
-            return ""
-        return ref_retriever.retrieve_and_format(query, top_k=3)
-
+    on_step(step_name, payload) 是可选回调，让前端可以在每阶段结束立即显示进度。
+    ref_retriever: RefDocRetriever 实例，用于从用户上传的参考资料中检索相关内容。
+    """
+    language = normalize_app_language(language)
     workflow_started = time.perf_counter()
     runtime_events: list[dict[str, Any]] = []
 
@@ -69,6 +69,18 @@ def run_autostat(
             payload["_stage_finished_at_offset_seconds"] = event["finished_at_offset_seconds"]
         return payload
 
+    def sorted_runtime_events() -> list[dict[str, Any]]:
+        return sorted(runtime_events, key=lambda item: item["started_at_offset_seconds"])
+
+    def _get_ref(query: str) -> str:
+        """按 query 从参考资料中检索相关 chunks，格式化为 prompt 文本。"""
+        if ref_retriever is None or ref_retriever.is_empty:
+            return ""
+        return ref_retriever.retrieve_and_format(query, top_k=3)
+
+    def _query(zh: str, en: str) -> str:
+        return en if is_english_language(language) else zh
+
     def notify(step: str, payload: dict) -> None:
         if on_step:
             try:
@@ -76,29 +88,38 @@ def run_autostat(
             except Exception:
                 pass
 
-    # 1. Planning.
+    # ========== 1. Planning ==========
     plan = run_timed_stage(
         "planning",
         lambda: run_planning_workflow(
             df=df,
             add_preference=add_preference,
             preference_selected=preference_selected,
-            ref_context=_get_ref(f"数据分析 业务背景 {add_preference}"),
+            ref_context=_get_ref(_query(
+                f"数据分析 业务背景 {add_preference}",
+                f"data analysis business context {add_preference}",
+            )),
+            language=language,
         ),
     )
     notify("planning", plan)
 
-    # Stop early when planning cannot read the dataset.
+    # 可能 Planning 失败
     if not plan.get("shape_0"):
         return {
             "plan": plan,
-            "error": "Planning 失败：数据加载异常",
+            "error": (
+                "Planning failed: data loading error"
+                if is_english_language(language)
+                else "Planning 失败：数据加载异常"
+            ),
             "final_html": "",
             "final_html_parts": [],
             "title": "",
+            "runtime_events": sorted_runtime_events(),
         }
 
-    # Keep planning outputs as the shared stage context.
+    # 把 Planning 的产物塞到 ctx
     base = {
         "shape_0": plan["shape_0"],
         "shape_1": plan["shape_1"],
@@ -107,8 +128,9 @@ def run_autostat(
         "df": plan["df"],
     }
 
-    # 2 & 3. Loading and preprocessing can run independently.
+# ========== 2 & 3. Loading + Preprocessing 并行 ==========
     from concurrent.futures import ThreadPoolExecutor
+    from core.llm_client import submit_with_context
 
     def _run_loading():
         return run_timed_stage(
@@ -122,7 +144,11 @@ def run_autostat(
                 user_input=user_input_load,
                 add_preference=add_preference,
                 preference_selected=preference_selected,
-                ref_context=_get_ref(f"字段含义 数据说明 {base['dtype_info_str'][:200]}"),
+                ref_context=_get_ref(_query(
+                    f"字段含义 数据说明 {base['dtype_info_str'][:200]}",
+                    f"field meaning data description {base['dtype_info_str'][:200]}",
+                )),
+                language=language,
             ),
         )
 
@@ -139,31 +165,60 @@ def run_autostat(
                     user_input=user_input_pre,
                     add_preference=add_preference,
                     preference_selected=preference_selected,
-                    ref_context=_get_ref(f"数据预处理 缺失值 异常值 {add_preference}"),
+                    ref_context=_get_ref(_query(
+                        f"数据预处理 缺失值 异常值 {add_preference}",
+                        f"data preprocessing missing values outliers {add_preference}",
+                    )),
+                    language=language,
                 )
             return {
-                "summary_2": {"title": "", "desc": "", "processed_df": base["df"], "code": ""},
+                "summary_2": {
+                    "title": "",
+                    "desc": "",
+                    "processed_df": base["df"],
+                    "code": "",
+                    "status": "skipped",
+                    "data_source": "raw",
+                },
                 "abstract_2": "",
                 "suggestion": "",
+                "_status": "skipped",
             }
 
         return run_timed_stage("preprocessing", _run)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        load_future = pool.submit(_run_loading)
-        prep_future = pool.submit(_run_prep)
+        load_future = submit_with_context(pool, _run_loading)
+        prep_future = submit_with_context(pool, _run_prep)
         loading = load_future.result()
         prep = prep_future.result()
 
     notify("loading", loading)
     notify("preprocessing", prep)
 
-    # Use processed data when available, otherwise fall back to the input data.
+    if plan["prep_auto"] and prep.get("_status") != "succeeded":
+        return {
+            "plan": plan,
+            "loading": loading,
+            "preprocessing": prep,
+            "visualizing": {},
+            "modeling": {},
+            "reporting_toc": {},
+            "reporting_partly": {},
+            "error": prep.get("_code_error") or "Preprocessing failed",
+            "final_html": "",
+            "final_html_parts": [],
+            "title": "",
+            "runtime_events": sorted_runtime_events(),
+        }
+
+    # ── 从 preprocessing 输出中提取下游数据 ──────────────────────
+    # 预处理成功时使用 processed_df；仅当该阶段明确跳过时使用原始数据。
     _prep_summary = prep.get("summary_2", {})
     _processed_df_str = _prep_summary.get("processed_df") or base["df"]
     next_data = _processed_df_str
 
-    # Parse processed data to update downstream columns and preview rows.
+    # 解析 processed_df 以获取最新列名和 head
     try:
         import json as _json
         _records = _json.loads(str(next_data))
@@ -173,12 +228,13 @@ def run_autostat(
             _next_df.head(5).to_dict(orient="list"), ensure_ascii=False
         )
     except Exception:
-        # Fall back to planning metadata if the processed data is not JSON.
+        # 解析失败时退化为 Planning 阶段的元信息
         next_cols = list(df.columns.astype(str))
         next_head = base["head_dict_str"]
 
-    # 4 & 5. Visualizing and modeling can run independently.
+# ========== 4 & 5. Visualizing + Modeling 并行 ==========
     from concurrent.futures import ThreadPoolExecutor
+    from core.llm_client import submit_with_context
 
     def _run_viz():
         return run_timed_stage(
@@ -190,11 +246,14 @@ def run_autostat(
                 cols=next_cols,
                 def_head=next_head,
                 vis_auto=plan["vis_auto"],
-                color=visualization_color,
                 user_input=user_input_vis,
                 add_preference=add_preference,
                 preference_selected=preference_selected,
-                ref_context=_get_ref(f"可视化 图表 数据分布 {add_preference}"),
+                ref_context=_get_ref(_query(
+                    f"可视化 图表 数据分布 {add_preference}",
+                    f"visualization charts data distribution {add_preference}",
+                )),
+                language=language,
             ),
         )
 
@@ -211,20 +270,45 @@ def run_autostat(
                 user_prompt=user_input_model or add_preference,
                 add_preference=add_preference,
                 preference_selected=preference_selected,
-                ref_context=_get_ref(f"建模 算法 {target_column} {add_preference}"),
+                ref_context=_get_ref(_query(
+                    f"建模 算法 {target_column} {add_preference}",
+                    f"modeling algorithm target {target_column} {add_preference}",
+                )),
+                language=language,
             ),
         )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        viz_future = pool.submit(_run_viz)
-        model_future = pool.submit(_run_model)
+        viz_future = submit_with_context(pool, _run_viz)
+        model_future = submit_with_context(pool, _run_model)
         viz = viz_future.result()
         model = model_future.result()
 
     notify("visualizing", viz)
     notify("modeling", model)
 
-    # 6. Reporting.
+    failed_analysis_stages = []
+    if plan["vis_auto"] and viz.get("_status") != "succeeded":
+        failed_analysis_stages.append("visualization")
+    if plan["modeling_auto"] and model.get("_status") != "succeeded":
+        failed_analysis_stages.append("modeling")
+    if failed_analysis_stages:
+        return {
+            "plan": plan,
+            "loading": loading,
+            "preprocessing": prep,
+            "visualizing": viz,
+            "modeling": model,
+            "reporting_toc": {},
+            "reporting_partly": {},
+            "error": f"Analysis stage failed: {', '.join(failed_analysis_stages)}",
+            "final_html": "",
+            "final_html_parts": [],
+            "title": "",
+            "runtime_events": sorted_runtime_events(),
+        }
+
+    # ========== 6. Reporting ==========
     if plan["report_auto"]:
         stage_reference_contexts = build_stage_reference_contexts(
             plan=plan,
@@ -253,7 +337,11 @@ def run_autostat(
                 user_input=user_input_report,
                 add_preference=add_preference,
                 preference_selected=preference_selected,
-                ref_context=_get_ref(f"报告 分析结论 业务背景 {add_preference}"),
+                ref_context=_get_ref(_query(
+                    f"报告 分析结论 业务背景 {add_preference}",
+                    f"report findings analysis conclusions business context {add_preference}",
+                )),
+                report_language=language,
             ),
         )
         notify("reporting_toc", toc)
@@ -270,8 +358,12 @@ def run_autostat(
                 user_input=user_input_report,
                 add_preference=toc.get("add_preference", add_preference),
                 preference_select=toc.get("preference_select", preference_selected),
-                ref_context=toc.get("ref_context", "") or _get_ref(f"报告撰写 {add_preference}"),
+                ref_context=toc.get("ref_context", "") or _get_ref(_query(
+                    f"报告撰写 {add_preference}",
+                    f"report writing {add_preference}",
+                )),
                 stage_reference_contexts=stage_reference_contexts,
+                report_language=language,
             ),
         )
         notify("reporting_partly", partly)
@@ -294,18 +386,17 @@ def run_autostat(
         "modeling": model,
         "reporting_toc": toc,
         "reporting_partly": partly,
-        "runtime_events": sorted(runtime_events, key=lambda item: item["started_at_offset_seconds"]),
+        "runtime_events": sorted_runtime_events(),
         "final_html": final_html,
         "final_html_parts": final_html_parts,
         "title": title,
     }
 
 
-# CLI smoke-test entry point.
+# ---------- CLI 测试入口 ----------
 
 if __name__ == "__main__":
     import sys
-    import pandas as pd
 
     if len(sys.argv) < 2:
         print("用法: python -m workflows.autostat <csv_path> [target_column]")

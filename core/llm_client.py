@@ -13,18 +13,27 @@ import json
 import os
 import re
 import time
+from contextvars import ContextVar, copy_context
+from concurrent.futures import Executor, Future
+from pathlib import Path
 from typing import Any
-
-from core.config_store import LLMConfig, load_llm_config, llm_config_from_env
 
 try:  # Optional dependency
     from dotenv import load_dotenv
 
-    load_dotenv()
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 except Exception:
     pass
 
 _OpenAI = None
+_context_client: ContextVar["LLMClient | None"] = ContextVar(
+    "autostat_llm_client",
+    default=None,
+)
+_context_blocked_reason: ContextVar[str | None] = ContextVar(
+    "autostat_llm_blocked_reason",
+    default=None,
+)
 
 
 def _get_openai_cls():
@@ -41,35 +50,27 @@ def _get_openai_cls():
     return _OpenAI
 
 
+DEFAULT_BASE_URL = os.getenv("OPENAI_BASE_URL", "")
+DEFAULT_API_KEY = os.getenv("OPENAI_API_KEY", "")
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "")
 DEFAULT_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 DEFAULT_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+DEFAULT_CODE_MAX_TOKENS = int(os.getenv("LLM_CODE_MAX_TOKENS", "8192"))
 DEFAULT_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
 
 
-def _default_llm_config() -> LLMConfig:
-    stored_config = load_llm_config()
-    if stored_config.is_complete():
-        return stored_config
-    return llm_config_from_env()
-
-
 class LLMClient:
-    """Singleton LLM client."""
+    """OpenAI-compatible client with process and session-level configuration."""
 
     _instance: "LLMClient | None" = None
 
     def __init__(
         self,
-        base_url: str | None = None,
-        api_key: str | None = None,
-        model: str | None = None,
+        base_url: str = DEFAULT_BASE_URL,
+        api_key: str = DEFAULT_API_KEY,
+        model: str = DEFAULT_MODEL,
         timeout: float = DEFAULT_TIMEOUT,
     ):
-        default_config = _default_llm_config()
-        api_key = api_key if api_key is not None else default_config.api_key
-        base_url = base_url if base_url is not None else default_config.base_url
-        model = model if model is not None else default_config.model
-
         if not api_key:
             raise RuntimeError(
                 "未配置 API Key。请在侧边栏“大模型配置”中填写 API Key、Base URL 和 Model 后保存。"
@@ -77,10 +78,6 @@ class LLMClient:
         if not base_url:
             raise RuntimeError(
                 "未配置 Base URL。请在侧边栏“大模型配置”中填写 Base URL，例如 https://api.openai.com/v1。"
-            )
-        if not model:
-            raise RuntimeError(
-                "未配置 Model。请在侧边栏“大模型配置”中填写模型名称，例如 deepseek-chat。"
             )
 
         OpenAI = _get_openai_cls()
@@ -90,9 +87,43 @@ class LLMClient:
 
     @classmethod
     def get(cls) -> "LLMClient":
+        blocked_reason = _context_blocked_reason.get()
+        if blocked_reason:
+            raise RuntimeError(blocked_reason)
+        context_client = _context_client.get()
+        if context_client is not None:
+            return context_client
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    @classmethod
+    def configure_context(
+        cls,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> "LLMClient":
+        client = cls(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            timeout=timeout,
+        )
+        _context_client.set(client)
+        _context_blocked_reason.set(None)
+        return client
+
+    @classmethod
+    def clear_context(cls) -> None:
+        _context_client.set(None)
+        _context_blocked_reason.set(None)
+
+    @classmethod
+    def block_context(cls, reason: str) -> None:
+        _context_client.set(None)
+        _context_blocked_reason.set(reason)
 
     @classmethod
     def reconfigure(
@@ -108,6 +139,7 @@ class LLMClient:
             model=model,
             timeout=timeout,
         )
+        _context_blocked_reason.set(None)
         return cls._instance
 
     def chat(
@@ -211,11 +243,12 @@ class LLMClient:
         retries: int,
     ) -> str:
         _ = name
+        model_name = model or self.model
 
         use_max_completion_tokens = "api.openai.com" in (self.base_url or "")
         kwargs = self._build_chat_kwargs(
             messages=messages,
-            model=model,
+            model=model_name,
             temperature=temperature,
             max_tokens=max_tokens,
             response_json=response_json,
@@ -246,15 +279,6 @@ class LLMClient:
 
                 if response_json and "response_format" in err_text:
                     kwargs.pop("response_format", None)
-                    continue
-                if (
-                    "temperature" in kwargs
-                    and (
-                        "temperature" in err_text
-                        or "not a chat model" in err_text
-                    )
-                ):
-                    kwargs.pop("temperature", None)
                     continue
                 if attempt < retries:
                     time.sleep(1 + attempt)
@@ -288,6 +312,11 @@ def chat(sys: str, user: str, **kwargs: Any) -> str:
     return LLMClient.get().chat(sys, user, **kwargs)
 
 
+def chat_code(sys: str, user: str, **kwargs: Any) -> str:
+    kwargs.setdefault("max_tokens", DEFAULT_CODE_MAX_TOKENS)
+    return chat(sys, user, **kwargs)
+
+
 def chat_multimodal(sys: str, text: str, **kwargs: Any) -> str:
     return LLMClient.get().chat_multimodal(sys, text, **kwargs)
 
@@ -296,6 +325,18 @@ def chat_json(sys: str, user: str, **kwargs: Any) -> dict[str, Any]:
     kwargs.setdefault("response_json", True)
     raw = chat(sys, user, **kwargs)
     return parse_json_best_effort(raw)
+
+
+def submit_with_context(
+    executor: Executor,
+    fn,
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> Future:
+    """Submit work while preserving the current session's LLM client."""
+    context = copy_context()
+    return executor.submit(context.run, fn, *args, **kwargs)
 
 
 def parse_json_best_effort(raw: str) -> dict[str, Any]:

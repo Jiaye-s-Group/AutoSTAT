@@ -1,5 +1,8 @@
 请根据以下数据执行规划任务：
 
+【报告语言要求】
+{{language_instruction}}
+
 【1. 报告目录结构 toc_list（JSON array<object>）】
 {{toc_list}}
 

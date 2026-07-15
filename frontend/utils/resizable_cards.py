@@ -357,11 +357,13 @@ def inject_resizable_card_resizer() -> None:
             }
           });
 
-          const observer = new MutationObserver(() => {
-            collapseHostElement();
-            parentWindow.requestAnimationFrame(enhanceAll);
-          });
-          observer.observe(doc.body, { childList: true, subtree: true });
+          if (doc.body && parentWindow.MutationObserver) {
+            const observer = new parentWindow.MutationObserver(() => {
+              collapseHostElement();
+              parentWindow.requestAnimationFrame(enhanceAll);
+            });
+            observer.observe(doc.body, { childList: true, subtree: true });
+          }
 
           collapseHostElement();
           enhanceAll();

@@ -1,0 +1,5 @@
+Source language: {{source_language_name}}
+Target language: {{target_language_name}}
+
+Outline:
+{{toc_text}}
