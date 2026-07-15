@@ -31,6 +31,13 @@ from utils.workflow_state import (
 from core.planning_contract import DEFAULT_STAGE_PLAN
 
 
+st.set_page_config(
+    page_title="Autostat",
+    page_icon="🤖",
+    layout="wide",
+)
+
+
 # 忽略警告
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", message="missing ScriptRunContext")
