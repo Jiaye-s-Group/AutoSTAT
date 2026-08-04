@@ -259,6 +259,27 @@ class UnsafeCodeError(ValueError):
     pass
 
 
+def generated_code_execution_policy() -> dict[str, Any]:
+    """Return the sandbox contract supplied to generated-code prompts.
+
+    Keeping this contract next to the validator prevents prompts from drifting
+    away from the rules enforced by :func:`safe_exec`.
+    """
+    return {
+        "executor": "safe_exec",
+        "allowed_import_roots": sorted(DEFAULT_ALLOWED_IMPORT_ROOTS),
+        "allowed_builtin_names": sorted(_SAFE_BUILTIN_NAMES),
+        "forbidden_names": sorted(_BLOCKED_NAMES),
+        "forbidden_attributes": sorted(_BLOCKED_ATTRIBUTES),
+        "rules": [
+            "Do not use forbidden names or attributes; validation rejects them before execution.",
+            "Do not use private or dunder attributes, except __call__ and __init__.",
+            "Do not use dynamic reflection such as getattr; access a known public attribute directly.",
+            "Do not use file, network, process, environment, or dynamic-code APIs.",
+        ],
+    }
+
+
 class _SafetyVisitor(ast.NodeVisitor):
     def __init__(self, allowed_import_roots: frozenset[str]):
         self.allowed_import_roots = allowed_import_roots

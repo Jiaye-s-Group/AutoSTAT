@@ -9,8 +9,12 @@
 2. 禁止出现 Markdown 标记（禁止 ```、```python 等）。
 3. 不要输出注释或任何自然语言段落。
 4. 禁止 print、display、日志输出、文件读写、网络请求。
-5. 脚本最后必须且只能保留一行结果赋值：process_df = ...
+5. 脚本最后必须且只能保留一行结果赋值：process_df = ...；若 Preprocessing Contract 要求 QC，另行定义 JSON 可序列化 dict `qc_summary`，不得 print。
    不允许额外的输出语句。
+6. 修复 `qc_summary` 时必须使用以下口径：
+   - `missing_by_column` 报告输出表 `process_df` 预处理后的实际缺失数，覆盖每个输出列；填补前缺失数只能放在可选 `missing_before_by_column`。
+   - `modified_row_count` 是被实际改动的唯一行数，不是改动/填补单元格数。若多列缺失落在同一批行，必须用行级 boolean union mask 计算。
+   - 若需要报告单元格数，使用可选 `imputed_cell_count`，不要写入 `modified_row_count`。
 【运行环境说明】
 环境中已提供：
 - pandas DataFrame 变量：df，以及 pandas 别名：pd
@@ -27,14 +31,13 @@
 【必须遵守的处理规则】
 1. 若有用户需求，请优先满足用户需求（优先级高于其他规则）。
 2. 若建议指出某列"无需处理"，则对该列不做任何处理。
-3. 对类别特征：可用 OneHotEncoder 或 OrdinalEncoder。
-   若为单列字符串/类别列：必须使用 LabelEncoder 或 OrdinalEncoder，不得 passthrough。
-4. 构建 ColumnTransformer 之前，必须检测并处理"混合型列"（同时包含数值和字符串）：
+3. 对类别特征：仅在已确认建议或 Preprocessing Contract 明确要求时才可用 OneHotEncoder 或 OrdinalEncoder；否则 passthrough 保留原值。
+4. 仅当已确认建议或契约需要编码/变换时，才在构建 ColumnTransformer 前检测并处理"混合型列"（同时包含数值和字符串）：
    使用 FunctionTransformer(lambda x: x.astype(str)) 将其统一为字符串类型。
-5. ColumnTransformer 的 transformers 中仅包含经过上述处理的列。
+5. 若使用 ColumnTransformer，其 transformers 中仅包含已按契约允许处理的列。
 6. 使用 OneHotEncoder 时，若输出稀疏矩阵，请确保最终输出可以转为带列名的 DataFrame；
    如需转 dense，请显式设置 OneHotEncoder(sparse_output=False)（或兼容旧版本 sparse=False）。
-7. 若 df 中存在重复表头行（例如某一行与 header 完全一致），需自动检测并删除该行。
+7. 若 df 中存在重复表头行或其他 QC 异常，处理方式必须服从 Preprocessing Contract；契约要求记录时不得自动删除。
 8. 预处理后的 DataFrame 每一列必须有明确列名（包含 OneHot 后展开的列名）。
 9. 所有括号必须成对闭合，不得遗漏或错位。
 【修复任务要求】
@@ -47,4 +50,5 @@
 
 === 运行时数据约束（机器生成，必须遵守）===
 {{runtime_constraints_json}}
+其中 `execution_safety` 是实际执行器的强制规则。修复后不得保留禁止列表中的名称或属性；特别是不得使用 `getattr`、私有/dunder 属性、动态反射或任何文件、网络、进程 API。
 修复涉及样本量、有效行数、特征数或类别频数的错误时，必须在实际处理后的数据上重新检查前置条件。

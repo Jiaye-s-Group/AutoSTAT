@@ -16,10 +16,24 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import ContextVar
 from typing import Any
 
-from core.llm_client import chat, chat_code, chat_multimodal, submit_with_context
+from core.llm_client import (
+    LLMOutputIncompleteError,
+    LLMOutputTruncatedError,
+    chat,
+    chat_code,
+    chat_multimodal,
+    chat_suggestion,
+    submit_with_context,
+)
 from core.code_runtime_profile import build_code_runtime_constraints
+from core.figure_artifacts import normalize_figure_artifact
 from core.prompt_template import render_file
 from core.visualization_code_sanitizer import sanitize_visualization_code
+from core.visualization_contract import (
+    build_visualization_contract,
+    contract_as_prompt as visualization_contract_as_prompt,
+    validate_visualization_result,
+)
 from core.suggestion_revision import normalize_suggestion_output, revise_suggestion
 from core.report_language import (
     app_language_instruction,
@@ -253,6 +267,26 @@ def _build_ctx(
     }
 
 
+def ensure_visualization_contract(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Backfill a chart contract for interactive contexts created before this version."""
+    working_ctx = dict(ctx)
+    if isinstance(working_ctx.get("visualization_contract"), dict):
+        working_ctx.setdefault(
+            "visualization_contract_json",
+            visualization_contract_as_prompt(working_ctx["visualization_contract"]),
+        )
+        return working_ctx
+    contract = build_visualization_contract(
+        visual_recommendation=str(working_ctx.get("visual_recommendation") or working_ctx.get("visual_recommendatio") or ""),
+        refined_suggestions=str(working_ctx.get("refined_suggestions") or ""),
+        user_input=str(working_ctx.get("user_input") or ""),
+        add_preference=str(working_ctx.get("add_preference") or ""),
+    )
+    working_ctx["visualization_contract"] = contract
+    working_ctx["visualization_contract_json"] = visualization_contract_as_prompt(contract)
+    return working_ctx
+
+
 def run_visualizing_phase1(
     *,
     data: str,
@@ -279,24 +313,45 @@ def run_visualizing_phase1(
         ref_context=ref_context, language=language,
     )
 
-    vr_sys = render_file("visualizing/sec3_get_visual_recommendation_llm_sys.txt", ctx)
-    vr_user = render_file("visualizing/sec3_get_visual_recommendation_llm_user.txt", ctx)
-    visual_recommendatio = normalize_suggestion_output(
-        chat(vr_sys, vr_user, name="viz.get_visual_recommendation")
-    )
-    ctx["visual_recommendation"] = _truncate_prompt_text(
-        visual_recommendatio,
-        MAX_PROMPT_CONTEXT_CHARS,
-    )
-    ctx["visual_recommendatio"] = ctx["visual_recommendation"]
+    try:
+        vr_sys = render_file("visualizing/sec3_get_visual_recommendation_llm_sys.txt", ctx)
+        vr_user = render_file("visualizing/sec3_get_visual_recommendation_llm_user.txt", ctx)
+        visual_recommendatio = normalize_suggestion_output(
+            chat_suggestion(vr_sys, vr_user, name="viz.get_visual_recommendation")
+        )
+        ctx["visual_recommendation_full"] = visual_recommendatio
+        ctx["visual_recommendation"] = _truncate_prompt_text(
+            visual_recommendatio,
+            MAX_PROMPT_CONTEXT_CHARS,
+        )
+        ctx["visual_recommendatio"] = ctx["visual_recommendation"]
 
-    rs_sys = render_file("visualizing/sec3_refine_suggestions_llm_sys.txt", ctx)
-    rs_user = render_file("visualizing/sec3_refine_suggestions_llm_user.txt", ctx)
-    refined_suggestions = chat(rs_sys, rs_user, name="viz.refine_suggestions").strip()
-    ctx["refined_suggestions"] = _truncate_prompt_text(
-        refined_suggestions,
-        MAX_PROMPT_CONTEXT_CHARS,
+        rs_sys = render_file("visualizing/sec3_refine_suggestions_llm_sys.txt", ctx)
+        rs_user = render_file("visualizing/sec3_refine_suggestions_llm_user.txt", ctx)
+        refined_suggestions = normalize_suggestion_output(
+            chat_suggestion(rs_sys, rs_user, name="viz.refine_suggestions")
+        )
+        ctx["refined_suggestions_full"] = refined_suggestions
+        ctx["refined_suggestions"] = _truncate_prompt_text(
+            refined_suggestions,
+            MAX_PROMPT_CONTEXT_CHARS,
+        )
+    except (LLMOutputIncompleteError, LLMOutputTruncatedError) as exc:
+        return {
+            "visual_recommendatio": "",
+            "refined_suggestions": "",
+            "_ctx": ctx,
+            "_status": "suggestion_incomplete",
+            "_error": str(exc),
+        }
+    contract = build_visualization_contract(
+        visual_recommendation=visual_recommendatio,
+        refined_suggestions=refined_suggestions,
+        user_input=user_input,
+        add_preference=add_preference,
     )
+    ctx["visualization_contract"] = contract
+    ctx["visualization_contract_json"] = visualization_contract_as_prompt(contract)
 
     return {
         "visual_recommendatio": visual_recommendatio,
@@ -312,26 +367,47 @@ def revise_visualizing_phase1(
     revision_instruction: str,
 ) -> dict[str, Any]:
     revised_ctx = dict(ctx)
-    revised = revise_suggestion(
-        stage_label="visualization",
-        original_requirements=original_requirements,
-        current_suggestion=str(ctx.get("visual_recommendatio") or ctx.get("visual_recommendation") or ""),
-        revision_instruction=revision_instruction,
-        hard_constraints=f"Available columns: {ctx.get('cols', [])}",
-        language_instruction=str(ctx.get("language_instruction") or ""),
+    try:
+        revised = revise_suggestion(
+            stage_label="visualization",
+            original_requirements=original_requirements,
+            current_suggestion=str(ctx.get("visual_recommendatio") or ctx.get("visual_recommendation") or ""),
+            revision_instruction=revision_instruction,
+            hard_constraints=f"Available columns: {ctx.get('cols', [])}",
+            language_instruction=str(ctx.get("language_instruction") or ""),
+        )
+        revised_ctx["visual_recommendation_full"] = revised
+        revised_ctx["visual_recommendation"] = _truncate_prompt_text(
+            revised,
+            MAX_PROMPT_CONTEXT_CHARS,
+        )
+        revised_ctx["visual_recommendatio"] = revised_ctx["visual_recommendation"]
+        rs_sys = render_file("visualizing/sec3_refine_suggestions_llm_sys.txt", revised_ctx)
+        rs_user = render_file("visualizing/sec3_refine_suggestions_llm_user.txt", revised_ctx)
+        refined = normalize_suggestion_output(
+            chat_suggestion(rs_sys, rs_user, name="viz.refine_revision")
+        )
+        revised_ctx["refined_suggestions_full"] = refined
+        revised_ctx["refined_suggestions"] = _truncate_prompt_text(
+            refined,
+            MAX_PROMPT_CONTEXT_CHARS,
+        )
+    except (LLMOutputIncompleteError, LLMOutputTruncatedError) as exc:
+        return {
+            "visual_recommendatio": "",
+            "refined_suggestions": "",
+            "_ctx": revised_ctx,
+            "_status": "suggestion_incomplete",
+            "_error": str(exc),
+        }
+    contract = build_visualization_contract(
+        visual_recommendation=revised,
+        refined_suggestions=refined,
+        user_input=str(revised_ctx.get("user_input") or original_requirements or ""),
+        add_preference=str(revised_ctx.get("add_preference") or ""),
     )
-    revised_ctx["visual_recommendation"] = _truncate_prompt_text(
-        revised,
-        MAX_PROMPT_CONTEXT_CHARS,
-    )
-    revised_ctx["visual_recommendatio"] = revised_ctx["visual_recommendation"]
-    rs_sys = render_file("visualizing/sec3_refine_suggestions_llm_sys.txt", revised_ctx)
-    rs_user = render_file("visualizing/sec3_refine_suggestions_llm_user.txt", revised_ctx)
-    refined = chat(rs_sys, rs_user, name="viz.refine_revision").strip()
-    revised_ctx["refined_suggestions"] = _truncate_prompt_text(
-        refined,
-        MAX_PROMPT_CONTEXT_CHARS,
-    )
+    revised_ctx["visualization_contract"] = contract
+    revised_ctx["visualization_contract_json"] = visualization_contract_as_prompt(contract)
     return {
         "visual_recommendatio": revised,
         "refined_suggestions": refined,
@@ -341,20 +417,29 @@ def revise_visualizing_phase1(
 
 def generate_visualizing_code(*, ctx: dict[str, Any]) -> str:
     """Generate a visualization code draft without executing it."""
-    cg_sys = render_file("visualizing/sec3_code_generation_llm_sys.txt", ctx, strict=True)
-    cg_user = render_file("visualizing/sec3_code_generation_llm_user.txt", ctx, strict=True)
+    working_ctx = ensure_visualization_contract(ctx)
+    working_ctx.setdefault(
+        "visual_recommendation",
+        str(working_ctx.get("visual_recommendatio") or ""),
+    )
+    working_ctx.setdefault("visualization_contract_json", "{}")
+    cg_sys = render_file("visualizing/sec3_code_generation_llm_sys.txt", working_ctx, strict=True)
+    cg_user = render_file("visualizing/sec3_code_generation_llm_user.txt", working_ctx, strict=True)
     return _sanitize_visualization_code(
         chat_code(cg_sys, cg_user, name="viz.code_generation").strip()
     )
 
 
 def repair_visualizing_code(*, ctx: dict[str, Any], code: str, error: str) -> str:
+    contract_ctx = ensure_visualization_contract(ctx)
     fix_ctx = {
-        **ctx,
+        **contract_ctx,
         "code": code,
         "code_vis": code,
         "error_msg": error,
         "error": error,
+        "visual_recommendation": str(contract_ctx.get("visual_recommendation") or contract_ctx.get("visual_recommendatio") or ""),
+        "visualization_contract_json": str(contract_ctx.get("visualization_contract_json") or "{}"),
     }
     fix_sys = render_file("visualizing/sec3_fixed_code_llm_sys.txt", fix_ctx, strict=True)
     fix_user = render_file("visualizing/sec3_fixed_code_llm_user.txt", fix_ctx, strict=True)
@@ -371,12 +456,16 @@ def validate_visualizing_code(
     initial_code: str = "",
 ) -> dict[str, Any]:
     """Run the shared legacy five-attempt generation/fix loop without chart narration."""
+    ctx = ensure_visualization_contract(ctx)
     current_code = _sanitize_visualization_code(initial_code) if initial_code else generate_visualizing_code(ctx=ctx)
     success = False
     last_error = ""
     failure_stage = "preview"
     exec_result: dict[str, Any] = {}
     attempts = 0
+    validation_status = "failed"
+    validation_warnings: list[dict[str, Any]] = []
+    missing_charts: list[dict[str, str]] = []
     for attempt in range(MAX_FIX_ATTEMPTS):
         attempts = attempt + 1
         validate = validate_viz_code(code=current_code, df_data=def_head)
@@ -385,6 +474,22 @@ def validate_visualizing_code(
             exec_result = execute_and_extract(code=current_code, df_data=data)
             full_error = str(exec_result.get("error") or "")
             if not full_error and exec_result.get("fig_task_list"):
+                contract_result = validate_visualization_result(
+                    figure_keys=[item.get("title") for item in exec_result.get("fig_task_list", []) if isinstance(item, dict)],
+                    contract=ctx.get("visualization_contract") or {},
+                )
+                validation_status = str(contract_result.get("status") or "complete")
+                missing_charts = list(contract_result.get("missing_charts") or [])
+                validation_warnings = list(exec_result.get("warnings") or [])
+                validation_warnings.extend(
+                    {
+                        "scope": "contract",
+                        "chart_id": item.get("id"),
+                        "spec": item.get("spec"),
+                        "error": "The required chart was not returned.",
+                    }
+                    for item in missing_charts
+                )
                 success = True
                 break
             failure_stage = "full"
@@ -409,6 +514,9 @@ def validate_visualizing_code(
         "error": last_error,
         "execution_stage": failure_stage,
         "fig_task_list": exec_result.get("fig_task_list", []),
+        "validation_status": validation_status,
+        "warnings": validation_warnings,
+        "missing_charts": missing_charts,
         "attempts": attempts,
     }
 
@@ -502,19 +610,48 @@ def run_visualizing_phase2(
     abstract_3 = chat(abs_sys, abs_user, name="viz.abstract").strip()
 
     composed = sec3_composer(fig_analysis=aggregate_results)
+    composed["summary_3"]["validation_status"] = validation.get("validation_status", "complete")
+    composed["summary_3"]["warnings"] = validation.get("warnings", [])
+    composed["summary_3"]["missing_charts"] = validation.get("missing_charts", [])
     if is_english_language(ctx.get("language")):
         composed["summary_3"]["title"] = "Data Visualization"
+    figure_artifacts = []
+    for index, item in enumerate(fig_task_list):
+        summary_item = aggregate_results[index] if index < len(aggregate_results) else {}
+        title = tu_title[index] if index < len(tu_title) else ""
+        description = ""
+        if isinstance(summary_item, dict):
+            description = str(
+                summary_item.get("analysis")
+                or summary_item.get("desc")
+                or summary_item.get("summary")
+                or ""
+            )
+        figure_artifacts.append(
+            normalize_figure_artifact(
+                item,
+                index,
+                title=title,
+                description=description,
+                language=str(ctx.get("language") or ""),
+            )
+        )
     return {
         "full": full,
         "abstract_3": abstract_3,
         "summary_3": composed["summary_3"],
+        "figure_artifacts": figure_artifacts,
         "visual_recommendatio": visual_recommendatio,
         "final_code": final_code,
         "tu_title": tu_title,
-            "_status": "succeeded",
-            "_execution_stage": "full",
-            "_fix_attempts": validation["attempts"],
-        }
+        "_visualization_contract": ctx.get("visualization_contract") or {},
+        "_validation_status": validation.get("validation_status", "complete"),
+        "_warnings": validation.get("warnings", []),
+        "_missing_charts": validation.get("missing_charts", []),
+        "_status": "succeeded",
+        "_execution_stage": "full",
+        "_fix_attempts": validation["attempts"],
+    }
 
 
 def run_visualizing_workflow(
@@ -543,6 +680,24 @@ def run_visualizing_workflow(
         preference_selected=preference_selected, ref_context=ref_context,
         language=language,
     )
+    if p1.get("_status") == "suggestion_incomplete":
+        result = _empty_result()
+        english = is_english_language(language)
+        error_text = str(p1.get("_error") or "")
+        result["summary_3"] = {
+            "title": "Data Visualization" if english else "数据可视化",
+            "fig_analysis": [],
+            "desc": (
+                f"Visualization suggestion generation did not complete: {error_text}"
+                if english
+                else f"可视化建议生成未完成：{error_text}"
+            ),
+            "status": "failed",
+        }
+        result["abstract_3"] = result["summary_3"]["desc"]
+        result["_status"] = "suggestion_incomplete"
+        result["_error"] = error_text
+        return result
     ctx = p1["_ctx"]
     if not ctx:
         return _empty_result()

@@ -1224,14 +1224,11 @@ def vis_palette(agent):
     if fig_desc_list:
         recolored_figs = []
         for fig_index, item in enumerate(fig_desc_list):
-            base_fig = item.get("base_fig", item.get("fig"))
-            recolored_figs.append(
-                {
-                    "fig": apply_palette_to_figure(base_fig, colors, fig_index),
-                    "base_fig": base_fig,
-                    "desc": item.get("desc"),
-                }
-            )
+            item_dict = dict(item) if isinstance(item, dict) else {"fig": item}
+            base_fig = item_dict.get("base_fig", item_dict.get("fig"))
+            item_dict["fig"] = apply_palette_to_figure(base_fig, colors, fig_index)
+            item_dict["base_fig"] = base_fig
+            recolored_figs.append(item_dict)
         agent.save_fig(recolored_figs)
 
     return colors

@@ -295,6 +295,7 @@ def build_model_comparison_table_bundle(
         target=target,
         user_input=user_input,
         additional_preference=additional_preference,
+        model_count=len(rows),
         language=language,
     )
 
@@ -527,12 +528,23 @@ def _build_table_title(
     target: str,
     user_input: str,
     additional_preference: str,
+    model_count: int = 0,
     language: str = "zh",
 ) -> str:
     target_text = _clean_context_text(target)
     _ = user_input, additional_preference
 
     if is_english_language(language):
+        if model_count == 1:
+            if task_type == "classification":
+                return "Classification Model Performance Summary"
+            if task_type == "regression":
+                if target_text:
+                    return f"Model Performance Summary for Predicting {target_text}"
+                return "Regression Model Performance Summary"
+            if task_type == "clustering":
+                return "Clustering Model Result Summary"
+            return "Modeling Result Summary"
         if task_type == "classification":
             return "Performance Comparison Across Classification Models"
         if task_type == "regression":
@@ -543,6 +555,16 @@ def _build_table_title(
             return "Result Comparison Across Clustering Models"
         return "Result Comparison Across Modeling Methods"
 
+    if model_count == 1:
+        if task_type == "classification":
+            return "分类模型性能摘要"
+        if task_type == "regression":
+            if target_text:
+                return f"{target_text}预测模型性能摘要"
+            return "回归模型性能摘要"
+        if task_type == "clustering":
+            return "聚类模型结果摘要"
+        return "建模结果摘要"
     if task_type == "classification":
         return "不同模型在分类任务上的性能比较"
     if task_type == "regression":

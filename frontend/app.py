@@ -29,6 +29,8 @@ from utils.workflow_state import (
     stable_fingerprint,
 )
 from core.planning_contract import DEFAULT_STAGE_PLAN
+from core.plotly_serialization import figure_to_json, json_safe_figure
+from core.figure_artifacts import normalize_figure_artifact
 
 
 st.set_page_config(
@@ -432,11 +434,22 @@ class VisualizationAgent(BaseAgent):
     def save_error(self, error):
         self.error = error
 
-    def add_fig(self, fig, desc=None, base_fig=None, title=None):
+    def add_fig(
+        self,
+        fig,
+        desc=None,
+        base_fig=None,
+        title=None,
+        chart_id=None,
+        fig_dict_key=None,
+        generation_order=None,
+        language=None,
+    ):
         if base_fig is None:
-            if hasattr(fig, "to_json"):
+            if hasattr(fig, "to_plotly_json"):
                 try:
-                    base_fig = fig.to_json()
+                    fig = json_safe_figure(fig)
+                    base_fig = figure_to_json(fig)
                 except Exception:
                     base_fig = fig
             else:
@@ -444,7 +457,23 @@ class VisualizationAgent(BaseAgent):
         item = {"fig": fig, "base_fig": base_fig, "desc": desc}
         if title is not None:
             item["title"] = title
-        self.fig_desc_list.append(item)
+        if chart_id is not None:
+            item["chart_id"] = chart_id
+        if fig_dict_key is not None:
+            item["fig_dict_key"] = fig_dict_key
+        if generation_order is not None:
+            item["generation_order"] = generation_order
+        if language is not None:
+            item["language"] = language
+        self.fig_desc_list.append(
+            normalize_figure_artifact(
+                item,
+                len(self.fig_desc_list),
+                title=str(title or ""),
+                description=str(desc or ""),
+                language=str(language or ""),
+            )
+        )
 
     def code_generation(self, df_head, suggest):
         return ""
@@ -1098,6 +1127,7 @@ def run_app():
             "report_add_preference",
             "report_preference_selected",
             "report_selected_full_conten",
+            "report_figure_ledger",
             "report_toc_text",
             "report_display_outline",
             "report_display_to_internal_toc_map",
@@ -1359,18 +1389,32 @@ def run_app():
             f'<div class="language-toggle-title">{t("common.language")}</div>',
             unsafe_allow_html=True,
         )
+        current_language = get_language()
+        ui_language_widget_key = "ui_language_segmented_selector"
+        ui_language_widget_sync_key = "ui_language_widget_synced"
+        if (
+            st.session_state.get(ui_language_widget_sync_key) != current_language
+            and ui_language_widget_key in st.session_state
+        ):
+            st.session_state[ui_language_widget_key] = current_language
+        st.session_state[ui_language_widget_sync_key] = current_language
+
+        language_widget_kwargs = {}
+        if ui_language_widget_key not in st.session_state:
+            language_widget_kwargs["default"] = current_language
         selected_language = st.segmented_control(
             t("common.language"),
             options=["zh", "en"],
-            default=get_language(),
             format_func=lambda value: "中文" if value == "zh" else "English",
-            key="ui_language_segmented_selector",
+            key=ui_language_widget_key,
             label_visibility="collapsed",
+            **language_widget_kwargs,
         )
-        selected_language = selected_language or get_language()
-        if selected_language != get_language():
+        selected_language = selected_language or current_language
+        if selected_language != current_language:
             set_language(selected_language)
             sync_report_language(st.session_state.get("report_agent"), selected_language)
+            st.session_state[ui_language_widget_sync_key] = selected_language
             st.rerun()
 
         with st.expander(t("sidebar.llm_config"), expanded=True):
@@ -1456,6 +1500,7 @@ def run_app():
                 st.switch_page(next_page)
 
     pg.run()
+
 
 if __name__ == "__main__":
     run_app()

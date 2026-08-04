@@ -67,6 +67,7 @@ def run_planning_workflow(
             "shape_1": 0,
             "dtype_info_str": "",
             "head_dict_str": "",
+            "data_profile_str": "",
             "df": "",
         }
 
@@ -75,6 +76,7 @@ def run_planning_workflow(
         "shape_1": meta["shape_1"],
         "dtype_info_str": meta["dtype_info_str"],
         "head_dict_str": meta["head_dict_str"],
+        "data_profile_str": meta.get("data_profile_str", ""),
         "add_preference": add_preference or "",
         "preference_selected": preference_selected or "",
         # analysis_path prompt 里写的是 preference_select（少了 ed）
@@ -132,6 +134,7 @@ def run_planning_workflow(
         "shape_1": meta["shape_1"],
         "dtype_info_str": meta["dtype_info_str"],
         "head_dict_str": meta["head_dict_str"],
+        "data_profile_str": meta.get("data_profile_str", ""),
         "df": meta["df"],
     }
 

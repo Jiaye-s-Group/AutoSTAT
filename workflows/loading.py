@@ -38,6 +38,7 @@ def run_loading_workflow(
     shape_1: int,
     dtype_info_str: str,
     head_dict_str: str,
+    data_profile_str: str = "",
     loading_auto: bool = True,
     user_input: str = "",
     add_preference: str = "",
@@ -58,6 +59,12 @@ def run_loading_workflow(
         "shape_1": shape_1,
         "dtype_info_str": dtype_info_str,
         "head_dict_str": head_dict_str,
+        "data_profile_str": data_profile_str or "{}",
+        "preview_note": (
+            "完整 DataFrame 已加载；前 5 行只用于展示预览，不代表系统只能访问 5 行。"
+            if not is_english_language(language)
+            else "The full DataFrame is loaded; the first 5 rows are a display preview only and do not mean only 5 rows are available."
+        ),
         "user_input": user_input or "",
         "add_preference": add_preference or "",
         "preference_selected": preference_selected or "",
@@ -100,6 +107,8 @@ def run_loading_workflow(
         },
         "abstract_1": abstract_1 or "",
         "_description": description,
+        "_data_profile_str": data_profile_str or "{}",
+        "_reference_context": ctx.get("ref_context", ""),
     }
 
 
@@ -152,6 +161,7 @@ if __name__ == "__main__":
         shape_1=meta["shape_1"],
         dtype_info_str=meta["dtype_info_str"],
         head_dict_str=meta["head_dict_str"],
+        data_profile_str=meta.get("data_profile_str", ""),
         loading_auto=True,
         user_input=user_input,
     )

@@ -56,10 +56,24 @@ def inject_resizable_card_resizer() -> None:
               }
               [data-testid="stHorizontalBlock"].autostat-resizable-card-row {
                 position: relative;
+                align-items: flex-start;
+                overscroll-behavior-y: contain;
               }
               [data-testid="stColumn"].autostat-resizable-card-column,
               [data-testid="column"].autostat-resizable-card-column {
                 position: relative;
+                min-width: 0 !important;
+              }
+              [data-testid="stColumn"].autostat-resizable-card-column > .autostat-column-scroll-body,
+              [data-testid="column"].autostat-resizable-card-column > .autostat-column-scroll-body {
+                box-sizing: border-box;
+                max-height: var(--autostat-column-scroll-max-height, calc(100vh - 8.25rem));
+                min-width: 0;
+                overflow-x: hidden;
+                overflow-y: auto;
+                overscroll-behavior-y: contain;
+                padding-right: 0.25rem;
+                scrollbar-gutter: stable;
               }
               .autostat-resize-handle {
                 position: absolute;
@@ -81,6 +95,12 @@ def inject_resizable_card_resizer() -> None:
               @media (max-width: ${MIN_VIEWPORT_WIDTH - 1}px) {
                 .autostat-resize-handle {
                   display: none !important;
+                }
+                [data-testid="stColumn"].autostat-resizable-card-column > .autostat-column-scroll-body,
+                [data-testid="column"].autostat-resizable-card-column > .autostat-column-scroll-body {
+                  max-height: none !important;
+                  overflow-y: visible !important;
+                  padding-right: 0 !important;
                 }
               }
             `;
@@ -127,6 +147,58 @@ def inject_resizable_card_resizer() -> None:
               return false;
             }
             return columns.some((column) => column.querySelector(EXPANDER_SELECTOR));
+          }
+
+          function getScrollableColumnBody(column) {
+            if (!column) {
+              return null;
+            }
+            const directVerticalBlock = Array.from(column.children).find((child) => {
+              return child.matches && child.matches('[data-testid="stVerticalBlock"]');
+            });
+            return (
+              directVerticalBlock ||
+              column.querySelector(':scope > [data-testid="stVerticalBlock"]') ||
+              column.firstElementChild
+            );
+          }
+
+          function updateColumnScrollHeights() {
+            if (isNarrowViewport()) {
+              return;
+            }
+
+            const bottomGap = 24;
+            const minHeight = 240;
+            Array.from(doc.querySelectorAll(".autostat-column-scroll-body")).forEach((element) => {
+              const rect = element.getBoundingClientRect();
+              const available = Math.max(minHeight, parentWindow.innerHeight - rect.top - bottomGap);
+              element.style.setProperty("--autostat-column-scroll-max-height", `${available}px`);
+            });
+          }
+
+          function containColumnWheel(event) {
+            if (isNarrowViewport()) {
+              return;
+            }
+
+            const scrollBody = event.target?.closest?.(".autostat-column-scroll-body");
+            if (!scrollBody) {
+              return;
+            }
+
+            const deltaY = event.deltaY || 0;
+            if (!deltaY) {
+              return;
+            }
+
+            const canScrollUp = scrollBody.scrollTop > 0;
+            const canScrollDown =
+              scrollBody.scrollTop + scrollBody.clientHeight < scrollBody.scrollHeight - 1;
+
+            if ((deltaY < 0 && canScrollUp) || (deltaY > 0 && canScrollDown)) {
+              event.stopPropagation();
+            }
           }
 
           function getExpanderTitle(expander) {
@@ -319,6 +391,10 @@ def inject_resizable_card_resizer() -> None:
 
             columns.forEach((column, index) => {
               column.classList.add("autostat-resizable-card-column");
+              const scrollBody = getScrollableColumnBody(column);
+              if (scrollBody) {
+                scrollBody.classList.add("autostat-column-scroll-body");
+              }
 
               if (index >= columns.length - 1 || column.dataset.autostatResizable === "true") {
                 return;
@@ -334,6 +410,7 @@ def inject_resizable_card_resizer() -> None:
               column.appendChild(handle);
             });
             restoreBlockLayout(block);
+            updateColumnScrollHeights();
           }
 
           function enhanceAll() {
@@ -341,11 +418,16 @@ def inject_resizable_card_resizer() -> None:
             const main = getMainRoot();
             const blocks = Array.from(main.querySelectorAll(HORIZONTAL_BLOCK_SELECTOR));
             blocks.forEach(enhanceBlock);
+            updateColumnScrollHeights();
           }
 
           doc.addEventListener("pointermove", updateDrag, true);
           doc.addEventListener("pointerup", endDrag, true);
           doc.addEventListener("pointercancel", endDrag, true);
+          doc.addEventListener("wheel", containColumnWheel, { capture: true, passive: true });
+          doc.addEventListener("scroll", () => {
+            parentWindow.requestAnimationFrame(updateColumnScrollHeights);
+          }, true);
           parentWindow.addEventListener("resize", () => {
             if (isNarrowViewport()) {
               Array.from(doc.querySelectorAll(HORIZONTAL_BLOCK_SELECTOR)).forEach((block) => {
@@ -354,6 +436,7 @@ def inject_resizable_card_resizer() -> None:
             } else {
               enhanceAll();
               Array.from(doc.querySelectorAll(HORIZONTAL_BLOCK_SELECTOR)).forEach(restoreBlockLayout);
+              updateColumnScrollHeights();
             }
           });
 

@@ -15,18 +15,23 @@ from utils.suggestion_state import (
     add_requirement,
     base_requirements_text,
     begin_code_execution,
+    code_matches_current_suggestion,
     clear_suggestion_state,
     can_auto_repair,
     confirm_active_suggestion,
     finish_code_execution,
     get_suggestion_state,
     mark_code_draft,
+    queue_initial_request,
     queue_revision_request,
     record_auto_repair,
     record_successful_code,
     record_validated_code,
     record_validation_failure,
     replace_active_suggestion,
+    revision_fallback_text,
+    take_pending_code_revision,
+    take_pending_initial_request,
     take_pending_revision,
     visible_messages,
 )
@@ -230,6 +235,12 @@ def _format_user_prompt(user_selection: Any) -> str:
     return ""
 
 
+def _clear_quick_modeling_selection(agent) -> None:
+    _agent_save_value(agent, "save_user_selection", "user_selection", None)
+    st.session_state.pop("modeling_user_prompt", None)
+    st.session_state.pop("modeling_quick_selection_active", None)
+
+
 def _resolve_effective_target(target_value: str, user_prompt: str) -> str:
     return (target_value or "").strip()
 
@@ -278,7 +289,12 @@ def _build_modeling_inputs(
     preference_selected = st.session_state.get("preference_selected")
     add_preference = st.session_state.get("add_preference")
     train_code = (history_train_code or "").strip()
-    user_selection = _agent_load_value(agent, "load_user_selection", "user_selection", None)
+    user_selection = (
+        _agent_load_value(agent, "load_user_selection", "user_selection", None)
+        if st.session_state.get("modeling_quick_selection_active")
+        and str(task_type or "auto") in {"auto", "prediction"}
+        else None
+    )
     user_prompt = _format_user_prompt(user_selection)
     effective_target = _resolve_effective_target(target_value, user_prompt)
 
@@ -458,6 +474,72 @@ def _repair_modeling_code_draft(agent) -> None:
     st.rerun()
 
 
+def _revise_modeling_code_draft(
+    agent,
+    revision_instruction: str,
+    *,
+    current_code_override: str = "",
+) -> None:
+    from utils.local_workflow_bridge import (
+        call_modeling_code_repair_bridge,
+        call_modeling_validated_code_bridge,
+    )
+
+    state = get_suggestion_state(st.session_state, "modeling")
+    ctx = st.session_state.get("_model_phase1_ctx")
+    inputs = st.session_state.get("_model_phase2_inputs") or {}
+    current_code = str(current_code_override or agent.load_code() or "").strip()
+    if not isinstance(ctx, dict) or not current_code:
+        st.error(bt("当前建模代码上下文已失效，请重新生成代码。", "The modeling code context has expired. Generate the code again."))
+        return
+
+    repair_prompt = (
+        "User requested a code revision. Modify the current code to satisfy this instruction "
+        "while preserving the confirmed modeling suggestion and analysis contract:\n"
+        f"{revision_instruction}"
+    )
+    with st.spinner(bt("正在按你的意见修改并验证建模代码...", "Revising and validating modeling code...")):
+        agent.save_code(current_code)
+        repaired = call_modeling_code_repair_bridge(ctx, current_code, repair_prompt)
+        revised_code = str((repaired or {}).get("code") or "").strip()
+        if not revised_code:
+            st.session_state.modeling_code_revision_flash = {
+                "level": "error",
+                "message": bt("未能生成修改后的建模代码。", "No revised modeling code was generated."),
+            }
+            st.rerun()
+        result = call_modeling_validated_code_bridge(inputs, ctx, revised_code)
+
+    code = str((result or {}).get("code") or revised_code).strip()
+    agent.save_code(code)
+    attempts = int((result or {}).get("attempts") or 0)
+    if (result or {}).get("success"):
+        st.session_state._model_phase1_ctx = (result or {}).get("_ctx") or ctx
+        record_validated_code(state, code, attempts=attempts)
+        st.session_state.modeling_code_revision_flash = {
+            "level": "success",
+            "message": bt(
+                "代码已按你的意见修改并通过验证，请点击执行建模。",
+                "The code was revised and validated. Run modeling to publish the result.",
+            ),
+        }
+    else:
+        record_validation_failure(
+            state,
+            code,
+            str((result or {}).get("error") or "修改后的代码未通过验证。"),
+            attempts=attempts or 5,
+        )
+        st.session_state.modeling_code_revision_flash = {
+            "level": "error",
+            "message": bt(
+                "修改后的建模代码未通过验证。",
+                "The revised modeling code did not pass validation.",
+            ),
+        }
+    st.rerun()
+
+
 def _clear_modeling_workflow_state(agent) -> None:
     invalidate_from(
         st.session_state,
@@ -479,7 +561,7 @@ def _clear_modeling_workflow_state(agent) -> None:
     for key in (
         "modeling_workflow_result", "modeling_suggestion", "model_suggestion",
         "modeling_summary_4", "modeling_abstract_4", "summary_4", "abstract_4",
-        "modeling_result_from_summary_4", "modeling_user_prompt",
+        "modeling_result_from_summary_4", "modeling_user_prompt", "modeling_quick_selection_active",
         "_model_phase1_ctx", "_model_phase2_inputs", "_model_phase2_pending",
         "_model_phase2_requested",
     ):
@@ -500,7 +582,7 @@ def _reset_modeling_outputs(agent) -> None:
     for key in (
         "modeling_workflow_result", "modeling_suggestion", "model_suggestion",
         "modeling_summary_4", "modeling_abstract_4", "summary_4", "abstract_4",
-        "modeling_result_from_summary_4",
+        "modeling_result_from_summary_4", "modeling_user_prompt", "modeling_quick_selection_active",
         "_model_phase1_ctx", "_model_phase2_inputs", "_model_phase2_pending",
         "_model_phase2_requested",
     ):
@@ -776,6 +858,7 @@ def modeling_quick_actions(agent):
         else:
             agent.save_user_selection(selected_models)
             st.session_state.modeling_user_prompt = _format_user_prompt(selected_models)
+            st.session_state.modeling_quick_selection_active = True
             st.success(
                 bt(
                     "已保存快速建模选择，后续会作为 user_prompt 传入建模工作流。",
@@ -802,6 +885,15 @@ def modeling_execution(agent, auto=False) -> None:
 
     if edited is not None:
         _, result_is_current = mark_code_draft(state, edited)
+        if code_matches_current_suggestion(state):
+            st.caption(bt("代码状态：已同步当前建议。", "Code status: synced with the current suggestion."))
+        else:
+            st.warning(
+                bt(
+                    "建议已更新，当前代码仍基于旧建议。请重新生成代码，或让 AI 将当前代码迁移到新建议。",
+                    "The suggestion was updated; the current code is still based on an older suggestion. Regenerate the code or ask AI to migrate it.",
+                )
+            )
         tracked_execution = bool(state.get("executed_code_fingerprint"))
         stale_result = tracked_execution and not result_is_current
         not_executed = agent.load_modeling_result() is None or stale_result
@@ -812,6 +904,36 @@ def modeling_execution(agent, auto=False) -> None:
                     "The code has changed. The result below is from the last successful code.",
                 )
             )
+        flash = st.session_state.pop("modeling_code_revision_flash", None)
+        if isinstance(flash, dict):
+            message = str(flash.get("message") or "")
+            if flash.get("level") == "success":
+                st.success(message)
+            elif flash.get("level") == "error":
+                st.error(message)
+            elif message:
+                st.info(message)
+
+        with st.form("modeling_code_revision_form", clear_on_submit=True):
+            revision_text = st.text_area(
+                bt("代码修改要求", "Code Change Request"),
+                placeholder=bt(
+                    "例如：增加随机森林模型，对目标变量与主要特征的关系进行补充分析。",
+                    "For example, add a random forest model to supplement the analysis of relationships between the target variable and key features.",
+                ),
+                height=90,
+            )
+            revise_clicked = st.form_submit_button(bt("让 AutoSTAT 修改代码", "Ask AutoSTAT to Revise Code"))
+        if revise_clicked:
+            if revision_text.strip():
+                _revise_modeling_code_draft(
+                    agent,
+                    revision_text,
+                    current_code_override=sanitize_code(edited),
+                )
+            else:
+                st.warning(bt("请输入代码修改要求。", "Enter a code change request."))
+
         if st.button(bt("▶️ 执行建模", "▶️ Run Modeling"), key="modeling_run_code") or (auto and not_executed):
             code = sanitize_code(edited)
             run_id = begin_code_execution(state, code)
@@ -839,14 +961,16 @@ def modeling_execution(agent, auto=False) -> None:
         error_text = str(state.get("last_execution_error") or "")
         if error_text:
             st.error(bt("执行失败", "Execution failed"))
-            with st.expander(bt("查看错误详情", "View error details")):
-                st.code(error_text, language="text")
+            # This function is rendered inside the outer "Modeling Execution"
+            # expander. Streamlit does not allow expanders to be nested.
+            st.caption(bt("错误详情", "Error details"))
+            st.code(error_text, language="text")
             attempts = int(state.get("auto_repair_attempts") or 0)
             if can_auto_repair(state):
                 repair_slot = st.empty()
                 with repair_slot.container():
                     repair_requested = st.button(
-                        bt("自动修复代码", "Auto-fix Code"),
+                        bt("AutoSTAT 自动修复代码", "AutoSTAT Auto-fix Code"),
                         key="modeling_auto_fix_code",
                     )
                     if attempts:
@@ -883,6 +1007,7 @@ def modeling_chat(agent, source_data: Any, auto: bool) -> None:
         format_func=lambda value: task_type_labels[value],
     )
     if task_type != current_task_type:
+        _clear_quick_modeling_selection(agent)
         invalidate_from(
             st.session_state,
             "modeling",
@@ -912,6 +1037,7 @@ def modeling_chat(agent, source_data: Any, auto: bool) -> None:
         key=_MODEL_TARGET_WIDGET_KEY,
     )
     if target_value != current_target:
+        _clear_quick_modeling_selection(agent)
         invalidate_from(
             st.session_state,
             "modeling",
@@ -972,8 +1098,10 @@ def modeling_chat(agent, source_data: Any, auto: bool) -> None:
 
         if st.session_state.get("modeling_failure"):
             st.error(bt("上一次建模代码未通过验证。", "The previous modeling code did not pass validation."))
-            with st.expander(bt("查看错误详情", "View error details")):
-                st.code(str(st.session_state.modeling_failure), language="text")
+            # This function is rendered inside the outer "Modeling Suggestions"
+            # expander. Streamlit does not allow expanders to be nested.
+            st.caption(bt("错误详情", "Error details"))
+            st.code(str(st.session_state.modeling_failure), language="text")
 
         columns = st.columns(2)
         with columns[0]:
@@ -999,13 +1127,54 @@ def modeling_chat(agent, source_data: Any, auto: bool) -> None:
         content = entry.get("content")
         st.chat_message(role).write(str(content))
 
+    saved_user_input = _agent_load_value(agent, "load_user_input", "user_input", "") or ""
+    pending_initial_request = take_pending_initial_request(state)
+    if pending_initial_request:
+        request_text = base_requirements_text(state, pending_initial_request)
+        agent.save_user_input(request_text)
+        _request_modeling_recommendation(
+            agent=agent,
+            source_data=source_data,
+            user_input=request_text,
+            target_value=target_value,
+            history_train_code=history_train_code,
+            task_type=task_type,
+            auto=False,
+        )
+        return
+
     pending_revision = take_pending_revision(state)
     if pending_revision:
-        _revise_modeling_recommendation(agent, pending_revision)
+        if isinstance(st.session_state.get("_model_phase1_ctx"), dict):
+            _revise_modeling_recommendation(agent, pending_revision)
+        else:
+            st.warning(bt(
+                "上一轮建模建议上下文已失效，正在基于当前数据和这条消息重新生成建议。",
+                "The previous modeling context expired. Regenerating from the current data and this message.",
+            ))
+            request_text = revision_fallback_text(
+                state,
+                pending_revision,
+                default=bt("请帮我获取建模建议", "Please provide modeling recommendations."),
+            )
+            agent.save_user_input(request_text)
+            _request_modeling_recommendation(
+                agent=agent,
+                source_data=source_data,
+                user_input=request_text,
+                target_value=target_value,
+                history_train_code=history_train_code,
+                task_type=task_type,
+                auto=False,
+            )
+        return
+
+    pending_code_revision = take_pending_code_revision(state)
+    if pending_code_revision:
+        _revise_modeling_code_draft(agent, pending_code_revision)
         return
 
     already_generated = bool(state.get("active_suggestion"))
-    saved_user_input = _agent_load_value(agent, "load_user_input", "user_input", "") or ""
 
     # ── Phase 2 自动续接：suggestion 已展示，继续生成代码 ──────────
     if st.session_state.get("_model_phase2_pending"):
@@ -1055,8 +1224,8 @@ def modeling_chat(agent, source_data: Any, auto: bool) -> None:
             queue_revision_request(state, user_input)
             st.rerun()
         else:
-            add_requirement(state, user_input)
-            agent.save_user_input(base_requirements_text(state))
+            _clear_quick_modeling_selection(agent)
+            queue_initial_request(state, user_input)
             st.rerun()
 
 

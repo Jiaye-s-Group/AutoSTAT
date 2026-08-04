@@ -74,9 +74,23 @@ def run_autostat(
 
     def _get_ref(query: str) -> str:
         """按 query 从参考资料中检索相关 chunks，格式化为 prompt 文本。"""
-        if ref_retriever is None or ref_retriever.is_empty:
+        retriever = getattr(ref_retriever, "_ref_retriever", ref_retriever)
+        if retriever is None:
             return ""
-        return ref_retriever.retrieve_and_format(query, top_k=3)
+        is_empty = getattr(retriever, "is_empty", False)
+        if callable(is_empty):
+            try:
+                is_empty = is_empty()
+            except Exception:
+                is_empty = False
+        if is_empty:
+            return ""
+        try:
+            return retriever.retrieve_and_format(query, top_k=5, min_score=0.0)
+        except TypeError:
+            return retriever.retrieve_and_format(query, top_k=5)
+        except Exception:
+            return ""
 
     def _query(zh: str, en: str) -> str:
         return en if is_english_language(language) else zh
@@ -125,6 +139,7 @@ def run_autostat(
         "shape_1": plan["shape_1"],
         "dtype_info_str": plan["dtype_info_str"],
         "head_dict_str": plan["head_dict_str"],
+        "data_profile_str": plan.get("data_profile_str", ""),
         "df": plan["df"],
     }
 
@@ -140,13 +155,14 @@ def run_autostat(
                 shape_1=base["shape_1"],
                 dtype_info_str=base["dtype_info_str"],
                 head_dict_str=base["head_dict_str"],
+                data_profile_str=base.get("data_profile_str", ""),
                 loading_auto=plan["loading_auto"],
                 user_input=user_input_load,
                 add_preference=add_preference,
                 preference_selected=preference_selected,
                 ref_context=_get_ref(_query(
-                    f"字段含义 数据说明 {base['dtype_info_str'][:200]}",
-                    f"field meaning data description {base['dtype_info_str'][:200]}",
+                    f"数据字典 字段说明 变量含义 单位 编码 取值方向 缺失值 {base['dtype_info_str'][:1200]} {user_input_load} {add_preference}",
+                    f"data dictionary field descriptions variable meanings units coding value direction missing values {base['dtype_info_str'][:1200]} {user_input_load} {add_preference}",
                 )),
                 language=language,
             ),
@@ -351,6 +367,7 @@ def run_autostat(
             lambda: run_reporting_partly_workflow(
                 toc_text=toc["toc_text"],
                 selected_full_conten=toc["selected_full_conten"],
+                figure_artifacts=viz.get("figure_artifacts"),
                 load_abstract=toc["load_abstract"],
                 preproc_abstract=toc["preproc_abstract"],
                 visual_abstract=toc["visual_abstract"],

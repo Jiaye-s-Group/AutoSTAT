@@ -10,6 +10,8 @@
 {{def_head}}
 - 可用颜色方案：{{color}}
 - 初始绘图建议：{{refined_suggestions}}
+- 已确认完整绘图建议：{{visual_recommendation}}
+- Visualization Contract（最高优先级）：{{visualization_contract_json}}
 
 【附加参考信息】
 - 用户分析偏好：{{preference_selected}}

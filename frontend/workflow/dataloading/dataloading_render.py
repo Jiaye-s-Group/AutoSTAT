@@ -1,3 +1,4 @@
+import html
 import os
 import json
 from typing import Any
@@ -12,8 +13,11 @@ from utils.suggestion_state import (
     add_requirement,
     base_requirements_text,
     get_suggestion_state,
+    queue_initial_request,
     queue_revision_request,
     replace_active_suggestion,
+    revision_fallback_text,
+    take_pending_initial_request,
     take_pending_revision,
     visible_messages,
 )
@@ -32,6 +36,73 @@ from workflow.dataloading.dataloading_core import (
     load_concat_file,
     process_complex_data,
 )
+
+
+def _render_import_file_list_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        .autostat-import-file-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+            max-width: 100%;
+            min-width: 0;
+        }
+        .autostat-import-file-row {
+            align-items: flex-start;
+            background: rgba(248, 250, 252, 0.9);
+            border: 1px solid rgba(203, 213, 225, 0.85);
+            border-radius: 0.55rem;
+            box-sizing: border-box;
+            display: flex;
+            gap: 0.45rem;
+            line-height: 1.35;
+            max-width: 100%;
+            min-width: 0;
+            padding: 0.45rem 0.55rem;
+        }
+        .autostat-import-file-icon {
+            flex: 0 0 auto;
+            line-height: 1.35;
+        }
+        .autostat-import-file-name {
+            flex: 1 1 auto;
+            max-width: 100%;
+            min-width: 0;
+            overflow-wrap: anywhere;
+            white-space: normal;
+            word-break: break-word;
+        }
+        .autostat-import-loaded-title {
+            color: #111827;
+            font-size: 0.92rem;
+            font-weight: 600;
+            margin-bottom: 0.35rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_import_file_list(names: list[str], *, icon: str = "📄") -> None:
+    escaped_icon = html.escape(icon)
+    rows = []
+    for name in names:
+        escaped_name = html.escape(str(name))
+        rows.append(
+            f'<div class="autostat-import-file-row" title="{escaped_name}">'
+            f'<span class="autostat-import-file-icon">{escaped_icon}</span>'
+            f'<span class="autostat-import-file-name">{escaped_name}</span>'
+            "</div>"
+        )
+    if rows:
+        st.markdown(
+            '<div class="autostat-import-file-list">' + "".join(rows) + "</div>",
+            unsafe_allow_html=True,
+        )
+
 
 # --- Local workflow ---
 def _maybe_json_loads(value: Any) -> Any:
@@ -138,6 +209,7 @@ def call_loading_workflow(
     df: pd.DataFrame,
     user_input: str = "",
     loading_auto: bool = True,
+    ref_context: str = "",
 ):
     """
     Run the local loading workflow.
@@ -148,15 +220,18 @@ def call_loading_workflow(
 
     try:
         meta = df_to_meta(df)
+        loading_ref_context = ref_context or _retrieve_loading_reference_context(df, user_input)
         result = run_loading_workflow(
             shape_0=meta["shape_0"],
             shape_1=meta["shape_1"],
             dtype_info_str=meta["dtype_info_str"],
             head_dict_str=meta["head_dict_str"],
+            data_profile_str=meta.get("data_profile_str", ""),
             loading_auto=loading_auto,
             user_input=user_input or "",
             add_preference=st.session_state.get("add_preference") or "",
             preference_selected=st.session_state.get("preference_selected") or "",
+            ref_context=loading_ref_context,
             language=get_language(),
         )
         normalized = _normalize_loading_workflow_result(result)
@@ -180,10 +255,130 @@ def _commit_reference_fingerprint_change(reason: str) -> None:
     st.session_state.reference_fingerprint = reference_fingerprint
 
 
+def _learned_reference_names() -> list[str]:
+    names = st.session_state.get("learned_doc_names") or []
+    if isinstance(names, set):
+        values = list(names)
+    elif isinstance(names, (list, tuple)):
+        values = list(names)
+    else:
+        values = []
+    statuses = st.session_state.get("reference_doc_statuses") or {}
+    if isinstance(statuses, dict):
+        for name, status in statuses.items():
+            if isinstance(status, dict) and status.get("status") == "success":
+                values.append(str(name))
+    return sorted({str(name) for name in values if str(name).strip()})
+
+
+def _reference_retriever_from_state():
+    retriever = st.session_state.get("ref_retriever")
+    if retriever is not None:
+        return retriever
+    wrapper = st.session_state.get("retriever")
+    return getattr(wrapper, "_ref_retriever", None)
+
+
+def _retriever_is_empty(retriever) -> bool:
+    if retriever is None:
+        return True
+    is_empty = getattr(retriever, "is_empty", False)
+    if callable(is_empty):
+        try:
+            return bool(is_empty())
+        except Exception:
+            return False
+    return bool(is_empty)
+
+
+def _retrieve_loading_reference_context(df: pd.DataFrame, user_input: str = "") -> str:
+    learned_names = _learned_reference_names()
+    retriever = _reference_retriever_from_state()
+    if _retriever_is_empty(retriever):
+        if not learned_names:
+            return ""
+        return bt(
+            "【参考资料检索状态】已学习参考资料："
+            + "、".join(learned_names)
+            + "；但当前参考资料检索索引不可用。本次数据解析不得写“当前没有参考资料”，应写“已学习参考资料但未检索到相关片段”。",
+            "[Reference retrieval status] Learned reference materials: "
+            + ", ".join(learned_names)
+            + "; however, the reference retrieval index is unavailable. Do not state that there are no references; state that learned references exist but no relevant chunks were retrieved.",
+        )
+
+    columns = [str(column) for column in getattr(df, "columns", [])]
+    query = bt(
+        "数据字典 字段说明 变量含义 单位 编码 取值方向 缺失值 列名 "
+        + " ".join(columns[:160])
+        + " 用户需求 "
+        + str(user_input or "")
+        + " "
+        + str(st.session_state.get("add_preference") or ""),
+        "data dictionary field descriptions variable meanings units coding value direction missing values columns "
+        + " ".join(columns[:160])
+        + " user request "
+        + str(user_input or "")
+        + " "
+        + str(st.session_state.get("add_preference") or ""),
+    )
+    try:
+        results = retriever.retrieve(query, top_k=5, min_score=0.0)
+    except TypeError:
+        results = retriever.retrieve(query, top_k=5)
+    except Exception as exc:
+        if not learned_names:
+            return ""
+        return bt(
+            f"【参考资料检索状态】已学习参考资料：{'、'.join(learned_names)}；但本次检索失败：{exc}。请明确写“未检索到相关参考资料”，不要写“当前没有参考资料”。",
+            f"[Reference retrieval status] Learned reference materials: {', '.join(learned_names)}; retrieval failed for this run: {exc}. State that no relevant reference material was retrieved; do not state that there are no references.",
+        )
+
+    if not results:
+        source_names = learned_names or sorted(
+            {
+                str(chunk.get("source") or "")
+                for chunk in getattr(retriever, "chunks", [])
+                if str(chunk.get("source") or "").strip()
+            }
+        )
+        if not source_names:
+            return ""
+        return bt(
+            "【参考资料检索状态】已学习参考资料："
+            + "、".join(source_names)
+            + "；但针对本次数据解析查询未检索到相关片段。请明确写“未检索到相关参考资料”，不要写“当前没有参考资料”。",
+            "[Reference retrieval status] Learned reference materials: "
+            + ", ".join(source_names)
+            + "; however, this data-understanding query retrieved no relevant chunks. State that no relevant reference material was retrieved; do not state that there are no references.",
+        )
+
+    try:
+        formatted = retriever.format_results(results)
+    except Exception:
+        formatted = "\n\n".join(str(result.get("text") or "") for result in results)
+    source_names = learned_names or sorted(
+        {
+            str(result.get("source") or "")
+            for result in results
+            if str(result.get("source") or "").strip()
+        }
+    )
+    prefix = bt(
+        "【参考资料检索状态】已学习参考资料："
+        + ("、".join(source_names) if source_names else "未记录文件名")
+        + "；本次数据解析已召回以下数据字典/字段说明片段，应优先用于字段语义、单位、编码和方向性解释。\n\n",
+        "[Reference retrieval status] Learned reference materials: "
+        + (", ".join(source_names) if source_names else "file names not recorded")
+        + "; this data-understanding run retrieved the following data dictionary / field description chunks. Prioritize them for field meanings, units, coding, and directionality.\n\n",
+    )
+    return prefix + formatted
+
+
 def loading_reference_docs(agent):
     """
     专门处理参考资料的上传逻辑
     """
+    _render_import_file_list_styles()
     st.info(bt(
         "💡 提示：在此处上传业务背景、算法说明或数据手册，AI 会学习这些内容。",
         "💡 Tip: Upload business context, algorithm notes, or data manuals here. The AI will learn from them.",
@@ -314,11 +509,21 @@ def loading_reference_docs(agent):
             st.dataframe(pd.DataFrame(status_rows), use_container_width=True, hide_index=True)
 
     if 'learned_doc_names' in st.session_state and st.session_state.learned_doc_names:
-        st.markdown(bt("**已加载的外部资料：**", "**Loaded external references:**"))
+        st.markdown(
+            f'<div class="autostat-import-loaded-title">'
+            f'{html.escape(bt("已加载的外部资料：", "Loaded external references:"))}'
+            "</div>",
+            unsafe_allow_html=True,
+        )
         for name in sorted(st.session_state.learned_doc_names):
-            label_col, delete_col = st.columns([5, 1])
-            label_col.write(f"- 📄 {name}")
-            if delete_col.button(bt("删除", "Delete"), key=f"delete_reference_{stable_fingerprint(name)[:12]}"):
+            label_col, delete_col = st.columns([4, 1.15], gap="small")
+            with label_col:
+                _render_import_file_list([name], icon="📄")
+            if delete_col.button(
+                bt("删除", "Delete"),
+                key=f"delete_reference_{stable_fingerprint(name)[:12]}",
+                use_container_width=True,
+            ):
                 removed, error = st.session_state.retriever.remove_document(name)
                 if removed:
                     st.session_state.learned_doc_names.discard(name)
@@ -390,6 +595,7 @@ def _clear_loaded_dataset(agent) -> None:
 
 def loading_data_file(agent):
     """ """
+    _render_import_file_list_styles()
     st.info(
         bt(
             "💡 提示：\n"
@@ -438,12 +644,15 @@ def loading_data_file(agent):
             and st.session_state.get("data_source_kind") == "upload"
             and agent.load_df() is not None
         ):
-            loaded_col, clear_col = st.columns([6, 1])
+            loaded_col, clear_col = st.columns([4, 1.15], gap="small")
             with loaded_col:
-                st.success(
-                    bt("当前已加载数据文件：", "Currently loaded data files: ")
-                    + ", ".join(persisted_names)
+                st.markdown(
+                    f'<div class="autostat-import-loaded-title">'
+                    f'{html.escape(bt("当前已加载数据文件：", "Currently loaded data files: "))}'
+                    "</div>",
+                    unsafe_allow_html=True,
                 )
+                _render_import_file_list(persisted_names, icon="📊")
             with clear_col:
                 if st.button(
                     bt("删除", "Remove"),
@@ -773,9 +982,27 @@ def loading_chat(agent, auto=False) -> None:
         with st.chat_message(role):
             st.write(str(content))
 
+    pending_initial_request = take_pending_initial_request(state)
+    if pending_initial_request:
+        request_text = base_requirements_text(state, pending_initial_request)
+        _request_loading_analysis(agent, df, request_text, auto=False)
+        return
+
     pending_revision = take_pending_revision(state)
     if pending_revision:
-        _revise_loading_suggestion(agent, pending_revision)
+        if isinstance(state.get("pending_payload"), dict):
+            _revise_loading_suggestion(agent, pending_revision)
+        else:
+            st.warning(bt(
+                "上一轮数据解析上下文已失效，正在基于当前数据和这条消息重新生成解析。",
+                "The previous data-interpretation context expired. Regenerating from the current data and this message.",
+            ))
+            request_text = revision_fallback_text(
+                state,
+                pending_revision,
+                default=bt("请帮我解析数据含义", "Please analyze the meaning of this dataset"),
+            )
+            _request_loading_analysis(agent, df, request_text, auto=False)
         return
 
     already_generated = bool(state.get("active_suggestion"))
@@ -801,7 +1028,7 @@ def loading_chat(agent, auto=False) -> None:
             queue_revision_request(state, user_input)
             st.rerun()
         else:
-            add_requirement(state, user_input)
+            queue_initial_request(state, user_input)
             st.rerun()
         return
 

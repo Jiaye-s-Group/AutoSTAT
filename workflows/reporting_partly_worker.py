@@ -79,6 +79,7 @@ def _run_reporting_partly(inputs: dict[str, Any], progress_path: Path | None = N
     return run_reporting_partly_workflow(
         toc_text=str(inputs.get("toc_text", "")),
         selected_full_conten=str(inputs.get("selected_full_conten", "")),
+        figure_artifacts=inputs.get("figure_artifacts"),
         load_abstract=str(inputs.get("load_abstract", "")),
         preproc_abstract=str(inputs.get("preproc_abstract", "")),
         visual_abstract=str(inputs.get("visual_abstract", "")),

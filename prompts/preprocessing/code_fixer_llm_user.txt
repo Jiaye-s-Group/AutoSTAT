@@ -11,6 +11,12 @@
 【LLM 提炼后的逐列建议（可能为空）】
 {{refined_suggestions}}
 
+【已确认的完整预处理建议（不可被压缩版遗漏或覆盖）】
+{{suggestion}}
+
+【Preprocessing Contract（最高优先级）】
+{{preprocessing_contract_json}}
+
 【上一轮代码（有错误）】
 {{code}}
 

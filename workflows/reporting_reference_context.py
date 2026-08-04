@@ -198,6 +198,7 @@ def build_stage_reference_contexts(
         [
             ("Structured data facts", _structured_data_facts(plan), 600),
             ("Raw data shape", f"{plan.get('shape_0')} rows x {plan.get('shape_1')} columns", 120),
+            ("Full-table metadata", plan.get("data_profile_str") or loading.get("_data_profile_str"), 2600),
             ("Column names and dtypes", plan.get("dtype_info_str"), 2200),
             ("Raw data preview", plan.get("head_dict_str") or summary_1.get("df"), 1800),
             ("Stage summary", summary_1.get("desc"), 1200),
@@ -232,9 +233,22 @@ def build_stage_reference_contexts(
         ]
         if part
     )
+    modeling_report_artifacts = {}
+    if isinstance(model, dict):
+        raw_report_artifacts = model.get("_modeling_report_artifacts")
+        modeling_report_artifacts = raw_report_artifacts if isinstance(raw_report_artifacts, dict) else {}
+    if not modeling_report_artifacts:
+        raw_report_artifacts = summary_4.get("report_artifacts")
+        modeling_report_artifacts = raw_report_artifacts if isinstance(raw_report_artifacts, dict) else {}
+    modeling_evidence = {}
+    if isinstance(model, dict):
+        raw_evidence = model.get("_modeling_result_evidence")
+        modeling_evidence = raw_evidence if isinstance(raw_evidence, dict) else {}
     modeling_context = _format_block(
         "Modeling Reference Context",
         [
+            ("Structured modeling report artifacts", modeling_report_artifacts, 5000),
+            ("Compact modeling execution evidence", modeling_evidence, 2600),
             ("Modeling metric copy source", table_context, 3600),
             ("Metric copy rule", "Model names, best-model claims, rankings, and metric values in prose must be copied from the modeling table. If a value is not present in the table or execution output, omit it.", 500),
             ("Modeling execution results", summary_4.get("result"), 2200),

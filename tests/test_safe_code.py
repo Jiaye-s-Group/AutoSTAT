@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import pickle
 import unittest
@@ -9,6 +10,7 @@ from sklearn.ensemble import RandomForestRegressor
 
 from core.safe_code import (
     UnsafeCodeError,
+    generated_code_execution_policy,
     restricted_pickle_loads,
     safe_exec,
     safe_subprocess_env,
@@ -33,6 +35,17 @@ result_dict = {"total": int(values.sum())}
             namespace,
         )
         self.assertEqual(namespace["result_dict"], {"total": 7})
+
+    def test_generated_code_policy_exposes_enforced_restrictions(self) -> None:
+        from core.code_runtime_profile import build_code_runtime_constraints
+
+        policy = generated_code_execution_policy()
+        self.assertEqual(policy["executor"], "safe_exec")
+        self.assertIn("getattr", policy["forbidden_names"])
+        self.assertIn("hasattr", policy["allowed_builtin_names"])
+
+        constraints = json.loads(build_code_runtime_constraints([], target=""))
+        self.assertEqual(constraints["execution_safety"], policy)
 
     def test_rejects_environment_and_file_access(self) -> None:
         unsafe_samples = (

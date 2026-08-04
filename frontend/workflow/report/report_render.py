@@ -27,6 +27,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 import streamlit_antd_components as sac
 from bs4 import BeautifulSoup, NavigableString, Tag
+from core.figure_artifacts import (
+    VISUALIZATION_FIGURE_ARTIFACTS_KEY,
+    report_figure_artifact_metadata,
+    successful_figure_artifacts,
+)
+from core.plotly_serialization import figure_to_json
 from core.report_language import (
     REPORT_LANGUAGE_EN,
     REPORT_LANGUAGE_ZH,
@@ -62,6 +68,7 @@ def _platform_llm_config() -> tuple[str, str, str]:
 from workflow.visualization.viz_coding import (
     execute_visualization_code_once,
     generate_visualization_code_once,
+    sync_visualization_report_state_from_figures,
 )
 from workflow.report.report_content_utils import (
     _split_markdown_heading_lines,
@@ -108,6 +115,7 @@ REPORT_GENERATION_RUNNING_KEY = "report_generation_running"
 REPORT_GENERATION_PROCESS_KEY = "report_generation_process"
 REPORT_GENERATION_JOB_KEY = "report_generation_job"
 REPORT_PENDING_PREVIEW_KEY = "report_generation_pending_preview"
+REPORT_FIGURE_LEDGER_KEY = "report_figure_ledger"
 REPORT_DISPLAY_OUTLINE_KEY = "report_display_outline"
 REPORT_DISPLAY_TO_INTERNAL_TOC_MAP_KEY = "report_display_to_internal_toc_map"
 REPORT_OUTLINE_USER_EDITED_KEY = "report_outline_user_edited"
@@ -121,6 +129,7 @@ REPORT_LANGUAGE_NOTICE_SPACER_HTML = '<div style="height: 1.35rem;"></div>'
 REPORT_GENERATION_OUTLINE_CACHE_KEY = "report_generation_outline_cache"
 REPORT_OUTLINE_CONVERSION_FLASH_KEY = "report_outline_conversion_flash"
 REPORT_OUTLINE_CONVERSION_FLASH_SECONDS = 3
+REPORT_OUTLINE_REQUIREMENTS_KEY = "report_outline_requirements_snapshot"
 REPORT_LANGUAGE_LABELS = {
     REPORT_LANGUAGE_ZH: "中文报告",
     REPORT_LANGUAGE_EN: "English Report",
@@ -156,7 +165,7 @@ def _resolve_loading_field(load_agent, field_name: str, default: Any) -> Any:
     if stored_value is not None:
         return stored_value
 
-    memory_entries = getattr(load_agent, "load_memory", lambda: [])()
+    memory_entries = getattr(load_agent, "load_memory", lambda: [])() if load_agent is not None else []
     for entry in reversed(memory_entries):
         content = entry.get("content") if isinstance(entry, dict) else None
         if isinstance(content, dict) and field_name in content:
@@ -596,7 +605,11 @@ def _restore_report_language_version(report_agent, language: Any, version: dict[
     if not html_content and markdown_content:
         html_content = markdown_to_html(markdown_content, title="")
     html_content = _set_report_html_language(html_content, language)
+    st.session_state.pop(REPORT_FIGURE_DATA_URI_CACHE_KEY, None)
+    html_content = _finalize_report_html(html_content, "", report_language=language)
     if not markdown_content:
+        markdown_content = html_to_markdown(html_content)
+    else:
         markdown_content = html_to_markdown(html_content)
     report_agent.save_html(html_content)
     report_agent.save_markdown(markdown_content)
@@ -616,16 +629,20 @@ def _normalize_visualization_titles(raw_titles: Any) -> list[str]:
 
     if isinstance(parsed_titles, str):
         text = stringify_string(parsed_titles)
-        return [line.strip() for line in text.splitlines() if line.strip()]
+        return [
+            cleaned
+            for line in text.splitlines()
+            if (cleaned := _strip_figure_title_prefix(line))
+        ]
 
     if isinstance(parsed_titles, dict):
         for key in ("tu_title", "titles", "data", "items"):
             if key in parsed_titles:
                 return _normalize_visualization_titles(parsed_titles.get(key))
         return [
-            str(value).strip()
+            cleaned
             for value in parsed_titles.values()
-            if str(value).strip()
+            if (cleaned := _strip_figure_title_prefix(value))
         ]
 
     if isinstance(parsed_titles, list):
@@ -641,13 +658,34 @@ def _normalize_visualization_titles(raw_titles: Any) -> list[str]:
             else:
                 candidate = item
 
-            candidate_text = str(candidate).strip() if candidate is not None else ""
+            candidate_text = _strip_figure_title_prefix(candidate)
             if candidate_text:
                 normalized_titles.append(candidate_text)
         return normalized_titles
 
-    fallback = str(parsed_titles).strip()
+    fallback = _strip_figure_title_prefix(parsed_titles)
     return [fallback] if fallback else []
+
+
+def _strip_figure_title_prefix(text: Any) -> str:
+    normalized = html.unescape(str(text or ""))
+    normalized = re.sub(r"<[^>]+>", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.sub(r"^\[?\s*FIG\s*[:：]\s*\d+\s*\]?\s*", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(
+        r"^(?:图(?:表)?|figure|fig\.?|chart)\s*(?:x|\d+)\s*[|｜:：、.．\-—–]\s*",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"^(?:图(?:表)?|figure|fig\.?|chart)\s*(?:x|\d+)\s+",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"^\d+\s*[|｜]\s*", "", normalized)
+    return normalized.strip(" |｜:：、.．-—–\t\r\n")
 
 
 def _clean_report_title_text(raw_title: Any) -> str:
@@ -695,7 +733,7 @@ def _clean_report_title_text(raw_title: Any) -> str:
     text = re.sub(r'[\s`"\']+$', "", text)
     text = re.sub(r"^[《【「『]+", "", text)
     text = re.sub(r"[》】」』]+$", "", text)
-    return text.strip()
+    return _strip_figure_title_prefix(text)
 
 
 def _extract_report_title(workflow_result: Any) -> str:
@@ -711,10 +749,14 @@ def _build_figure_caption(
     fig_index: int,
     title_items: list[str],
     report_language: Any | None = None,
+    title_text: str | None = None,
 ) -> str:
-    title_text = ""
-    if 0 <= fig_index < len(title_items):
-        title_text = _normalize_figure_title_text(title_items[fig_index])
+    if title_text is None:
+        title_text = ""
+        if 0 <= fig_index < len(title_items):
+            title_text = _normalize_figure_title_text(title_items[fig_index])
+    else:
+        title_text = _normalize_figure_title_text(title_text)
 
     if report_language is None:
         report_agent = st.session_state.get("report_agent")
@@ -733,10 +775,33 @@ def _build_figure_caption(
 
 
 def _normalize_figure_title_text(text: str) -> str:
-    normalized = html.unescape(str(text or ""))
+    normalized = _strip_figure_title_prefix(text)
     normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.sub(r"^\[?\s*FIG\s*[:：]\s*\d+\s*\]?\s*", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"^(?:(?:图|Figure|[^\w\s])\s*)?\d+\s*[:：、.．\-]?\s*", "", normalized, flags=re.IGNORECASE)
     return normalized.strip()
+
+
+def _is_generic_report_figure_title(title: str) -> bool:
+    text = _normalize_figure_title_text(title)
+    if not text:
+        return True
+    normalized = text.lower().replace("_", " ").replace("-", " ")
+    return bool(
+        re.fullmatch(r"(图表|图|chart|figure|fig)\s*\d*", normalized, flags=re.IGNORECASE)
+        or re.fullmatch(r"(chart|figure|fig)\s+\d+", normalized, flags=re.IGNORECASE)
+    )
+
+
+def _clean_fig_key_for_report_title(value: Any) -> str:
+    text = stringify_string(value).strip()
+    if not text:
+        return ""
+    text = re.sub(r"^chart[_\-\s]*\d+[_\-\s:：]*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^fig(?:ure)?[_\-\s]*\d+[_\-\s:：]*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[_\-]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def _extract_adjacent_text_sibling(tag: Tag, direction: str) -> Tag | None:
@@ -822,8 +887,183 @@ def _normalize_visual_figure(raw_figure: Any) -> go.Figure | None:
             return pio.from_json(raw_figure)
         except Exception:
             return None
+    if isinstance(raw_figure, dict):
+        try:
+            return go.Figure(raw_figure)
+        except Exception:
+            return None
 
     return None
+
+
+def _extract_plotly_layout_title(fig: go.Figure | None) -> str:
+    if fig is None:
+        return ""
+    try:
+        title_obj = fig.layout.title
+        title_text = getattr(title_obj, "text", "") if title_obj is not None else ""
+        return stringify_string(title_text).strip()
+    except Exception:
+        return ""
+
+
+def _contains_cjk_text(value: Any) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff]", stringify_string(value)))
+
+
+def _resolve_report_figure_title(
+    fig_item: Any,
+    fig_index: int,
+    title_items: list[str],
+    fig: go.Figure | None = None,
+    title_override: Any = None,
+) -> str:
+    candidates: list[Any] = []
+    candidates.append(title_override)
+    if 0 <= fig_index < len(title_items):
+        candidates.append(title_items[fig_index])
+    if isinstance(fig_item, dict):
+        candidates.append(fig_item.get("title"))
+        if fig is not None:
+            candidates.append(_extract_plotly_layout_title(fig))
+        candidates.append(_extract_plotly_layout_title(_normalize_visual_figure(fig_item.get("fig"))))
+        candidates.append(_extract_plotly_layout_title(_normalize_visual_figure(fig_item.get("base_fig"))))
+        candidates.append(_clean_fig_key_for_report_title(fig_item.get("fig_dict_key")))
+        candidates.append(_clean_fig_key_for_report_title(fig_item.get("chart_id")))
+    elif fig is not None:
+        candidates.append(_extract_plotly_layout_title(fig))
+
+    for candidate in candidates:
+        title = _normalize_figure_title_text(_clean_report_title_text(candidate))
+        if title and not _is_generic_report_figure_title(title):
+            return title
+    return f"图表 {fig_index + 1}"
+
+
+def _css_color_token(value: Any) -> str:
+    return re.sub(r"\s+", "", stringify_string(value).strip().lower())
+
+
+def _is_transparent_css_color(value: Any) -> bool:
+    token = _css_color_token(value)
+    if not token:
+        return True
+    if token == "transparent":
+        return True
+    rgba_match = re.fullmatch(r"rgba\(([^)]+)\)", token)
+    if not rgba_match:
+        return False
+    parts = [part.strip() for part in rgba_match.group(1).split(",")]
+    if len(parts) != 4:
+        return False
+    try:
+        return float(parts[3]) == 0
+    except ValueError:
+        return False
+
+
+def _is_default_plotly_template_background(value: Any) -> bool:
+    return _css_color_token(value) in {
+        "#e5ecf6",
+        "rgb(229,236,246)",
+        "rgba(229,236,246,1)",
+        "rgba(229,236,246,1.0)",
+    }
+
+
+def _is_white_background(value: Any) -> bool:
+    return _css_color_token(value) in {
+        "white",
+        "#fff",
+        "#ffffff",
+        "rgb(255,255,255)",
+        "rgba(255,255,255,1)",
+        "rgba(255,255,255,1.0)",
+    }
+
+
+def _template_layout_bgcolor(fig: go.Figure, attr_name: str) -> Any:
+    try:
+        template = fig.layout.template
+        layout = getattr(template, "layout", None)
+        return getattr(layout, attr_name, None) if layout is not None else None
+    except Exception:
+        return None
+
+
+def _should_set_report_bgcolor_to_white(fig: go.Figure, attr_name: str) -> bool:
+    try:
+        explicit_value = getattr(fig.layout, attr_name, None)
+    except Exception:
+        explicit_value = None
+
+    if explicit_value not in (None, ""):
+        return _is_transparent_css_color(explicit_value) or _is_white_background(explicit_value)
+
+    template_value = _template_layout_bgcolor(fig, attr_name)
+    return (
+        _is_transparent_css_color(template_value)
+        or _is_white_background(template_value)
+        or _is_default_plotly_template_background(template_value)
+    )
+
+
+def _prepare_plotly_figure_for_report_export(fig: go.Figure) -> go.Figure:
+    prepared = go.Figure(fig)
+    layout_updates: dict[str, str] = {}
+    if _should_set_report_bgcolor_to_white(prepared, "paper_bgcolor"):
+        layout_updates["paper_bgcolor"] = "white"
+    if _should_set_report_bgcolor_to_white(prepared, "plot_bgcolor"):
+        layout_updates["plot_bgcolor"] = "white"
+    if layout_updates:
+        prepared.update_layout(**layout_updates)
+    return prepared
+
+
+def _prepare_report_figure_for_output(
+    fig_item: Any,
+    fig_index: int,
+    title_items: list[str],
+    report_language: Any,
+    title_override: Any = None,
+) -> tuple[go.Figure | None, str]:
+    raw_fig = fig_item.get("fig") if isinstance(fig_item, dict) else fig_item
+    fig = _normalize_visual_figure(raw_fig)
+    if fig is None:
+        return None, ""
+
+    title_text = _resolve_report_figure_title(
+        fig_item,
+        fig_index,
+        title_items,
+        fig,
+        title_override=title_override,
+    )
+    prepared = go.Figure(fig)
+    if title_text:
+        prepared.update_layout(title_text=title_text)
+    prepared = _localize_plotly_figure_for_report(prepared, report_language)
+    prepared = _prepare_plotly_figure_for_report_export(prepared)
+    localized_title = _extract_plotly_layout_title(prepared) or title_text
+    return prepared, localized_title
+
+
+def _report_figure_metadata(fig_item: Any, fig_index: int, title: str = "") -> dict[str, Any]:
+    if not isinstance(fig_item, dict):
+        return {
+            "fig_index": fig_index,
+            "chart_id": f"chart_{fig_index + 1:02d}",
+            "fig_dict_key": "",
+            "title": title,
+        }
+    return {
+        "fig_index": fig_index,
+        "chart_id": stringify_string(fig_item.get("chart_id") or f"chart_{fig_index + 1:02d}"),
+        "fig_dict_key": stringify_string(fig_item.get("fig_dict_key") or ""),
+        "title": title or stringify_string(fig_item.get("title") or ""),
+        "generation_order": fig_item.get("generation_order"),
+        "language": stringify_string(fig_item.get("language") or ""),
+    }
 
 
 def _localize_plotly_figure_for_report(fig: go.Figure, report_language: Any) -> go.Figure:
@@ -884,6 +1124,38 @@ def _localize_plotly_figure_for_report(fig: go.Figure, report_language: Any) -> 
         pass
 
     try:
+        layout_dict = localized.to_dict().get("layout", {})
+        for coloraxis_name, coloraxis_value in layout_dict.items():
+            if not re.fullmatch(r"coloraxis\d*", str(coloraxis_name)):
+                continue
+            if not isinstance(coloraxis_value, dict):
+                continue
+            colorbar = coloraxis_value.get("colorbar")
+            if not isinstance(colorbar, dict):
+                continue
+            raw_title = colorbar.get("title")
+            colorbar_title = raw_title.get("text") if isinstance(raw_title, dict) else raw_title
+            colorbar_title = stringify_string(colorbar_title).strip()
+            if not colorbar_title:
+                continue
+            localized.update_layout(
+                **{
+                    coloraxis_name: {
+                        "colorbar": {
+                            "title": {
+                                "text": translate_visible_text(
+                                    colorbar_title,
+                                    "Plotly coloraxis colorbar title in an English report.",
+                                )
+                            }
+                        }
+                    }
+                }
+            )
+    except Exception:
+        pass
+
+    try:
         for annotation in localized.layout.annotations or []:
             annotation_text = stringify_string(getattr(annotation, "text", "")).strip()
             if annotation_text:
@@ -902,6 +1174,23 @@ def _localize_plotly_figure_for_report(fig: go.Figure, report_language: Any) -> 
                     trace_name,
                     "Plotly legend item name in an English report.",
                 )
+            marker = getattr(trace, "marker", None)
+            colorbar = getattr(marker, "colorbar", None) if marker is not None else None
+            colorbar_title = getattr(colorbar, "title", None) if colorbar is not None else None
+            colorbar_title_text = stringify_string(getattr(colorbar_title, "text", "")).strip()
+            if colorbar_title_text:
+                colorbar.title.text = translate_visible_text(
+                    colorbar_title_text,
+                    "Plotly colorbar title in an English report.",
+                )
+            trace_colorbar = getattr(trace, "colorbar", None)
+            trace_colorbar_title = getattr(trace_colorbar, "title", None) if trace_colorbar is not None else None
+            trace_colorbar_title_text = stringify_string(getattr(trace_colorbar_title, "text", "")).strip()
+            if trace_colorbar_title_text:
+                trace_colorbar.title.text = translate_visible_text(
+                    trace_colorbar_title_text,
+                    "Plotly trace colorbar title in an English report.",
+                )
     except Exception:
         pass
 
@@ -909,7 +1198,7 @@ def _localize_plotly_figure_for_report(fig: go.Figure, report_language: Any) -> 
 
 
 def _figure_to_data_uri(fig: go.Figure) -> str | None:
-    fig_json = fig.to_json()
+    fig_json = figure_to_json(fig)
     export_script = """
 import sys
 import plotly.io as pio
@@ -957,7 +1246,7 @@ def _get_report_figure_data_uri_cache() -> dict[str, str]:
 
 def _build_figure_cache_key(fig_index: int, fig: go.Figure) -> str:
     try:
-        fig_json = fig.to_json()
+        fig_json = figure_to_json(fig)
     except Exception:
         fig_json = str(fig.to_plotly_json())
     digest = hashlib.sha256(fig_json.encode("utf-8", errors="ignore")).hexdigest()
@@ -1128,23 +1417,37 @@ def _build_figure_block_tag(
         return None
 
     fig_item = fig_desc_list[fig_index]
-    fig = _normalize_visual_figure(fig_item.get("fig") if isinstance(fig_item, dict) else fig_item)
+    fig, title_text = _prepare_report_figure_for_output(
+        fig_item,
+        fig_index,
+        title_items,
+        report_language,
+    )
     if fig is None:
         print(f"[REPORT][FIG] fig at index {fig_index} cannot be normalized")
         return None
-    fig = _localize_plotly_figure_for_report(fig, report_language)
 
     image_uri = _get_cached_figure_data_uri(fig_index, fig, image_uri_cache)
     if not image_uri:
         print(f"[REPORT][FIG] fig at index {fig_index} cannot convert to image")
         return None
 
-    caption_text = _build_figure_caption(display_number, fig_index, title_items, report_language)
+    caption_text = _build_figure_caption(
+        display_number,
+        fig_index,
+        title_items,
+        report_language,
+        title_text=title_text,
+    )
 
     block = soup.new_tag("div")
     block["class"] = ["report-figure-block"]
     block["data-fig-index"] = str(fig_index)
     block["data-report-figure-number"] = str(display_number)
+    metadata = _report_figure_metadata(fig_item, fig_index, title_text)
+    block["data-chart-id"] = metadata.get("chart_id", "")
+    block["data-fig-dict-key"] = metadata.get("fig_dict_key", "")
+    block["data-report-figure-title"] = title_text
 
     image = soup.new_tag("img")
     image["src"] = image_uri
@@ -1162,6 +1465,111 @@ def _build_figure_block_tag(
     block.append(caption)
 
     return block
+
+
+def _caption_title_as_language_bridge(
+    fig_item: Any,
+    fig: go.Figure | None,
+    caption_title: str,
+    report_language: Any,
+) -> str:
+    caption_title = _normalize_figure_title_text(caption_title)
+    if not caption_title:
+        return ""
+
+    current_candidates: list[str] = []
+    if isinstance(fig_item, dict):
+        current_candidates.append(stringify_string(fig_item.get("title") or ""))
+        current_candidates.append(_extract_plotly_layout_title(_normalize_visual_figure(fig_item.get("fig"))))
+        current_candidates.append(_extract_plotly_layout_title(_normalize_visual_figure(fig_item.get("base_fig"))))
+    if fig is not None:
+        current_candidates.append(_extract_plotly_layout_title(fig))
+    current_has_cjk = any(_contains_cjk_text(candidate) for candidate in current_candidates if candidate)
+
+    if is_english_report(report_language):
+        return caption_title if current_has_cjk and not _contains_cjk_text(caption_title) else ""
+    return caption_title if (not current_has_cjk) and _contains_cjk_text(caption_title) else ""
+
+
+def _refresh_existing_report_figure_blocks_in_soup(
+    soup: BeautifulSoup,
+    fig_desc_list: list[Any],
+    title_items: list[str],
+    image_uri_cache: dict[str, str],
+    report_language: Any,
+) -> set[int]:
+    refreshed_indices: set[int] = set()
+    for figure_block in soup.find_all("div", class_="report-figure-block"):
+        try:
+            fig_index = int(figure_block.get("data-fig-index", "-1"))
+        except Exception:
+            continue
+        if fig_index < 0 or fig_index >= len(fig_desc_list):
+            continue
+
+        caption_tag = figure_block.find("div", class_="report-figure-caption")
+        caption_title = ""
+        if caption_tag is not None:
+            caption_title = _normalize_figure_title_text(caption_tag.get_text(" ", strip=True))
+
+        fig_item = fig_desc_list[fig_index]
+        raw_fig = fig_item.get("fig") if isinstance(fig_item, dict) else fig_item
+        normalized_existing_fig = _normalize_visual_figure(raw_fig)
+        title_override = _caption_title_as_language_bridge(
+            fig_item,
+            normalized_existing_fig,
+            caption_title,
+            report_language,
+        )
+        fig, title_text = _prepare_report_figure_for_output(
+            fig_item,
+            fig_index,
+            title_items,
+            report_language,
+            title_override=title_override,
+        )
+        if fig is None:
+            continue
+        image_uri = _get_cached_figure_data_uri(fig_index, fig, image_uri_cache)
+        if not image_uri:
+            continue
+
+        image_tag = figure_block.find("img")
+        if image_tag is None:
+            image_tag = soup.new_tag("img")
+            figure_block.insert(0, image_tag)
+        image_tag["src"] = image_uri
+        try:
+            display_number = int(figure_block.get("data-report-figure-number", "0"))
+        except Exception:
+            display_number = 0
+        if display_number <= 0:
+            display_number = fig_index + 1
+        image_tag["alt"] = f"Figure {display_number}"
+        image_tag["style"] = (
+            f"max-width: {REPORT_EXPORT_IMAGE_PERCENT}; "
+            f"width: {REPORT_EXPORT_IMAGE_PERCENT}; "
+            "height: auto; border-radius: 8px;"
+        )
+        metadata = _report_figure_metadata(fig_item, fig_index, title_text)
+        figure_block["data-chart-id"] = metadata.get("chart_id", "")
+        figure_block["data-fig-dict-key"] = metadata.get("fig_dict_key", "")
+        figure_block["data-report-figure-title"] = title_text
+        figure_block["data-report-figure-number"] = str(display_number)
+        caption_tag = figure_block.find("div", class_="report-figure-caption")
+        if caption_tag is None:
+            caption_tag = soup.new_tag("div")
+            caption_tag["class"] = ["report-figure-caption"]
+            figure_block.append(caption_tag)
+        caption_tag.string = _build_figure_caption(
+            display_number,
+            fig_index,
+            title_items,
+            report_language,
+            title_text=title_text,
+        )
+        refreshed_indices.add(fig_index)
+    return refreshed_indices
 
 
 def _replace_paragraph_placeholders_at_boundaries(
@@ -1413,8 +1821,66 @@ def _replace_remaining_placeholders_in_soup(
     return inserted_count
 
 
+def _rewrite_textual_figure_numbers(text: str, source_numbers: set[int], display_number: int) -> str:
+    rewritten = str(text or "")
+    for source_number in sorted(source_numbers, reverse=True):
+        if source_number <= 0 or source_number == display_number:
+            continue
+        rewritten = re.sub(
+            rf"(?<![A-Za-z0-9_])图\s*{source_number}(?!\d)",
+            f"图{display_number}",
+            rewritten,
+        )
+        rewritten = re.sub(
+            rf"\b(Figure|Fig\.?)\s*{source_number}\b",
+            lambda match: f"{match.group(1)} {display_number}",
+            rewritten,
+            flags=re.IGNORECASE,
+        )
+    return rewritten
+
+
+def _rewrite_textual_figure_numbers_in_tag(
+    tag: Tag | None,
+    source_numbers: set[int],
+    display_number: int,
+) -> None:
+    if tag is None:
+        return
+    if tag.find_parent("div", class_="report-figure-block") is not None:
+        return
+    for text_node in list(tag.find_all(string=True)):
+        if text_node.find_parent("div", class_="report-figure-block") is not None:
+            continue
+        if text_node.find_parent("div", class_="report-figure-caption") is not None:
+            continue
+        rewritten = _rewrite_textual_figure_numbers(str(text_node), source_numbers, display_number)
+        if rewritten != str(text_node):
+            text_node.replace_with(NavigableString(rewritten))
+
+
+def _align_adjacent_textual_figure_references(
+    figure_mappings: list[tuple[Tag, int, int]],
+) -> None:
+    for figure_block, fig_index, display_number in figure_mappings:
+        if fig_index < 0 or display_number <= 0:
+            continue
+        source_numbers = {fig_index, fig_index + 1}
+        _rewrite_textual_figure_numbers_in_tag(
+            _extract_adjacent_text_sibling(figure_block, "previous"),
+            source_numbers,
+            display_number,
+        )
+        _rewrite_textual_figure_numbers_in_tag(
+            _extract_adjacent_text_sibling(figure_block, "next"),
+            source_numbers,
+            display_number,
+        )
+
+
 def _renumber_report_figure_blocks(
     final_html: str,
+    fig_desc_list: list[Any],
     title_items: list[str],
     report_language: Any,
 ) -> str:
@@ -1424,6 +1890,7 @@ def _renumber_report_figure_blocks(
     soup = BeautifulSoup(final_html, "html.parser")
 
     display_number = 0
+    figure_mappings: list[tuple[Tag, int, int]] = []
     for figure_block in list(soup.find_all("div", class_="report-figure-block")):
         image_tag = figure_block.find("img")
         if image_tag is None or not str(image_tag.get("src") or "").strip():
@@ -1436,8 +1903,13 @@ def _renumber_report_figure_blocks(
             fig_index = int(raw_fig_index)
         except Exception:
             fig_index = -1
+        fig_item = fig_desc_list[fig_index] if 0 <= fig_index < len(fig_desc_list) else None
+        title_text = stringify_string(figure_block.get("data-report-figure-title") or "").strip()
+        if not title_text:
+            title_text = _resolve_report_figure_title(fig_item, fig_index, title_items)
 
         figure_block["data-report-figure-number"] = str(display_number)
+        figure_block["data-report-figure-title"] = title_text
         image_tag["alt"] = f"Figure {display_number}"
 
         caption_tag = figure_block.find("div", class_="report-figure-caption")
@@ -1445,9 +1917,128 @@ def _renumber_report_figure_blocks(
             caption_tag = soup.new_tag("div")
             caption_tag["class"] = ["report-figure-caption"]
             figure_block.append(caption_tag)
-        caption_tag.string = _build_figure_caption(display_number, fig_index, title_items, report_language)
+        caption_tag.string = _build_figure_caption(
+            display_number,
+            fig_index,
+            title_items,
+            report_language,
+            title_text=title_text,
+        )
+        figure_mappings.append((figure_block, fig_index, display_number))
 
+    _align_adjacent_textual_figure_references(figure_mappings)
     return str(soup)
+
+
+def _store_report_figure_ledger(
+    final_html: str,
+    fig_desc_list: list[Any],
+    title_items: list[str],
+    *,
+    raw_refs: list[int],
+    valid_refs: list[int],
+    inserted_count: int,
+    report_language: Any,
+) -> None:
+    soup = BeautifulSoup(final_html or "", "html.parser")
+    inserted: list[dict[str, Any]] = []
+    for figure_block in soup.find_all("div", class_="report-figure-block"):
+        try:
+            fig_index = int(figure_block.get("data-fig-index", "-1"))
+        except Exception:
+            fig_index = -1
+        try:
+            display_number = int(figure_block.get("data-report-figure-number", "0"))
+        except Exception:
+            display_number = 0
+        if 0 <= fig_index < len(fig_desc_list):
+            fig_item = fig_desc_list[fig_index]
+        else:
+            fig_item = None
+        title_text = stringify_string(figure_block.get("data-report-figure-title") or "").strip()
+        if not title_text:
+            title_text = _resolve_report_figure_title(fig_item, fig_index, title_items)
+        caption_tag = figure_block.find("div", class_="report-figure-caption")
+        metadata = _report_figure_metadata(fig_item, fig_index, title_text)
+        metadata.update(
+            {
+                "display_number": display_number,
+                "caption": caption_tag.get_text(" ", strip=True) if caption_tag is not None else "",
+                "image_inserted": bool(figure_block.find("img")),
+            }
+        )
+        inserted.append(metadata)
+
+    inserted_indices = [int(item["fig_index"]) for item in inserted if isinstance(item.get("fig_index"), int)]
+    st.session_state[REPORT_FIGURE_LEDGER_KEY] = {
+        "loaded_figure_count": len(fig_desc_list),
+        "raw_placeholder_refs": raw_refs,
+        "valid_placeholder_refs": valid_refs,
+        "inserted_figure_indices": inserted_indices,
+        "inserted_figure_count": inserted_count,
+        "missing_valid_refs": [ref for ref in valid_refs if ref not in inserted_indices],
+        "language": normalize_report_language(report_language),
+        "figures": inserted,
+    }
+
+
+def _render_report_figure_ledger() -> None:
+    ledger = st.session_state.get(REPORT_FIGURE_LEDGER_KEY)
+    if not isinstance(ledger, dict):
+        return
+    figures = ledger.get("figures")
+    if not isinstance(figures, list) or not figures:
+        return
+    rows = []
+    for item in figures:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                bt("显示编号", "Display No."): item.get("display_number"),
+                "FIG": item.get("fig_index"),
+                "chart_id": item.get("chart_id"),
+                "fig_dict_key": item.get("fig_dict_key"),
+                bt("题注", "Caption"): item.get("caption"),
+                bt("已插入", "Inserted"): bool(item.get("image_inserted")),
+            }
+        )
+    if not rows:
+        return
+    st.caption(bt("图表插入账本", "Figure insertion ledger"))
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+_PROTECTED_TEXTUAL_FIG_REF_PREFIX = "__AUTOSTAT_TEXTUAL_FIG_REF_"
+
+
+def _protect_textual_figure_references_when_explicit_placeholders_exist(
+    final_html: str,
+) -> tuple[str, dict[str, str]]:
+    if not final_html:
+        return final_html, {}
+    if not re.search(r"[\[\uFF3B\u3010]\s*FIG\s*[:：]?\s*\d+", final_html, flags=re.IGNORECASE):
+        return final_html, {}
+
+    protected: dict[str, str] = {}
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_])图\s*\d+(?!\d)|\b(?:Figure|Fig\.?)\s+\d+\b",
+        flags=re.IGNORECASE,
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        token = f"{_PROTECTED_TEXTUAL_FIG_REF_PREFIX}{len(protected)}__"
+        protected[token] = match.group(0)
+        return token
+
+    return pattern.sub(replace, final_html), protected
+
+
+def _restore_protected_textual_figure_references(final_html: str, protected: dict[str, str]) -> str:
+    restored = final_html
+    for token, original in protected.items():
+        restored = restored.replace(token, original)
+    return restored
 
 
 def _inject_visualizations_into_html(final_html: str, report_language: Any | None = None) -> str:
@@ -1466,6 +2057,7 @@ def _inject_visualizations_into_html(final_html: str, report_language: Any | Non
         print("[REPORT][FIG] no figures loaded, remove placeholders only")
         return remove_figure_placeholders(final_html)
 
+    final_html, protected_textual_refs = _protect_textual_figure_references_when_explicit_placeholders_exist(final_html)
     final_html = normalize_figure_placeholders(final_html)
     final_html = normalize_trailing_punctuation_before_figure_placeholder(final_html)
 
@@ -1489,9 +2081,16 @@ def _inject_visualizations_into_html(final_html: str, report_language: Any | Non
 
     image_uri_cache = _get_report_figure_data_uri_cache()
     _prune_stale_figure_cache_entries(fig_desc_list, valid_unique_fig_indices, image_uri_cache)
-    inserted_fig_indices: set[int] = set()
     soup = BeautifulSoup(final_html, "html.parser")
-    inserted_figure_count = _replace_remaining_placeholders_in_soup(
+    inserted_fig_indices = _refresh_existing_report_figure_blocks_in_soup(
+        soup=soup,
+        fig_desc_list=fig_desc_list,
+        title_items=title_items,
+        image_uri_cache=image_uri_cache,
+        report_language=report_language,
+    )
+    inserted_figure_count = len(inserted_fig_indices)
+    inserted_figure_count += _replace_remaining_placeholders_in_soup(
         soup=soup,
         fig_desc_list=fig_desc_list,
         title_items=title_items,
@@ -1501,9 +2100,19 @@ def _inject_visualizations_into_html(final_html: str, report_language: Any | Non
         report_language=report_language,
     )
     injected_html = str(soup)
+    injected_html = _restore_protected_textual_figure_references(injected_html, protected_textual_refs)
     injected_html = _normalize_report_figure_layout(injected_html)
     injected_html = _remove_duplicate_figure_titles(injected_html)
-    injected_html = _renumber_report_figure_blocks(injected_html, title_items, report_language)
+    injected_html = _renumber_report_figure_blocks(injected_html, fig_desc_list, title_items, report_language)
+    _store_report_figure_ledger(
+        injected_html,
+        fig_desc_list,
+        title_items,
+        raw_refs=match_numbers,
+        valid_refs=valid_unique_fig_indices,
+        inserted_count=len(inserted_fig_indices),
+        report_language=report_language,
+    )
     injected_html = re.sub(FIG_PLACEHOLDER_PATTERN, "", injected_html, flags=re.IGNORECASE)
     print("[REPORT][FIG] inserted figure count =", inserted_figure_count)
     return injected_html
@@ -1529,22 +2138,6 @@ def _looks_like_modeling_heading(text: str) -> bool:
         "modeltraining",
     )
     return any(keyword in normalized for keyword in keywords)
-
-
-def _looks_like_chapter4_heading(text: str) -> bool:
-    normalized = re.sub(r"\s+", "", str(text or "")).lower()
-    if not normalized:
-        return False
-    chapter4_prefixes = (
-        "4",
-        "4.",
-        "4、",
-        "4．",
-        "4章",
-        "第4章",
-        "第四章",
-    )
-    return any(normalized.startswith(prefix) for prefix in chapter4_prefixes)
 
 
 def _is_heading_tag(tag: Any) -> bool:
@@ -1604,24 +2197,11 @@ def _extract_section_path(text: str) -> tuple[int, ...]:
     return ()
 
 
-def _is_top_level_chapter4_heading(tag: Tag) -> bool:
-    text = tag.get_text(" ", strip=True)
-    path = _extract_section_path(text)
-    if path == (4,):
-        return True
-    normalized = _normalize_heading_text(text)
-    return "\u7b2c\u56db\u7ae0" in normalized
-
-
 def _find_modeling_chapter_heading(soup: BeautifulSoup) -> Tag | None:
     heading_tags = soup.find_all(re.compile(r"^h[1-6]$"))
     for heading in heading_tags:
-        if _is_top_level_chapter4_heading(heading):
-            return heading
-
-    for heading in heading_tags:
         text = heading.get_text(" ", strip=True)
-        if _looks_like_chapter4_heading(text) and _looks_like_modeling_heading(text):
+        if _looks_like_modeling_heading(text):
             return heading
 
     candidate_tags = soup.find_all(["p", "div", "section", "article"])
@@ -1629,11 +2209,18 @@ def _find_modeling_chapter_heading(soup: BeautifulSoup) -> Tag | None:
         if tag.find(["img", "table", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6", "p"]):
             continue
         text = tag.get_text(" ", strip=True)
-        path = _extract_section_path(text)
-        if path == (4,) or (_looks_like_chapter4_heading(text) and _looks_like_modeling_heading(text)):
+        if _looks_like_modeling_heading(text):
             return tag
 
     return None
+
+
+def _append_modeling_results_heading(soup: BeautifulSoup, report_language: Any) -> Tag:
+    heading = soup.new_tag("h2")
+    heading.string = "Modeling Results" if is_english_report(report_language) else "建模结果"
+    target = soup.find("main") or soup.body or soup
+    target.append(heading)
+    return heading
 
 
 def _iter_named_next_siblings(tag: Tag):
@@ -1767,7 +2354,7 @@ def _inject_modeling_table_into_html(final_html: str, report_language: Any = REP
 
     modeling_heading = _find_modeling_chapter_heading(soup)
     if modeling_heading is None:
-        return final_html
+        modeling_heading = _append_modeling_results_heading(soup, report_language)
 
     target_heading = _find_best_modeling_table_section_heading(modeling_heading) or modeling_heading
     insert_after = _find_modeling_table_insert_anchor(target_heading)
@@ -2157,6 +2744,20 @@ def _prepare_downloadable_reports(report_agent, generation_token: str | None = N
             if can_save_prepared_output():
                 st.session_state.report_final_html = html_content
 
+    if html_content:
+        refreshed_html_content = _finalize_report_html(
+            html_content,
+            "",
+            report_language=report_language,
+        )
+        if refreshed_html_content != html_content:
+            html_content = refreshed_html_content
+            markdown_content = html_to_markdown(html_content)
+            if can_save_prepared_output():
+                report_agent.save_html(html_content)
+                report_agent.save_markdown(markdown_content)
+                st.session_state.report_final_html = html_content
+
     if not markdown_content:
         if html_content:
             markdown_content = html_to_markdown(html_content)
@@ -2404,6 +3005,7 @@ def _clear_generated_report_files(report_agent) -> None:
     report_agent.save_html(None)
     report_agent.save_markdown(None)
     st.session_state.pop("report_final_html", None)
+    st.session_state.pop(REPORT_FIGURE_LEDGER_KEY, None)
     st.session_state.pop(REPORT_WORD_EXPORT_KEY, None)
     st.session_state.pop(REPORT_PDF_EXPORT_KEY, None)
 
@@ -2431,6 +3033,7 @@ def _clear_report_workflow_outputs(report_agent) -> None:
     st.session_state.pop(REPORT_DISPLAY_OUTLINE_KEY, None)
     st.session_state.pop(REPORT_DISPLAY_TO_INTERNAL_TOC_MAP_KEY, None)
     st.session_state.pop(REPORT_OUTLINE_USER_EDITED_KEY, None)
+    st.session_state.pop(REPORT_OUTLINE_REQUIREMENTS_KEY, None)
 
 
 def _save_report_workflow_outputs(report_agent, workflow_result: dict[str, Any]) -> None:
@@ -2548,6 +3151,8 @@ def _has_report_value(value: Any) -> bool:
 def _stage_has_report_content(stage: str) -> bool:
     if st.session_state.get("auto_mode") and not _auto_stage_was_planned(stage):
         return False
+    if stage == "vis_auto":
+        _ensure_visualization_report_material()
     state_stage = {
         "loading_auto": "loading",
         "prep_auto": "preprocessing",
@@ -2566,6 +3171,99 @@ def _report_stage_value(stage: str, value: Any, empty_value: Any) -> Any:
     if not _stage_has_report_content(stage):
         return empty_value
     return value
+
+
+def _coerce_report_summary(value: Any) -> dict[str, Any]:
+    parsed = maybe_json_loads(value)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _first_report_value(*values: Any) -> Any:
+    for value in values:
+        if _has_report_value(value):
+            return value
+    return None
+
+
+def _current_report_stage_snapshot(
+    load_agent=None,
+    *,
+    allow_report_cache: bool = False,
+) -> dict[str, Any]:
+    """Resolve the current stage outputs used by both outline and final report writing.
+
+    The active workflow state is always preferred.  Cached ``report_*`` fields are
+    only a fallback for report-body generation after an outline has been produced.
+    This keeps language/preference/stage interactions from sending stale outline
+    cache into the paper-writing worker.
+    """
+    load_agent = load_agent or st.session_state.get("data_loading_agent")
+    _ensure_visualization_report_material(st.session_state.get("visualization_agent"))
+
+    load_summary = _coerce_report_summary(_resolve_loading_field(load_agent, "summary_1", {}))
+    preproc_summary = _coerce_report_summary(st.session_state.get("summary_2", {}))
+    visual_summary = _coerce_report_summary(st.session_state.get("summary_3", {}))
+    coding_summary = _coerce_report_summary(
+        _first_report_value(
+            st.session_state.get("summary_4"),
+            st.session_state.get("modeling_summary_4"),
+        )
+    )
+
+    load_abstract = stringify_string(
+        _first_report_value(
+            _resolve_loading_field(load_agent, "abstract_1", ""),
+            st.session_state.get("report_load_abstract") if allow_report_cache else None,
+        )
+    )
+    preproc_abstract = stringify_string(
+        _first_report_value(
+            st.session_state.get("abstract_2"),
+            st.session_state.get("report_preproc_abstract") if allow_report_cache else None,
+        )
+    )
+    visual_abstract = stringify_string(
+        _first_report_value(
+            st.session_state.get("abstract_3"),
+            st.session_state.get("report_visual_abstract") if allow_report_cache else None,
+        )
+    )
+    coding_abstract = stringify_string(
+        _first_report_value(
+            st.session_state.get("abstract_4"),
+            st.session_state.get("modeling_abstract_4"),
+            st.session_state.get("report_coding_abstract") if allow_report_cache else None,
+        )
+    )
+
+    selected_full_content, selected_source = _resolve_selected_full_content(
+        visual_summary=visual_summary,
+        allow_report_cache=allow_report_cache,
+    )
+
+    preference_selected = _first_report_value(
+        st.session_state.get("preference_selected"),
+        st.session_state.get("report_preference_selected") if allow_report_cache else None,
+    )
+    add_preference = _first_report_value(
+        st.session_state.get("add_preference"),
+        st.session_state.get("report_add_preference") if allow_report_cache else None,
+    )
+
+    return {
+        "load_summary": _report_stage_value("loading_auto", load_summary, {}),
+        "preproc_summary": _report_stage_value("prep_auto", preproc_summary, {}),
+        "visual_summary": _report_stage_value("vis_auto", visual_summary, {}),
+        "coding_summary": _report_stage_value("modeling_auto", coding_summary, {}),
+        "selected_full_conten": _report_stage_value("vis_auto", selected_full_content, ""),
+        "selected_full_source": selected_source,
+        "load_abstract": _report_stage_value("loading_auto", load_abstract, ""),
+        "preproc_abstract": _report_stage_value("prep_auto", preproc_abstract, ""),
+        "visual_abstract": _report_stage_value("vis_auto", visual_abstract, ""),
+        "coding_abstract": _report_stage_value("modeling_auto", coding_abstract, ""),
+        "preference_selected": stringify_string(preference_selected),
+        "add_preference": stringify_string(add_preference),
+    }
 
 
 def _has_any_report_stage_content() -> bool:
@@ -2977,6 +3675,7 @@ def _renumber_report_markdown_for_display(markdown_content: str) -> str:
 
 
 def _has_report_prerequisites() -> bool:
+    _ensure_visualization_report_material(st.session_state.get("visualization_agent"))
     if st.session_state.get("auto_mode"):
         checks: list[bool] = []
         if _auto_stage_was_planned("loading_auto"):
@@ -2991,7 +3690,11 @@ def _has_report_prerequisites() -> bool:
                 )
             )
         if _auto_stage_was_planned("vis_auto"):
-            checks.append(bool(st.session_state.get("summary_3")) and stage_is_current(st.session_state, "visualization"))
+            checks.append(
+                bool(st.session_state.get("summary_3"))
+                and stage_is_current(st.session_state, "visualization")
+                and bool(_current_visualization_figure_artifacts())
+            )
         if _auto_stage_was_planned("modeling_auto"):
             checks.append(bool(st.session_state.get("summary_4")) and stage_is_current(st.session_state, "modeling"))
         return all(checks)
@@ -3083,15 +3786,34 @@ def _has_visualization_recommendation(visualization_agent) -> bool:
     if visualization_agent is None:
         return False
 
+    try:
+        if visualization_agent.load_fig():
+            return True
+    except Exception:
+        pass
+
     suggestion = (
         st.session_state.get("visual_recommendatio")
         or st.session_state.get("viz_suggestion")
         or visualization_agent.load_suggestion()
     )
-    return bool(stringify_string(suggestion))
+    return bool(stringify_string(suggestion) or visualization_agent.load_code())
+
+
+def _ensure_visualization_report_material(visualization_agent=None) -> bool:
+    visualization_agent = visualization_agent or st.session_state.get("visualization_agent")
+    if visualization_agent is None:
+        return False
+    try:
+        return sync_visualization_report_state_from_figures(visualization_agent)
+    except Exception:
+        return False
 
 
 def _ensure_visualization_ready_for_report(visualization_agent) -> bool:
+    if _ensure_visualization_report_material(visualization_agent):
+        return True
+
     if visualization_agent is None or not _has_visualization_recommendation(visualization_agent):
         st.warning(bt("如需生成图文报告，请先完成可视化推荐部分。", "Complete the visualization recommendations before generating a report with charts."))
         return False
@@ -3106,10 +3828,14 @@ def _ensure_visualization_ready_for_report(visualization_agent) -> bool:
             st.warning(bt("未能自动生成可视化结果，请先前往可视化页面检查代码或数据。", "Visualization results could not be generated automatically. Check the visualization code or data first."))
             return False
 
-    return True
+    return _ensure_visualization_report_material(visualization_agent) or bool(visualization_agent.load_fig())
 
 
 def _loaded_visualization_figure_count() -> int | None:
+    artifacts = successful_figure_artifacts(st.session_state.get(VISUALIZATION_FIGURE_ARTIFACTS_KEY))
+    if artifacts:
+        return len(artifacts)
+
     visualization_agent = st.session_state.get("visualization_agent")
     if visualization_agent is None:
         return None
@@ -3120,6 +3846,24 @@ def _loaded_visualization_figure_count() -> int | None:
         return None
 
     return len(fig_desc_list) if fig_desc_list else None
+
+
+def _current_visualization_figure_artifacts() -> list[dict[str, Any]]:
+    artifacts = successful_figure_artifacts(st.session_state.get(VISUALIZATION_FIGURE_ARTIFACTS_KEY))
+    if artifacts:
+        return artifacts
+
+    visualization_agent = st.session_state.get("visualization_agent")
+    if visualization_agent is None:
+        return []
+    try:
+        return successful_figure_artifacts(visualization_agent.load_fig() or [])
+    except Exception:
+        return []
+
+
+def _current_visualization_figure_artifact_metadata() -> list[dict[str, Any]]:
+    return report_figure_artifact_metadata(_current_visualization_figure_artifacts())
 
 
 def _has_in_range_figure_refs(content: str, figure_count: int | None) -> bool:
@@ -3254,62 +3998,28 @@ def _log_selected_full_content(stage: str, content: str, source: str) -> None:
 
 def _build_report_inputs(load_agent, report_agent) -> dict[str, Any]:
     report_language = _get_report_generation_language(report_agent)
-    load_summary = maybe_json_loads(_resolve_loading_field(load_agent, "summary_1", {}))
-    preproc_summary = maybe_json_loads(st.session_state.get("summary_2", {}))
-    visual_summary = maybe_json_loads(st.session_state.get("summary_3", {}))
-    coding_summary = maybe_json_loads(st.session_state.get("summary_4", {}))
-
-    if not isinstance(load_summary, dict):
-        load_summary = {}
-    if not isinstance(preproc_summary, dict):
-        preproc_summary = {}
-    if not isinstance(visual_summary, dict):
-        visual_summary = {}
-    if not isinstance(coding_summary, dict):
-        coding_summary = {}
-
-    load_summary = _report_stage_value("loading_auto", load_summary, {})
-    preproc_summary = _report_stage_value("prep_auto", preproc_summary, {})
-    visual_summary = _report_stage_value("vis_auto", visual_summary, {})
-    coding_summary = _report_stage_value("modeling_auto", coding_summary, {})
-
-    selected_full_content, selected_source = _resolve_selected_full_content(
-        visual_summary=visual_summary,
-        allow_report_cache=False,
+    stage_snapshot = _current_report_stage_snapshot(load_agent, allow_report_cache=False)
+    _log_selected_full_content(
+        "toc",
+        stage_snapshot["selected_full_conten"],
+        stage_snapshot["selected_full_source"],
     )
-    selected_full_content = _report_stage_value("vis_auto", selected_full_content, "")
-    _log_selected_full_content("toc", selected_full_content, selected_source)
 
     return {
-        "load_summary": load_summary,
-        "preproc_summary": preproc_summary,
-        "visual_summary": visual_summary,
-        "coding_summary": coding_summary,
-        "selected_full_conten": selected_full_content,
-        "load_abstract": _report_stage_value(
-            "loading_auto",
-            stringify_string(_resolve_loading_field(load_agent, "abstract_1", "")),
-            "",
-        ),
-        "preproc_abstract": _report_stage_value(
-            "prep_auto",
-            stringify_string(st.session_state.get("abstract_2", "")),
-            "",
-        ),
-        "visual_abstract": _report_stage_value(
-            "vis_auto",
-            stringify_string(st.session_state.get("abstract_3", "")),
-            "",
-        ),
-        "coding_abstract": _report_stage_value(
-            "modeling_auto",
-            stringify_string(st.session_state.get("abstract_4", "")),
-            "",
-        ),
+        "load_summary": stage_snapshot["load_summary"],
+        "preproc_summary": stage_snapshot["preproc_summary"],
+        "visual_summary": stage_snapshot["visual_summary"],
+        "coding_summary": stage_snapshot["coding_summary"],
+        "selected_full_conten": stage_snapshot["selected_full_conten"],
+        "figure_artifacts": _current_visualization_figure_artifact_metadata(),
+        "load_abstract": stage_snapshot["load_abstract"],
+        "preproc_abstract": stage_snapshot["preproc_abstract"],
+        "visual_abstract": stage_snapshot["visual_abstract"],
+        "coding_abstract": stage_snapshot["coding_abstract"],
         "toc_md": normalize_toc_list(report_agent.load_outline()),
         "outline_length": str(report_agent.load_outline_length() or ""),
-        "preference_selected": stringify_string(st.session_state.get("preference_selected")),
-        "add_preference": stringify_string(st.session_state.get("add_preference")),
+        "preference_selected": stage_snapshot["preference_selected"],
+        "add_preference": stage_snapshot["add_preference"],
         "report_auto": True,
         "user_input": str(report_agent.load_user_input() or ""),
         "report_language": report_language,
@@ -3328,20 +4038,12 @@ def _build_word_report_inputs(report_agent, status_placeholder: Any | None = Non
         report_language,
         status_placeholder=status_placeholder,
     )
-    current_coding_abstract = stringify_string(
-        st.session_state.get("abstract_4") or st.session_state.get("modeling_abstract_4")
+    stage_snapshot = _current_report_stage_snapshot(allow_report_cache=True)
+    _log_selected_full_content(
+        "word",
+        stage_snapshot["selected_full_conten"],
+        stage_snapshot["selected_full_source"],
     )
-    if not current_coding_abstract:
-        current_coding_abstract = stringify_string(st.session_state.get("report_coding_abstract"))
-    current_coding_abstract = _report_stage_value("modeling_auto", current_coding_abstract, "")
-
-    visual_summary = maybe_json_loads(st.session_state.get("summary_3", {}))
-    current_selected_full_content, selected_source = _resolve_selected_full_content(
-        visual_summary=visual_summary if isinstance(visual_summary, dict) else {},
-        allow_report_cache=True,
-    )
-    current_selected_full_content = _report_stage_value("vis_auto", current_selected_full_content, "")
-    _log_selected_full_content("word", current_selected_full_content, selected_source)
     return {
         "toc_text": generation_toc_text,
         "respect_user_toc": bool(st.session_state.get(REPORT_OUTLINE_USER_EDITED_KEY)),
@@ -3349,26 +4051,15 @@ def _build_word_report_inputs(report_agent, status_placeholder: Any | None = Non
         "report_language": report_language,
         "language_instruction": report_language_instruction(report_language),
         "language_name": report_language_name(report_language),
-        "selected_full_conten": current_selected_full_content,
-        "preference_selected": stringify_string(st.session_state.get("report_preference_selected")),
-        "add_preference": stringify_string(st.session_state.get("report_add_preference")),
+        "selected_full_conten": stage_snapshot["selected_full_conten"],
+        "figure_artifacts": _current_visualization_figure_artifact_metadata(),
+        "preference_selected": stage_snapshot["preference_selected"],
+        "add_preference": stage_snapshot["add_preference"],
         "user_input": str(report_agent.load_user_input() or ""),
-        "load_abstract": _report_stage_value(
-            "loading_auto",
-            stringify_string(st.session_state.get("report_load_abstract")),
-            "",
-        ),
-        "preproc_abstract": _report_stage_value(
-            "prep_auto",
-            stringify_string(st.session_state.get("report_preproc_abstract")),
-            "",
-        ),
-        "visual_abstract": _report_stage_value(
-            "vis_auto",
-            stringify_string(st.session_state.get("report_visual_abstract")),
-            "",
-        ),
-        "coding_abstract": current_coding_abstract,
+        "load_abstract": stage_snapshot["load_abstract"],
+        "preproc_abstract": stage_snapshot["preproc_abstract"],
+        "visual_abstract": stage_snapshot["visual_abstract"],
+        "coding_abstract": stage_snapshot["coding_abstract"],
     }
 
 
@@ -3408,7 +4099,11 @@ def _get_report_worker_ref_context(inputs: dict[str, Any]) -> str:
 def _build_report_worker_payload(report_agent, status_placeholder: Any | None = None) -> dict[str, Any]:
     inputs = _build_word_report_inputs(report_agent, status_placeholder=status_placeholder)
     inputs.setdefault("add_preference", st.session_state.get("add_preference") or "")
-    inputs.setdefault("preference_select", st.session_state.get("preference_selected") or "")
+    inputs["preference_select"] = (
+        inputs.get("preference_selected")
+        or st.session_state.get("preference_selected")
+        or ""
+    )
     inputs["ref_context"] = _get_report_worker_ref_context(inputs)
 
     llm_config = {
@@ -4090,6 +4785,8 @@ def _convert_report_content_language(report_agent, target_language: Any) -> None
         return
 
     translated_html = _set_report_html_language(translated_html, target_language)
+    st.session_state.pop(REPORT_FIGURE_DATA_URI_CACHE_KEY, None)
+    translated_html = _finalize_report_html(translated_html, "", report_language=target_language)
     translated_markdown = html_to_markdown(translated_html)
     report_agent.save_html(translated_html)
     report_agent.save_markdown(translated_markdown)
@@ -4301,6 +4998,11 @@ def report_basic_info(load_agent, report_agent, auto: bool) -> None:
         set_language(selected_language)
         sync_report_language(report_agent, selected_language)
         st.session_state[REPORT_LANGUAGE_WIDGET_SYNC_KEY] = selected_language
+        st.session_state.pop(REPORT_OUTLINE_LENGTH_SELECTOR_KEY, None)
+        # The sidebar UI language widget has already been instantiated in this
+        # run; rerun immediately so its server-side value cannot switch the
+        # report language back during the next polling refresh.
+        st.rerun()
 
     generated_language = _get_report_current_language(report_agent)
     if _has_generated_word_report(report_agent) and selected_language != generated_language:
@@ -4346,6 +5048,20 @@ def report_basic_info(load_agent, report_agent, auto: bool) -> None:
 
     user_input = st.text_input(bt("报告生成要求", "Report Requirements"), bt("默认", "Default"))
     report_agent.save_user_input(user_input)
+    outline_exists = _has_generated_outline(report_agent)
+    outline_locked = bool(st.session_state.get(REPORT_OUTLINE_USER_EDITED_KEY))
+    outline_requirement_snapshot = str(st.session_state.get(REPORT_OUTLINE_REQUIREMENTS_KEY) or "").strip()
+    current_requirement = str(user_input or "").strip()
+    if outline_locked:
+        st.caption(bt(
+            "当前目录已手动编辑并锁定：报告生成要求会继续影响正文写作；如需影响目录，请重新点击“生成目录”。",
+            "The outline has been manually edited and locked: report requirements will still affect body writing; regenerate the outline to apply them to the outline.",
+        ))
+    elif outline_exists and outline_requirement_snapshot and outline_requirement_snapshot != current_requirement:
+        st.caption(bt(
+            "报告生成要求已变化：直接生成报告会按新要求写正文；点击“生成目录”可同时更新目录。",
+            "Report requirements changed: generating the report will use them for body writing; click Generate Outline to update the outline too.",
+        ))
     visualization_agent = st.session_state.get("visualization_agent")
 
     if not auto and not _stage_has_report_content("vis_auto"):
@@ -4376,6 +5092,7 @@ def report_basic_info(load_agent, report_agent, auto: bool) -> None:
             return
 
         report_agent.save_outline(internal_toc_text)
+        st.session_state[REPORT_OUTLINE_REQUIREMENTS_KEY] = current_requirement
         _save_display_outline_from_internal(internal_toc_text)
         if auto:
             st.rerun()
@@ -4455,8 +5172,7 @@ def report_save(report_agent, auto: bool) -> None:
             return
 
         if (
-            not auto
-            and _stage_has_report_content("vis_auto")
+            _stage_has_report_content("vis_auto")
             and not _ensure_visualization_ready_for_report(visualization_agent)
         ):
             return
@@ -4497,6 +5213,7 @@ def report_execution(report_agent) -> None:
                 disabled=downloadable_reports["word"] is None,
             )
             _render_report_preview(html_content, markdown_content)
+            _render_report_figure_ledger()
             return
 
         if action == "HTML":
@@ -4508,6 +5225,7 @@ def report_execution(report_agent) -> None:
                 disabled=not bool(html_content),
             )
             _render_report_preview(html_content, markdown_content)
+            _render_report_figure_ledger()
             return
 
         if action == "PDF":
@@ -4520,9 +5238,11 @@ def report_execution(report_agent) -> None:
             )
 
             _render_report_preview(html_content, markdown_content)
+            _render_report_figure_ledger()
             return
 
         _render_report_preview(html_content, markdown_content)
+        _render_report_figure_ledger()
             
 
 if __name__ == "__main__":

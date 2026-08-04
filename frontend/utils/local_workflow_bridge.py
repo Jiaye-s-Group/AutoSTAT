@@ -22,9 +22,20 @@ def _input_language(inputs: dict[str, Any]) -> str:
 def _get_ref_context(query: str = "") -> str:
     """从 session_state 中获取参考资料检索结果。"""
     retriever = st.session_state.get("ref_retriever")
-    if retriever is None or retriever.is_empty:
+    if retriever is None:
         return ""
-    return retriever.retrieve_and_format(query or "数据分析", top_k=3)
+    is_empty = getattr(retriever, "is_empty", False)
+    if callable(is_empty):
+        try:
+            is_empty = is_empty()
+        except Exception:
+            is_empty = False
+    if is_empty:
+        return ""
+    try:
+        return retriever.retrieve_and_format(query or "数据分析", top_k=5, min_score=0.0)
+    except TypeError:
+        return retriever.retrieve_and_format(query or "数据分析", top_k=5)
 
 
 
@@ -39,13 +50,14 @@ def call_loading_bridge(inputs: dict[str, Any]) -> dict[str, Any] | None:
             shape_1=int(inputs.get("shape_1", 0)),
             dtype_info_str=str(inputs.get("dtype_info_str", "")),
             head_dict_str=str(inputs.get("head_dict_str", "")),
+            data_profile_str=str(inputs.get("data_profile_str", "")),
             loading_auto=bool(inputs.get("loading_auto", True)),
             user_input=str(inputs.get("user_input", "")),
             add_preference=str(inputs.get("add_preference", "")),
             preference_selected=str(inputs.get("preference_selected", "")),
             ref_context=_get_ref_context(bt(
-                f"字段含义 数据说明 {inputs.get('dtype_info_str', '')[:200]}",
-                f"field meaning data description {inputs.get('dtype_info_str', '')[:200]}",
+                f"数据字典 字段说明 变量含义 单位 编码 取值方向 缺失值 {inputs.get('dtype_info_str', '')[:1200]}",
+                f"data dictionary field descriptions variable meanings units coding value direction missing values {inputs.get('dtype_info_str', '')[:1200]}",
             )),
             language=_input_language(inputs),
         )
@@ -413,6 +425,7 @@ def call_reporting_partly_bridge(inputs: dict[str, Any]) -> dict[str, Any] | Non
         return run_reporting_partly_workflow(
             toc_text=str(inputs.get("toc_text", "")),
             selected_full_conten=str(inputs.get("selected_full_conten", "")),
+            figure_artifacts=inputs.get("figure_artifacts"),
             load_abstract=str(inputs.get("load_abstract", "")),
             preproc_abstract=str(inputs.get("preproc_abstract", "")),
             visual_abstract=str(inputs.get("visual_abstract", "")),

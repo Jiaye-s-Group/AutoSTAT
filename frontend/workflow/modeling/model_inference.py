@@ -4,11 +4,12 @@ import io
 import json
 import traceback
 
-import numpy as np
 import pandas as pd
 import streamlit as st
-from core.safe_code import safe_exec
-from sklearn.preprocessing import StandardScaler
+from core.bounded_code_execution import (
+    INFERENCE_TIMEOUT_SECONDS,
+    run_bounded_safe_exec,
+)
 
 from utils.i18n import bt
 from utils.sanitize_code import sanitize_code, to_json_serializable
@@ -40,18 +41,18 @@ def infer_execution(agent):
     try:
         model_obj = agent.load_best_model()
 
-        exec_ns = {
-            "inference_df": inference_df,
-            "model_obj": model_obj,
-            "np": np,
-            "pd": pd,
-            "StandardScaler": StandardScaler,
-        }
-
         with st.spinner(bt("正在进行推断分析...", "Running inference analysis...")):
-            safe_exec(edited_code, exec_ns)
+            execution_result = run_bounded_safe_exec(
+                kind="inference",
+                code=edited_code,
+                dataframe=inference_df,
+                timeout_seconds=INFERENCE_TIMEOUT_SECONDS,
+                extra_values={"model_obj": model_obj},
+            )
+            if not execution_result["is_success"]:
+                raise RuntimeError(str(execution_result["error"]))
 
-            result_dict = exec_ns.get("result_dict")
+            result_dict = execution_result.get("value")
             if result_dict is None:
                 st.error(
                     bt(

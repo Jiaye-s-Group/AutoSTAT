@@ -28,25 +28,32 @@
 2. 代码必须在执行后生成变量 process_df，并且脚本最后只保留一行：
    process_df = ...
    除此之外，最后不得再输出任何语句。
-3. 禁止产生除 process_df 之外的"最终输出变量"；允许使用必要的中间局部变量与函数定义，但不得 print 或写文件。
-4. 若发现 df 存在重复表头行（例如某行所有单元格与列名集合高度一致），必须自动删除该行（可删除多行）。
+3. 禁止产生除 process_df 与可选 qc_summary 之外的"最终输出变量"；允许使用必要的中间局部变量与函数定义，但不得 print 或写文件。若 Preprocessing Contract 要求 QC，必须定义 JSON 可序列化的 dict `qc_summary`。
+   QC 字段语义必须严格遵守：
+   - `missing_by_column`：报告输出表 `process_df` 预处理后的实际缺失数，必须覆盖每个输出列；不要填写填补前缺失数。
+   - `missing_before_by_column`：可选审计字段，才用于报告填补前缺失数。
+   - `missing_after_by_column`：可选审计字段，应与 `missing_by_column` 一致。
+   - `modified_row_count`：被实际改动的唯一行数；多个字段在同一行被填补时只计 1 行。用行级 boolean union mask 计算，不要把各列缺失数直接相加。
+   - `imputed_cell_count`：可选审计字段，才用于报告填补/修改的单元格数。
+4. 对重复表头行、异常记录或格式不一致记录的处理必须遵从 Preprocessing Contract：契约要求仅记录 QC 时不得删除或改写数据；只有契约明确允许删除时才能删除。
 5. 必须保证 process_df 为 pandas.DataFrame；不得返回 numpy 数组、稀疏矩阵或 sklearn 的 Pipeline/Transformer 对象本身。
 6. 确保 process_df 中每一列都有明确列名：
    - 若使用 OneHotEncoder / OrdinalEncoder 等产生新特征，必须生成可读的列名；
    - 若无法获取特征名，必须用可控规则生成（如 原列名__类别值 或 f0,f1,...），不得留空或重复。
-7. 对类别特征：
-   - 多列类别特征优先使用 OneHotEncoder 或 OrdinalEncoder；
-   - 单列字符串/类别列必须使用 LabelEncoder 或 OrdinalEncoder，不得 passthrough。
-8. 混合型列处理（同一列同时出现数值与字符串）必须在构建 ColumnTransformer 前完成：
-   - 需检测混合型列（可对该列非空样本做数值可解析判断）；
-   - 对混合型列使用 FunctionTransformer(lambda x: x.astype(str)) 统一为字符串类型后再编码。
+7. 对类别特征：仅在 Preprocessing Contract 或已确认建议明确要求编码时才编码；明确要求保留原值时不得编码。
+   - 需要编码的多列类别特征优先使用 OneHotEncoder 或 OrdinalEncoder；
+   - 需要编码的单列字符串/类别列可使用 LabelEncoder 或 OrdinalEncoder。
+8. 混合型列处理（同一列同时出现数值与字符串）仅在已确认建议要求编码/变换时才执行；否则保留原值：
+   - 需要编码时，检测混合型列（可对该列非空样本做数值可解析判断）；
+   - 需要编码时，对混合型列使用 FunctionTransformer(lambda x: x.astype(str)) 统一为字符串类型后再编码。
 9. 使用 OneHotEncoder 时：
    - 必须避免产生无法转 DataFrame 的稀疏输出；
    - 要么设置 OneHotEncoder(sparse_output=False)（若版本不支持则用 sparse=False），要么在变换后将稀疏矩阵转为 dense；
    - 最终必须构造 DataFrame。
-10. 若用户需求与通用建议冲突，用户需求优先级最高；若某列被明确标注"无需处理"，不得对该列进行任何变换。
+10. Preprocessing Contract 与已确认完整建议优先级最高。若某列被明确标注"无需处理"，不得对该列进行任何变换；不得把数值解析失败、格式异常或业务异常自动视作缺失值。
 请严格依据以上要求，输出完整且可直接执行的纯 Python 代码（只输出代码，不输出任何其他内容）。
 
 === 运行时数据约束（机器生成，必须遵守）===
 {{runtime_constraints_json}}
+其中 `execution_safety` 是实际执行器的强制规则。禁止列表中的名称和属性会在执行前被拒绝；特别是不得使用 `getattr`、私有/dunder 属性、动态反射或任何文件、网络、进程 API。
 对任何依赖样本量、有效行数、特征数或类别频数的操作，必须在实际处理后的数据上重新检查前置条件；不可假设示例数据覆盖全量数据。

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from core.llm_client import chat
+from core.llm_client import chat_suggestion
 from core.prompt_template import render_file
 
 
@@ -59,5 +59,5 @@ def revise_suggestion(
     }
     system_prompt = render_file("shared/revise_suggestion_llm_sys.txt", ctx, strict=True)
     user_prompt = render_file("shared/revise_suggestion_llm_user.txt", ctx, strict=True)
-    revised = chat(system_prompt, user_prompt, name=f"suggestion.revise.{stage_label}")
+    revised = chat_suggestion(system_prompt, user_prompt, name=f"suggestion.revise.{stage_label}")
     return normalize_suggestion_output(revised)

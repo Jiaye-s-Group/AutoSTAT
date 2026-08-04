@@ -4,6 +4,9 @@
 Requirement（请严格执行以下分析任务；推断任务按预设模型估计与报告，预测任务才进行训练与评估）：
 {{refined_suggestions}}
 
+Confirmed full modeling suggestion（不可被压缩 Requirement 遗漏或覆盖）：
+{{model_suggestion}}
+
 Analysis Contract（最高优先级，代码与 result_dict.analysis_manifest 必须一致）：
 {{analysis_contract_json}}
 

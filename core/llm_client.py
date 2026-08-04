@@ -14,6 +14,7 @@ import os
 import re
 import time
 from contextvars import ContextVar, copy_context
+from dataclasses import dataclass
 from concurrent.futures import Executor, Future
 from pathlib import Path
 from typing import Any
@@ -56,7 +57,98 @@ DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "")
 DEFAULT_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 DEFAULT_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096"))
 DEFAULT_CODE_MAX_TOKENS = int(os.getenv("LLM_CODE_MAX_TOKENS", "8192"))
+DEFAULT_SUGGESTION_MAX_TOKENS = int(os.getenv("LLM_SUGGESTION_MAX_TOKENS", "8192"))
+DEFAULT_SUGGESTION_COMPLETION_MARKER = "AUTOSTAT_SUGGESTION_COMPLETE"
 DEFAULT_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
+
+
+@dataclass(frozen=True)
+class LLMTextResult:
+    """Structured LLM text response with completion metadata."""
+
+    content: str
+    finish_reason: str
+    model: str
+    usage: dict[str, Any]
+    name: str = ""
+
+    @property
+    def was_truncated(self) -> bool:
+        return self.finish_reason.lower() == "length"
+
+
+class LLMOutputTruncatedError(RuntimeError):
+    """Raised when a response reached the model output limit."""
+
+    def __init__(self, result: LLMTextResult):
+        self.result = result
+        super().__init__(
+            f"LLM output for {result.name or 'unnamed request'} was truncated "
+            f"(finish_reason={result.finish_reason!r})."
+        )
+
+
+class LLMOutputIncompleteError(RuntimeError):
+    """Raised when a response does not satisfy the requested completeness contract."""
+
+
+def _usage_to_dict(usage: Any) -> dict[str, Any]:
+    if usage is None:
+        return {}
+    if hasattr(usage, "model_dump"):
+        try:
+            return dict(usage.model_dump())
+        except Exception:
+            pass
+    if isinstance(usage, dict):
+        return dict(usage)
+    out: dict[str, Any] = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = getattr(usage, key, None)
+        if value is not None:
+            out[key] = value
+    return out
+
+
+def _strip_completion_marker(text: str, marker: str) -> str:
+    marker_text = str(marker or "").strip()
+    if not marker_text:
+        return text
+    lines = str(text or "").rstrip().splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if lines and lines[-1].strip() == marker_text:
+        lines.pop()
+    return "\n".join(lines).rstrip()
+
+
+def _has_final_completion_marker(text: str, marker: str) -> bool:
+    """Return whether the response ends with the requested completion marker."""
+    marker_text = str(marker or "").strip()
+    if not marker_text:
+        return True
+    lines = str(text or "").rstrip().splitlines()
+    return bool(lines and lines[-1].strip() == marker_text)
+
+
+def _append_completion_marker_instruction(user_prompt: str, marker: str) -> str:
+    marker_text = str(marker or "").strip()
+    if not marker_text:
+        return user_prompt
+    return (
+        f"{user_prompt.rstrip()}\n\n"
+        "Completeness requirement: after the complete answer, output this exact marker "
+        f"on a separate final line: {marker_text}"
+    )
+
+
+def _append_compact_retry_instruction(user_prompt: str, marker: str) -> str:
+    """Ask for a fresh, compact completion after an incomplete suggestion."""
+    return (
+        f"{_append_completion_marker_instruction(user_prompt, marker)}\n\n"
+        "The previous attempt was incomplete. Regenerate the full answer from scratch, "
+        "preserve every required decision, and remove repetition so it fits in the output limit."
+    )
 
 
 class LLMClient:
@@ -153,13 +245,14 @@ class LLMClient:
         response_json: bool = False,
         name: str = "unnamed",
         retries: int = 2,
+        require_complete: bool = False,
     ) -> str:
         messages = []
         if sys:
             messages.append({"role": "system", "content": sys})
         messages.append({"role": "user", "content": user})
 
-        return self._complete_messages(
+        result = self._complete_messages_result(
             messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -167,6 +260,82 @@ class LLMClient:
             response_json=response_json,
             name=name,
             retries=retries,
+        )
+        if require_complete:
+            self._raise_if_incomplete(result)
+        return result.content
+
+    def chat_result(
+        self,
+        sys: str,
+        user: str,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        model: str | None = None,
+        response_json: bool = False,
+        name: str = "unnamed",
+        retries: int = 2,
+    ) -> LLMTextResult:
+        messages = []
+        if sys:
+            messages.append({"role": "system", "content": sys})
+        messages.append({"role": "user", "content": user})
+        return self._complete_messages_result(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            model=model,
+            response_json=response_json,
+            name=name,
+            retries=retries,
+        )
+
+    def chat_suggestion(
+        self,
+        sys: str,
+        user: str,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        model: str | None = None,
+        name: str = "suggestion",
+        retries: int = 2,
+        completion_marker: str = DEFAULT_SUGGESTION_COMPLETION_MARKER,
+        completion_attempts: int = 2,
+    ) -> str:
+        marker = str(completion_marker or "").strip()
+        last_error: RuntimeError | None = None
+        for attempt in range(max(1, int(completion_attempts))):
+            prompted_user = (
+                _append_completion_marker_instruction(user, completion_marker)
+                if attempt == 0
+                else _append_compact_retry_instruction(user, completion_marker)
+            )
+            result = self.chat_result(
+                sys,
+                prompted_user,
+                temperature=temperature,
+                max_tokens=max_tokens or DEFAULT_SUGGESTION_MAX_TOKENS,
+                model=model,
+                name=name,
+                retries=retries,
+            )
+            try:
+                self._raise_if_incomplete(result)
+            except LLMOutputTruncatedError as exc:
+                last_error = exc
+                continue
+            if _has_final_completion_marker(result.content, marker):
+                return _strip_completion_marker(result.content, marker)
+            last_error = LLMOutputIncompleteError(
+                f"LLM suggestion for {name!r} did not end with completion marker {marker!r}."
+            )
+
+        if last_error is not None:
+            raise last_error
+        raise LLMOutputIncompleteError(
+            f"LLM suggestion for {name!r} could not be validated as complete."
         )
 
     def chat_multimodal(
@@ -208,7 +377,7 @@ class LLMClient:
             }
         )
         try:
-            return self._complete_messages(
+            return self._complete_messages_result(
                 messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -216,7 +385,7 @@ class LLMClient:
                 response_json=response_json,
                 name=name,
                 retries=retries,
-            )
+            ).content
         except Exception:
             if not fallback_to_text:
                 raise
@@ -242,6 +411,27 @@ class LLMClient:
         name: str,
         retries: int,
     ) -> str:
+        return self._complete_messages_result(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            model=model,
+            response_json=response_json,
+            name=name,
+            retries=retries,
+        ).content
+
+    def _complete_messages_result(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float | None,
+        max_tokens: int | None,
+        model: str | None,
+        response_json: bool,
+        name: str,
+        retries: int,
+    ) -> LLMTextResult:
         _ = name
         model_name = model or self.model
 
@@ -259,8 +449,16 @@ class LLMClient:
         for attempt in range(retries + 1):
             try:
                 resp = self.client.chat.completions.create(**kwargs)
-                text = resp.choices[0].message.content or ""
-                return text
+                choice = resp.choices[0]
+                text = choice.message.content or ""
+                finish_reason = str(getattr(choice, "finish_reason", "") or "")
+                return LLMTextResult(
+                    content=text,
+                    finish_reason=finish_reason,
+                    model=str(getattr(resp, "model", "") or model_name or ""),
+                    usage=_usage_to_dict(getattr(resp, "usage", None)),
+                    name=name,
+                )
             except Exception as exc:  # pragma: no cover
                 last_err = exc
                 err_text = str(exc).lower()
@@ -285,6 +483,11 @@ class LLMClient:
                     continue
                 raise
         raise last_err  # type: ignore
+
+    @staticmethod
+    def _raise_if_incomplete(result: LLMTextResult) -> None:
+        if result.was_truncated:
+            raise LLMOutputTruncatedError(result)
 
     def _build_chat_kwargs(
         self,
@@ -312,8 +515,17 @@ def chat(sys: str, user: str, **kwargs: Any) -> str:
     return LLMClient.get().chat(sys, user, **kwargs)
 
 
+def chat_result(sys: str, user: str, **kwargs: Any) -> LLMTextResult:
+    return LLMClient.get().chat_result(sys, user, **kwargs)
+
+
+def chat_suggestion(sys: str, user: str, **kwargs: Any) -> str:
+    return LLMClient.get().chat_suggestion(sys, user, **kwargs)
+
+
 def chat_code(sys: str, user: str, **kwargs: Any) -> str:
     kwargs.setdefault("max_tokens", DEFAULT_CODE_MAX_TOKENS)
+    kwargs.setdefault("require_complete", True)
     return chat(sys, user, **kwargs)
 
 

@@ -15,12 +15,16 @@ from utils.suggestion_state import (
     can_auto_repair,
     get_suggestion_state,
     mark_code_draft,
+    queue_initial_request,
     queue_revision_request,
     record_auto_repair,
     record_successful_code,
     record_validated_code,
     record_validation_failure,
     replace_active_suggestion,
+    revision_fallback_text,
+    take_pending_code_revision,
+    take_pending_initial_request,
     take_pending_revision,
     visible_messages,
 )
@@ -284,6 +288,14 @@ def prep_result(agent) -> None:
 
     st.write(bt("处理后数据预览：", "Preview After Processing:"), process_df.head(10))
 
+    qc_summary = st.session_state.get("preprocessing_qc_summary")
+    if not isinstance(qc_summary, dict):
+        summary_2 = st.session_state.get("summary_2")
+        qc_summary = summary_2.get("qc_summary") if isinstance(summary_2, dict) else None
+    if isinstance(qc_summary, dict) and qc_summary:
+        st.caption(bt("预处理 QC 摘要（由执行代码产生并校验）", "Preprocessing QC summary (produced and validated by the executed code)"))
+        st.json(qc_summary, expanded=False)
+
     csv_buffer = io.StringIO()
     process_df.to_csv(csv_buffer, index=False)
     csv_bytes = csv_buffer.getvalue().encode("utf-8")
@@ -312,7 +324,7 @@ def _clear_prep_workflow_state(agent) -> None:
     agent.finish_auto_task = False
     clear_suggestion_state(st.session_state, "preprocessing")
 
-    for key in ("suggestion", "abstract_2", "summary_2", "prep_result_from_summary_2", "prep_code_visible"):
+    for key in ("suggestion", "abstract_2", "summary_2", "prep_result_from_summary_2", "preprocessing_qc_summary", "prep_code_visible"):
         st.session_state.pop(key, None)
 
 
@@ -450,6 +462,56 @@ def _repair_prep_code_draft(agent, df: pd.DataFrame) -> None:
     st.rerun()
 
 
+def _revise_prep_code_draft(agent, df: pd.DataFrame, revision_instruction: str) -> None:
+    state = get_suggestion_state(st.session_state, "preprocessing")
+    ctx = state.get("phase1_ctx")
+    current_code = str(agent.load_code() or "").strip()
+    if not isinstance(ctx, dict) or not current_code:
+        st.error(bt("当前预处理代码上下文已失效，请重新生成代码。", "The preprocessing code context has expired. Generate the code again."))
+        return
+
+    repair_prompt = (
+        "User requested a code revision. Modify the current code to satisfy this instruction "
+        "while preserving the confirmed preprocessing suggestion:\n"
+        f"{revision_instruction}"
+    )
+    with st.spinner(bt("正在按你的意见修改并验证预处理代码...", "Revising and validating preprocessing code...")):
+        repaired = call_preprocessing_workflow(
+            df,
+            phase="repair_code",
+            phase1_ctx=ctx,
+            code=current_code,
+            error=repair_prompt,
+        )
+        revised_code = str((repaired or {}).get("code") or "").strip()
+        if not revised_code:
+            st.error(bt("未能生成修改后的预处理代码。", "No revised preprocessing code was generated."))
+            return
+        result = call_preprocessing_workflow(
+            df,
+            phase="validated_code",
+            phase1_ctx=ctx,
+            code=revised_code,
+        )
+
+    code = str((result or {}).get("code") or revised_code).strip()
+    agent.save_code(code)
+    st.session_state.prep_code_visible = True
+    attempts = int((result or {}).get("attempts") or 0)
+    if (result or {}).get("success"):
+        record_validated_code(state, code, attempts=attempts)
+        st.success(bt("代码已按你的意见修改并通过验证，请点击执行预处理。", "The code was revised and validated. Run preprocessing to publish the result."))
+    else:
+        record_validation_failure(
+            state,
+            code,
+            str((result or {}).get("error") or "修改后的代码未通过验证。"),
+            attempts=attempts or 5,
+        )
+        st.error(bt("修改后的预处理代码未通过验证。", "The revised preprocessing code did not pass validation."))
+    st.rerun()
+
+
 def _handle_prep_workflow_result(agent, workflow_result: dict[str, Any]) -> None:
     abstract_2 = workflow_result.get("abstract_2")
     summary_2 = workflow_result.get("summary_2")
@@ -520,6 +582,7 @@ def _handle_prep_workflow_result(agent, workflow_result: dict[str, Any]) -> None
     if summary_2 is not None:
         st.session_state.summary_2 = summary_2
         st.session_state.prep_result_from_summary_2 = process_df
+        st.session_state.preprocessing_qc_summary = summary_2.get("qc_summary") or {}
         agent.save_processed_df(process_df)
 
     if suggestion:
@@ -573,8 +636,10 @@ def prep_chat(agent, auto: bool = False) -> None:
         failure = st.session_state.get("preprocessing_failure")
         if isinstance(failure, dict) and failure.get("error"):
             st.error(bt("上一次预处理代码未通过验证。", "The previous preprocessing code did not pass validation."))
-            with st.expander(bt("查看错误详情", "View error details")):
-                st.code(str(failure["error"]), language="text")
+            # This function is rendered inside the outer "Preprocessing Suggestions"
+            # expander. Streamlit does not allow expanders to be nested.
+            st.caption(bt("错误详情", "Error details"))
+            st.code(str(failure["error"]), language="text")
 
         columns = st.columns(2)
         with columns[0]:
@@ -601,9 +666,46 @@ def prep_chat(agent, auto: bool = False) -> None:
         with st.chat_message(role):
             st.write(str(content))
 
+    pending_initial_request = take_pending_initial_request(state)
+    if pending_initial_request:
+        df = agent.load_df()
+        if df is None:
+            st.warning(bt("请先在数据导入页面加载数据。", "Please load data on the data import page first."))
+        else:
+            request_text = base_requirements_text(state, pending_initial_request)
+            agent.save_user_input(request_text)
+            _request_prep_recommendation(agent, df, request_text, auto=False)
+        return
+
     pending_revision = take_pending_revision(state)
     if pending_revision:
-        _revise_prep_recommendation(agent, pending_revision)
+        if isinstance(state.get("phase1_ctx"), dict):
+            _revise_prep_recommendation(agent, pending_revision)
+        else:
+            df = agent.load_df()
+            if df is None:
+                st.warning(bt("请先在数据导入页面加载数据。", "Please load data on the data import page first."))
+            else:
+                st.warning(bt(
+                    "上一轮预处理建议上下文已失效，正在基于当前数据和这条消息重新生成建议。",
+                    "The previous preprocessing context expired. Regenerating from the current data and this message.",
+                ))
+                request_text = revision_fallback_text(
+                    state,
+                    pending_revision,
+                    default=bt("请给我预处理建议", "Please provide preprocessing recommendations."),
+                )
+                agent.save_user_input(request_text)
+                _request_prep_recommendation(agent, df, request_text, auto=False)
+        return
+
+    pending_code_revision = take_pending_code_revision(state)
+    if pending_code_revision:
+        df = agent.load_df()
+        if df is None:
+            st.warning(bt("请先在数据导入页面加载数据。", "Please load data on the data import page first."))
+        else:
+            _revise_prep_code_draft(agent, df, pending_code_revision)
         return
 
     already_generated = bool(state.get("active_suggestion"))
@@ -648,8 +750,7 @@ def prep_chat(agent, auto: bool = False) -> None:
             queue_revision_request(state, user_input)
             st.rerun()
         else:
-            add_requirement(state, user_input)
-            agent.save_user_input(base_requirements_text(state))
+            queue_initial_request(state, user_input)
             st.rerun()
         return
 

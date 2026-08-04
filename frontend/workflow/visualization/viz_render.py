@@ -11,6 +11,11 @@ import plotly.io as pio
 import streamlit as st
 import streamlit_antd_components as sac
 
+from core.figure_artifacts import (
+    VISUALIZATION_FIGURE_ARTIFACTS_KEY,
+    successful_figure_artifacts,
+)
+from core.plotly_serialization import figure_to_json
 from utils.i18n import bt, get_language
 from utils.page_paths import page_file
 from utils.suggestion_state import (
@@ -21,11 +26,15 @@ from utils.suggestion_state import (
     confirm_active_suggestion,
     get_suggestion_state,
     mark_code_draft,
+    queue_initial_request,
     queue_revision_request,
     record_auto_repair,
     record_validated_code,
     record_validation_failure,
     replace_active_suggestion,
+    revision_fallback_text,
+    take_pending_code_revision,
+    take_pending_initial_request,
     take_pending_revision,
     visible_messages,
 )
@@ -93,7 +102,7 @@ def _safe_visualization_page(value: Any, total: int) -> int:
 
 
 def _figure_download_cache_key(fig: go.Figure) -> str:
-    return hashlib.sha256(fig.to_json().encode("utf-8")).hexdigest()
+    return hashlib.sha256(figure_to_json(fig).encode("utf-8")).hexdigest()
 
 
 def _cached_figure_download_bytes(fig: go.Figure) -> bytes | None:
@@ -105,7 +114,7 @@ def _cached_figure_download_bytes(fig: go.Figure) -> bytes | None:
 
 
 def _figure_download_bytes(fig: go.Figure) -> tuple[bytes | None, str]:
-    fig_json = fig.to_json()
+    fig_json = figure_to_json(fig)
     cache_key = _figure_download_cache_key(fig)
     cache = st.session_state.setdefault("viz_download_image_cache", {})
     cached = cache.get(cache_key)
@@ -166,7 +175,11 @@ def _normalize_visualization_titles(raw_titles: Any) -> list[str]:
         text = parsed_titles.strip()
         if not text:
             return []
-        return [line.strip() for line in text.splitlines() if line.strip()]
+        return [
+            cleaned
+            for line in text.splitlines()
+            if (cleaned := _clean_visualization_title_text(line))
+        ]
 
     if isinstance(parsed_titles, dict):
         candidate_keys = ("tu_title", "titles", "data", "items")
@@ -174,9 +187,9 @@ def _normalize_visualization_titles(raw_titles: Any) -> list[str]:
             if key in parsed_titles:
                 return _normalize_visualization_titles(parsed_titles.get(key))
         return [
-            str(value).strip()
+            cleaned
             for value in parsed_titles.values()
-            if str(value).strip()
+            if (cleaned := _clean_visualization_title_text(value))
         ]
 
     if isinstance(parsed_titles, list):
@@ -192,22 +205,118 @@ def _normalize_visualization_titles(raw_titles: Any) -> list[str]:
             else:
                 candidate = item
 
-            candidate_text = str(candidate).strip() if candidate is not None else ""
+            candidate_text = _clean_visualization_title_text(candidate)
             if candidate_text:
                 normalized_titles.append(candidate_text)
         return normalized_titles
 
-    fallback = str(parsed_titles).strip()
+    fallback = _clean_visualization_title_text(parsed_titles)
     return [fallback] if fallback else []
 
 
+def _clean_visualization_title_text(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^\[?\s*FIG\s*[:：]\s*\d+\s*\]?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"^(?:图(?:表)?|figure|fig\.?|chart)\s*(?:x|\d+)\s*[|｜:：、.．\-—–]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"^(?:图(?:表)?|figure|fig\.?|chart)\s*(?:x|\d+)\s+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"^\d+\s*[|｜]\s*", "", text)
+    return text.strip(" |｜:：、.．-—–\t\r\n")
+
+
+def _rebuild_visualization_full_from_summary(summary_3: Any) -> str:
+    if not isinstance(summary_3, dict):
+        return ""
+    fig_analysis = summary_3.get("fig_analysis")
+    if not isinstance(fig_analysis, list):
+        return ""
+    parts: list[str] = []
+    for index, item in enumerate(fig_analysis):
+        if isinstance(item, dict):
+            title = _clean_visualization_title_text(item.get("title") or item.get("tu_title") or "")
+            analysis = str(item.get("analysis") or item.get("desc") or "").strip()
+        else:
+            title = ""
+            analysis = str(item or "").strip()
+        title_line = bt("图题", "Title") + f"：{title}" if title else ""
+        content = "\n".join(part for part in (title_line, analysis) if part)
+        parts.append(f"[FIG:{index}] {content}".strip())
+    return "\n\n".join(parts)
+
+
 def _set_visualization_titles(title_items: list[str]) -> None:
-    normalized_titles = [str(item).strip() for item in title_items]
+    normalized_titles = [_clean_visualization_title_text(item) for item in title_items]
     st.session_state.tu_title = normalized_titles
+
+    visualization_agent = st.session_state.get("visualization_agent")
+    if visualization_agent is not None:
+        try:
+            fig_desc_list = visualization_agent.load_fig() or []
+        except Exception:
+            fig_desc_list = []
+        if isinstance(fig_desc_list, list):
+            for index, title in enumerate(normalized_titles):
+                if index >= len(fig_desc_list):
+                    break
+                if isinstance(fig_desc_list[index], dict):
+                    fig_desc_list[index]["title"] = title
+            try:
+                visualization_agent.save_fig(fig_desc_list)
+            except Exception:
+                pass
+
+    summary_3 = st.session_state.get("summary_3")
+    if isinstance(summary_3, dict):
+        summary_3 = dict(summary_3)
+        fig_analysis = summary_3.get("fig_analysis")
+        if isinstance(fig_analysis, list):
+            updated_analysis = []
+            for index, item in enumerate(fig_analysis):
+                if isinstance(item, dict):
+                    updated_item = dict(item)
+                    if index < len(normalized_titles) and normalized_titles[index]:
+                        updated_item["title"] = normalized_titles[index]
+                    updated_analysis.append(updated_item)
+                else:
+                    updated_analysis.append(item)
+            summary_3["fig_analysis"] = updated_analysis
+            st.session_state.summary_3 = summary_3
+            rebuilt_full = _rebuild_visualization_full_from_summary(summary_3)
+            if rebuilt_full:
+                st.session_state.full = rebuilt_full
 
     workflow_result = st.session_state.get("viz_workflow_result")
     if isinstance(workflow_result, dict):
         workflow_result["tu_title"] = normalized_titles
+        if isinstance(st.session_state.get("summary_3"), dict):
+            workflow_result["summary_3"] = st.session_state.get("summary_3")
+        if st.session_state.get("full"):
+            workflow_result["full"] = st.session_state.get("full")
+
+
+def _figure_key_suffix(item: Any, fig: go.Figure) -> str:
+    if isinstance(item, dict):
+        fingerprint = str(item.get("figure_fingerprint") or "").strip()
+        if fingerprint:
+            return fingerprint[:12]
+    try:
+        return hashlib.sha256(figure_to_json(fig).encode("utf-8")).hexdigest()[:12]
+    except Exception:
+        return hashlib.sha256(str(fig).encode("utf-8", errors="ignore")).hexdigest()[:12]
+
 
 
 def _extract_title_from_figure(fig: go.Figure) -> str:
@@ -746,7 +855,14 @@ def _generate_visualization_code_draft(agent) -> None:
     attempts = int((result or {}).get("attempts") or 0)
     if (result or {}).get("success"):
         record_validated_code(state, code, attempts=attempts)
-        st.success(bt(f"代码已生成并通过验证（第{attempts}/5次）。请点击执行可视化。", f"Code passed validation on attempt {attempts}/5. Run visualization to publish the charts."))
+        if (result or {}).get("validation_status") == "partial":
+            missing = list((result or {}).get("missing_charts") or [])
+            st.warning(bt(
+                f"代码可执行并保留可用图表，但有 {len(missing)} 张已确认图表未返回；执行后会显示具体缺失项。",
+                f"The code is executable and keeps available figures, but {len(missing)} confirmed chart(s) were not returned; execution will show the missing items.",
+            ))
+        else:
+            st.success(bt(f"代码已生成并通过验证（第{attempts}/5次）。请点击执行可视化。", f"Code passed validation on attempt {attempts}/5. Run visualization to publish the charts."))
     else:
         record_validation_failure(state, code, str((result or {}).get("error") or "未生成可执行代码。"), attempts=attempts or 5)
         st.error(bt("可视化代码连续5次未通过验证，已停止自动修复。", "Visualization code failed validation five times; auto-repair stopped."))
@@ -781,6 +897,50 @@ def _repair_visualization_code_draft(agent) -> None:
     st.rerun()
 
 
+def _revise_visualization_code_draft(agent, revision_instruction: str) -> None:
+    from utils.local_workflow_bridge import (
+        call_visualizing_code_repair_bridge,
+        call_visualizing_validated_code_bridge,
+    )
+
+    state = get_suggestion_state(st.session_state, "visualization")
+    ctx = st.session_state.get("_viz_phase1_ctx")
+    inputs = st.session_state.get("_viz_phase2_inputs")
+    current_code = str(agent.load_code() or "").strip()
+    if not isinstance(ctx, dict) or not isinstance(inputs, dict) or not current_code:
+        st.error(bt("当前可视化代码上下文已失效，请重新生成代码。", "The visualization code context has expired. Generate the code again."))
+        return
+
+    repair_prompt = (
+        "User requested a code revision. Modify the current code to satisfy this instruction "
+        "while preserving the confirmed visualization suggestion:\n"
+        f"{revision_instruction}"
+    )
+    with st.spinner(bt("正在按你的意见修改并验证可视化代码...", "Revising and validating visualization code...")):
+        repaired = call_visualizing_code_repair_bridge(ctx, current_code, repair_prompt)
+        revised_code = str((repaired or {}).get("code") or "").strip()
+        if not revised_code:
+            st.error(bt("未能生成修改后的可视化代码。", "No revised visualization code was generated."))
+            return
+        result = call_visualizing_validated_code_bridge(inputs, ctx, revised_code)
+
+    code = str((result or {}).get("code") or revised_code).strip()
+    agent.save_code(code)
+    attempts = int((result or {}).get("attempts") or 0)
+    if (result or {}).get("success"):
+        record_validated_code(state, code, attempts=attempts)
+        st.success(bt("代码已按你的意见修改并通过验证，请点击执行可视化。", "The code was revised and validated. Run visualization to publish the charts."))
+    else:
+        record_validation_failure(
+            state,
+            code,
+            str((result or {}).get("error") or "修改后的代码未通过验证。"),
+            attempts=attempts or 5,
+        )
+        st.error(bt("修改后的可视化代码未通过验证。", "The revised visualization code did not pass validation."))
+    st.rerun()
+
+
 def vis_result(agent) -> None:
     fig_desc_list = agent.load_fig() or []
     if not isinstance(fig_desc_list, list):
@@ -802,6 +962,15 @@ def vis_result(agent) -> None:
             bt(
                 "下方图表来自上一次成功代码；当前草稿尚未执行。",
                 "The figures below are from the last successful code; the current draft has not run.",
+            )
+        )
+    summary_3 = st.session_state.get("summary_3")
+    if isinstance(summary_3, dict) and summary_3.get("validation_status") == "partial":
+        missing = summary_3.get("missing_charts") or []
+        st.warning(
+            bt(
+                f"已展示可用图表；另有 {len(missing)} 张已确认图表未返回。",
+                f"Available figures are shown; {len(missing)} confirmed chart(s) were not returned.",
             )
         )
     english_ui = _is_english_ui()
@@ -915,7 +1084,10 @@ def vis_result(agent) -> None:
         colors = agent.load_color() or []
         base_display_fig = apply_palette_to_figure(fig, colors, idx) if colors else go.Figure(fig)
         display_fig = go.Figure(base_display_fig)
-        display_title = _extract_title_from_figure(display_fig) or _extract_title_from_figure(fig)
+        figure_key_suffix = _figure_key_suffix(item, display_fig)
+        display_title = _clean_visualization_title_text(
+            _extract_title_from_figure(display_fig) or _extract_title_from_figure(fig)
+        )
         if english_ui and _contains_cjk_text(display_title):
             display_title = _fallback_english_title_from_figure(display_fig)
         if not english_ui and _chinese_title_needs_repair(display_title):
@@ -924,8 +1096,8 @@ def vis_result(agent) -> None:
             title_items[idx] = display_title
             _set_visualization_titles(title_items)
 
-        input_key = f"viz_title_input_{idx}"
-        default_title = (title_items[idx] or display_title).strip()
+        input_key = f"viz_title_input_{idx}_{figure_key_suffix}"
+        default_title = _clean_visualization_title_text(title_items[idx] or display_title)
         if english_ui and _contains_cjk_text(default_title):
             default_title = _fallback_english_title_from_figure(display_fig)
             title_items[idx] = default_title
@@ -943,14 +1115,14 @@ def vis_result(agent) -> None:
             or (not english_ui and _chinese_title_needs_repair(existing_input))
         ):
             st.session_state[input_key] = default_title
-        edited_title = st.session_state.get(input_key, default_title)
+        edited_title = _clean_visualization_title_text(st.session_state.get(input_key, default_title))
         if edited_title != title_items[idx]:
             title_items[idx] = edited_title
             _set_visualization_titles(title_items)
         if edited_title.strip():
             display_fig.update_layout(title=edited_title.strip())
 
-        st.plotly_chart(display_fig, use_container_width=True, key=f"fig_{idx}")
+        st.plotly_chart(display_fig, use_container_width=True, key=f"fig_{idx}_{figure_key_suffix}")
 
         title_columns = st.columns([1.2, 4.6, 1.2])
         with title_columns[1]:
@@ -961,6 +1133,7 @@ def vis_result(agent) -> None:
                 placeholder=bt("请输入图表标题", "Enter chart title"),
             )
 
+        edited_title = _clean_visualization_title_text(edited_title)
         if edited_title != title_items[idx]:
             title_items[idx] = edited_title
             _set_visualization_titles(title_items)
@@ -976,7 +1149,7 @@ def vis_result(agent) -> None:
         with download_columns[1]:
             if not download_bytes and st.button(
                 bt("生成下载图片", "Prepare Image Download"),
-                key=f"viz_prepare_download_{idx}",
+                key=f"viz_prepare_download_{idx}_{figure_key_suffix}",
                 use_container_width=True,
             ):
                 with st.spinner(bt("正在生成图片...", "Preparing image...")):
@@ -988,7 +1161,7 @@ def vis_result(agent) -> None:
                     data=download_bytes,
                     file_name=f"{download_name}.jpg",
                     mime="image/jpeg",
-                    key=f"viz_download_{idx}",
+                    key=f"viz_download_{idx}_{figure_key_suffix}",
                     use_container_width=True,
                 )
             elif download_status == "timeout":
@@ -1037,6 +1210,7 @@ def _clear_visualization_workflow_state(agent) -> None:
         "abstract_3", "summary_3", "visual_recommendatio", "final_code",
         "viz_desc_switch", "viz_desc_switch_widget",
         "viz_download_image_cache",
+        "report_figure_ledger",
         "_viz_phase1_ctx", "_viz_phase2_inputs", "_viz_phase2_pending",
         "_viz_phase2_requested",
     ):
@@ -1062,6 +1236,7 @@ def _reset_visualization_outputs(agent) -> None:
         "abstract_3", "summary_3", "visual_recommendatio", "final_code",
         "viz_desc_switch", "viz_desc_switch_widget", "viz_current_page", "viz_pagination",
         "viz_download_image_cache",
+        "report_figure_ledger",
         "_viz_phase1_ctx", "_viz_phase2_inputs", "_viz_phase2_pending",
         "_viz_phase2_requested",
     ):
@@ -1213,6 +1388,9 @@ def _continue_visualization_phase2(agent) -> None:
     st.session_state.abstract_3 = workflow_result.get("abstract_3")
     st.session_state.summary_3 = workflow_result.get("summary_3")
     st.session_state.final_code = workflow_result.get("final_code", "")
+    figure_artifacts = successful_figure_artifacts(workflow_result.get("figure_artifacts"))
+    if figure_artifacts:
+        st.session_state[VISUALIZATION_FIGURE_ARTIFACTS_KEY] = figure_artifacts
     if st.session_state.final_code:
         agent.save_code(st.session_state.final_code)
     st.session_state.pop("visualization_failure", None)
@@ -1267,8 +1445,10 @@ def vis_chat(agent, source_data: Any, auto: bool = False):
 
         if st.session_state.get("visualization_failure"):
             st.error(bt("上一次可视化代码未通过验证。", "The previous visualization code did not pass validation."))
-            with st.expander(bt("查看错误详情", "View error details")):
-                st.code(str(st.session_state.visualization_failure), language="text")
+            # This function is rendered inside the outer "Visualization Suggestions"
+            # expander. Streamlit does not allow expanders to be nested.
+            st.caption(bt("错误详情", "Error details"))
+            st.code(str(st.session_state.visualization_failure), language="text")
 
         columns = st.columns(2)
         with columns[0]:
@@ -1294,9 +1474,34 @@ def vis_chat(agent, source_data: Any, auto: bool = False):
         content = entry.get("content")
         _render_visualization_chat_entry(role, content, idx)
 
+    pending_initial_request = take_pending_initial_request(state)
+    if pending_initial_request:
+        request_text = base_requirements_text(state, pending_initial_request)
+        agent.save_user_input(request_text)
+        _request_visualization_recommendation(agent, source_data, request_text, auto=False)
+        return
+
     pending_revision = take_pending_revision(state)
     if pending_revision:
-        _revise_visualization_recommendation(agent, pending_revision)
+        if isinstance(st.session_state.get("_viz_phase1_ctx"), dict):
+            _revise_visualization_recommendation(agent, pending_revision)
+        else:
+            st.warning(bt(
+                "上一轮可视化建议上下文已失效，正在基于当前数据和这条消息重新生成建议。",
+                "The previous visualization context expired. Regenerating from the current data and this message.",
+            ))
+            request_text = revision_fallback_text(
+                state,
+                pending_revision,
+                default=bt("请帮我做可视化分析", "Please create a visualization analysis."),
+            )
+            agent.save_user_input(request_text)
+            _request_visualization_recommendation(agent, source_data, request_text, auto=False)
+        return
+
+    pending_code_revision = take_pending_code_revision(state)
+    if pending_code_revision:
+        _revise_visualization_code_draft(agent, pending_code_revision)
         return
 
     already_generated = bool(state.get("active_suggestion"))
@@ -1342,8 +1547,7 @@ def vis_chat(agent, source_data: Any, auto: bool = False):
             queue_revision_request(state, user_input)
             st.rerun()
         else:
-            add_requirement(state, user_input)
-            agent.save_user_input(base_requirements_text(state))
+            queue_initial_request(state, user_input)
             st.rerun()
 
 

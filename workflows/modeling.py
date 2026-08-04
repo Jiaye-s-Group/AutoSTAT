@@ -35,16 +35,29 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from core.llm_client import chat, chat_code, submit_with_context
-from core.code_runtime_profile import build_code_runtime_constraints
+import numpy as np
+import pandas as pd
+
+from core.bounded_code_execution import run_bounded_safe_exec
+from core.llm_client import (
+    LLMOutputIncompleteError,
+    LLMOutputTruncatedError,
+    chat,
+    chat_code,
+    chat_suggestion,
+    submit_with_context,
+)
+from core.code_runtime_profile import build_code_runtime_constraints, infer_data_row_count
 from core.modeling_runtime_compat import validate_modeling_runtime_compatibility
 from core.modeling_contract import (
     build_analysis_contract,
     contract_as_prompt,
     format_contract_violations,
-    validate_result_schema,
-    validate_result_against_contract,
+    has_primary_analysis_outputs,
+    validate_code_against_contract,
+    validate_modeling_result,
 )
+from core.modeling_report_artifacts import build_modeling_report_artifacts
 from core.modeling_table_utils import (
     build_model_comparison_table_bundle,
 )
@@ -58,7 +71,6 @@ from core.report_language import (
     is_english_language,
     normalize_app_language,
 )
-from core.safe_code import UnsafeCodeError, safe_subprocess_env, validate_code
 from core.workflow_runner import to_str
 from workflows._plugins import (
     format_recall,
@@ -100,9 +112,6 @@ _IMPORTANCE_KEY_HINTS = (
     "importances",
     "feature_importance",
     "feature_importances",
-    "coefficient",
-    "coefficients",
-    "coef",
 )
 _CORE_RESULT_KEYS = {
     "dataset",
@@ -195,6 +204,27 @@ def _build_modeling_ctx(
     }
 
 
+def ensure_analysis_contract(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Backfill the current contract schema for contexts kept in an old UI session."""
+    working_ctx = dict(ctx)
+    existing = working_ctx.get("analysis_contract")
+    if isinstance(existing, dict) and "required_model_specs" in existing:
+        working_ctx.setdefault("analysis_contract_json", contract_as_prompt(existing))
+        return working_ctx
+    contract = build_analysis_contract(
+        target=str(working_ctx.get("target") or ""),
+        columns=list(working_ctx.get("_all_columns") or working_ctx.get("columns") or []),
+        user_input=str(working_ctx.get("user_input") or working_ctx.get("user_prompt") or ""),
+        add_preference=str(working_ctx.get("add_preference") or working_ctx.get("additional_preference") or ""),
+        refined_suggestions=str(working_ctx.get("refined_suggestions") or working_ctx.get("refine_suggestion") or ""),
+        model_suggestion=str(working_ctx.get("model_suggestion") or ""),
+        task_type=str(working_ctx.get("task_type") or "auto"),
+    )
+    working_ctx["analysis_contract"] = contract
+    working_ctx["analysis_contract_json"] = contract_as_prompt(contract)
+    return working_ctx
+
+
 def _truncate_prompt_text(value: Any, max_chars: int) -> str:
     text = to_str(value).strip()
     if len(text) <= max_chars:
@@ -285,16 +315,28 @@ def run_modeling_phase1(
         task_type=task_type,
     )
 
-    sug_sys = render_file("modeling/sec4_get_model_suggestion_llm_sys.txt", ctx)
-    sug_user = render_file("modeling/sec4_get_model_suggestion_llm_user.txt", ctx)
-    model_suggestion = normalize_suggestion_output(
-        chat(sug_sys, sug_user, name="model.get_suggestion")
-    )
-    ctx["model_suggestion"] = model_suggestion
+    try:
+        sug_sys = render_file("modeling/sec4_get_model_suggestion_llm_sys.txt", ctx)
+        sug_user = render_file("modeling/sec4_get_model_suggestion_llm_user.txt", ctx)
+        model_suggestion = normalize_suggestion_output(
+            chat_suggestion(sug_sys, sug_user, name="model.get_suggestion")
+        )
+        ctx["model_suggestion"] = model_suggestion
 
-    ref_sys = render_file("modeling/sec4_refine_suggestion_llm_sys.txt", ctx)
-    ref_user = render_file("modeling/sec4_refine_suggestion_llm_user.txt", ctx)
-    refined_suggestions = chat(ref_sys, ref_user, name="model.refine").strip()
+        ref_sys = render_file("modeling/sec4_refine_suggestion_llm_sys.txt", ctx)
+        ref_user = render_file("modeling/sec4_refine_suggestion_llm_user.txt", ctx)
+        refined_suggestions = normalize_suggestion_output(
+            chat_suggestion(ref_sys, ref_user, name="model.refine")
+        )
+    except (LLMOutputIncompleteError, LLMOutputTruncatedError) as exc:
+        return {
+            "model_suggestion": "",
+            "refined_suggestions": "",
+            "analysis_contract": {"valid": False, "issues": [str(exc)]},
+            "_ctx": ctx,
+            "_status": "suggestion_incomplete",
+            "_error": str(exc),
+        }
     ctx["refined_suggestions"] = refined_suggestions
     ctx["refine_suggestion"] = refined_suggestions
     contract = build_analysis_contract(
@@ -303,6 +345,7 @@ def run_modeling_phase1(
         user_input=ctx.get("user_input") or ctx.get("user_prompt", ""),
         add_preference=ctx.get("add_preference", ""),
         refined_suggestions=refined_suggestions,
+        model_suggestion=model_suggestion,
         task_type=ctx.get("task_type", "auto"),
     )
     ctx["analysis_contract"] = contract
@@ -328,18 +371,30 @@ def revise_modeling_phase1(
     revision_instruction: str,
 ) -> dict[str, Any]:
     revised_ctx = dict(ctx)
-    revised = revise_suggestion(
-        stage_label="modeling",
-        original_requirements=original_requirements,
-        current_suggestion=str(ctx.get("model_suggestion") or ""),
-        revision_instruction=revision_instruction,
-        hard_constraints=str(ctx.get("analysis_contract_json") or ""),
-        language_instruction=str(ctx.get("language_instruction") or ""),
-    )
-    revised_ctx["model_suggestion"] = revised
-    ref_sys = render_file("modeling/sec4_refine_suggestion_llm_sys.txt", revised_ctx)
-    ref_user = render_file("modeling/sec4_refine_suggestion_llm_user.txt", revised_ctx)
-    refined = chat(ref_sys, ref_user, name="model.refine_revision").strip()
+    try:
+        revised = revise_suggestion(
+            stage_label="modeling",
+            original_requirements=original_requirements,
+            current_suggestion=str(ctx.get("model_suggestion") or ""),
+            revision_instruction=revision_instruction,
+            hard_constraints=str(ctx.get("analysis_contract_json") or ""),
+            language_instruction=str(ctx.get("language_instruction") or ""),
+        )
+        revised_ctx["model_suggestion"] = revised
+        ref_sys = render_file("modeling/sec4_refine_suggestion_llm_sys.txt", revised_ctx)
+        ref_user = render_file("modeling/sec4_refine_suggestion_llm_user.txt", revised_ctx)
+        refined = normalize_suggestion_output(
+            chat_suggestion(ref_sys, ref_user, name="model.refine_revision")
+        )
+    except (LLMOutputIncompleteError, LLMOutputTruncatedError) as exc:
+        return {
+            "model_suggestion": "",
+            "refined_suggestions": "",
+            "analysis_contract": {"valid": False, "issues": [str(exc)]},
+            "_ctx": revised_ctx,
+            "_status": "suggestion_incomplete",
+            "_error": str(exc),
+        }
     revised_ctx["refined_suggestions"] = refined
     revised_ctx["refine_suggestion"] = refined
     contract = build_analysis_contract(
@@ -348,6 +403,7 @@ def revise_modeling_phase1(
         user_input=revised_ctx.get("user_input") or revised_ctx.get("user_prompt", ""),
         add_preference=revised_ctx.get("add_preference", ""),
         refined_suggestions=refined,
+        model_suggestion=revised,
         task_type=revised_ctx.get("task_type", "auto"),
     )
     revised_ctx["analysis_contract"] = contract
@@ -362,6 +418,7 @@ def revise_modeling_phase1(
 
 def generate_modeling_code(*, ctx: dict[str, Any]) -> dict[str, Any]:
     """Generate a modeling code draft without executing the training script."""
+    ctx = ensure_analysis_contract(ctx)
     analysis_contract = ctx.get("analysis_contract") or {}
     if not analysis_contract.get("valid", False):
         return {
@@ -371,10 +428,12 @@ def generate_modeling_code(*, ctx: dict[str, Any]) -> dict[str, Any]:
         }
 
     working_ctx = dict(ctx)
+    working_ctx.setdefault("model_suggestion", "")
     q_sys = render_file("modeling/get_query_llm_sys.txt", working_ctx)
     q_user = render_file("modeling/get_query_llm_user.txt", working_ctx)
     rag_query = chat(q_sys, q_user, name="model.get_query", temperature=0).strip()
     recall_results = retrieve(rag_query, top_k=3)
+    recall_results = _filter_recall_results_for_contract(recall_results, analysis_contract)
     working_ctx["knowledge_results"] = format_recall(output_list=recall_results)["knowledge_results"]
 
     cg_sys = render_file("modeling/sec4_code_generation_llm_sys.txt", working_ctx, strict=True)
@@ -387,18 +446,51 @@ def generate_modeling_code(*, ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def repair_modeling_code(*, ctx: dict[str, Any], code: str, error: str) -> str:
+    contract_ctx = ensure_analysis_contract(ctx)
     fix_ctx = {
-        **ctx,
+        **contract_ctx,
         "code": code,
         "code_modeling": code,
         "error_msg": error,
         "error": error,
+        "model_suggestion": str(contract_ctx.get("model_suggestion") or ""),
     }
     fix_sys = render_file("modeling/sec4_code_fixed_llm_sys.txt", fix_ctx, strict=True)
     fix_user = render_file("modeling/sec4_code_fixed_llm_user.txt", fix_ctx, strict=True)
     return _unwrap_code_block(
         chat_code(fix_sys, fix_user, name="model.manual_code_fixer", temperature=0.3).strip()
     )
+
+
+def _recall_item_contract_text(item: Any) -> str:
+    if isinstance(item, dict):
+        parts = [
+            item.get("code"),
+            item.get("output"),
+            item.get("content"),
+            item.get("text"),
+        ]
+        return "\n".join(str(part) for part in parts if part)
+    return str(item or "")
+
+
+def _filter_recall_results_for_contract(
+    recall_results: list[dict[str, Any]],
+    analysis_contract: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Drop retrieved code templates that contain operations forbidden by the active contract."""
+    if not recall_results:
+        return recall_results
+    filtered: list[dict[str, Any]] = []
+    for item in recall_results:
+        issues = validate_code_against_contract(
+            code=_recall_item_contract_text(item),
+            contract=analysis_contract,
+        )
+        if issues:
+            continue
+        filtered.append(item)
+    return filtered
 
 
 def validate_modeling_code(
@@ -409,7 +501,7 @@ def validate_modeling_code(
     initial_code: str = "",
 ) -> dict[str, Any]:
     """Run the shared legacy five-attempt generation/fix loop without publishing analysis text."""
-    working_ctx = dict(ctx)
+    working_ctx = ensure_analysis_contract(ctx)
     analysis_contract = working_ctx.get("analysis_contract") or {}
     if not analysis_contract.get("valid", False):
         return {
@@ -447,28 +539,41 @@ def validate_modeling_code(
     final_result_str = ""
     contract_violations: list[str] = []
     attempts = 0
+    n_rows = infer_data_row_count(data)
     for attempt in range(MAX_FIX_ATTEMPTS):
         attempts = attempt + 1
-        compatibility_issues = validate_modeling_runtime_compatibility(current_code)
-        if compatibility_issues:
-            last_error = "Modeling runtime compatibility validation failed:\n- " + "\n- ".join(
-                compatibility_issues
-            )
+        static_contract_issues = validate_code_against_contract(
+            code=current_code,
+            contract=analysis_contract,
+        )
+        if static_contract_issues:
+            contract_violations = static_contract_issues
+            last_error = format_contract_violations(static_contract_issues)
             run_result = None
         else:
-            run_result = _run_modeling_code(code=current_code, data=data)
+            compatibility_issues = validate_modeling_runtime_compatibility(
+                current_code,
+                n_rows=n_rows,
+            )
+            if compatibility_issues:
+                last_error = "Modeling runtime compatibility validation failed:\n- " + "\n- ".join(
+                    compatibility_issues
+                )
+                run_result = None
+            else:
+                run_result = _run_modeling_code(
+                    code=current_code,
+                    data=data,
+                    n_rows=n_rows,
+                )
         if run_result and run_result["is_success"]:
             final_result_str = run_result.get("stdout", "")
             final_result_json = run_result.get("result_json", {})
-            contract_violations = validate_result_against_contract(
+            contract_violations = validate_modeling_result(
                 code=current_code,
                 result_json=final_result_json,
                 contract=analysis_contract,
             )
-            contract_violations.extend(validate_result_schema(
-                result_json=final_result_json,
-                contract=analysis_contract,
-            ))
             candidate_table = build_model_comparison_table_bundle(
                 final_result_json,
                 target=working_ctx.get("target", ""),
@@ -476,9 +581,13 @@ def validate_modeling_code(
                 additional_preference=working_ctx.get("additional_preference", ""),
                 language=working_ctx.get("language", "zh"),
             )
-            if not candidate_table.get("has_table"):
+            association_primary_result = (
+                str(analysis_contract.get("task_type") or "").strip().lower() == "association_inference"
+                and has_primary_analysis_outputs(final_result_json)
+            )
+            if not candidate_table.get("has_table") and not association_primary_result:
                 contract_violations.append(
-                    "result_dict must contain model metrics that can produce a comparison table."
+                    "result_dict must contain model metrics or primary analysis tables that can produce reportable results."
                 )
             if not contract_violations:
                 success = True
@@ -512,6 +621,7 @@ def run_modeling_phase2(
     df_head: str,
 ) -> dict[str, Any]:
     """Phase 2: RAG + 代码生成 + 验证修复 + 结果格式化 + 摘要。依赖 phase1 产出的 ctx。"""
+    ctx = ensure_analysis_contract(ctx)
     model_suggestion = ctx.get("model_suggestion", "")
     refined_suggestions = ctx.get("refined_suggestions", "")
     analysis_contract = ctx.get("analysis_contract") or {}
@@ -573,6 +683,11 @@ def run_modeling_phase2(
     # ---------- 结果格式化 ----------
     # 表格/内部逻辑继续使用 raw result；LLM prompt 只接收 compact evidence。
     artifact_metadata = collect_modeling_artifact_metadata(final_result_json)
+    report_artifacts = build_modeling_report_artifacts(
+        final_result_json,
+        target=ctx.get("target", ""),
+        language=ctx.get("language", "zh"),
+    )
     compact_result = compact_modeling_result(
         final_result_json,
         target=ctx.get("target", ""),
@@ -587,6 +702,12 @@ def run_modeling_phase2(
     ctx["code"] = compact_code
     ctx["result_json"] = compact_result_text
     ctx["modeling_result_evidence"] = compact_result_text
+    ctx["modeling_report_artifacts"] = json.dumps(
+        report_artifacts,
+        ensure_ascii=False,
+        indent=2,
+        default=str,
+    )
     ctx["modeling_artifact_metadata"] = artifact_metadata
     ctx["execution_stdout"] = compact_stdout
     ctx["result"] = compact_stdout
@@ -630,6 +751,7 @@ def run_modeling_phase2(
     if is_english_language(ctx.get("language")):
         composed["summary_4"]["title"] = "Modeling Analysis"
     composed["summary_4"]["analysis_contract"] = analysis_contract
+    composed["summary_4"]["report_artifacts"] = report_artifacts
 
     return {
         "summary_4": composed["summary_4"],
@@ -638,6 +760,7 @@ def run_modeling_phase2(
         "_refined_suggestions": refined_suggestions,
         "_final_code": final_code,
         "_modeling_result_evidence": compact_result,
+        "_modeling_report_artifacts": report_artifacts,
         "_modeling_artifact_metadata": artifact_metadata,
         "_fix_attempts": attempt + 1 if success else MAX_FIX_ATTEMPTS,
         "_status": "succeeded",
@@ -674,6 +797,30 @@ def run_modeling_workflow(
         ref_context=ref_context, language=language,
         task_type=task_type,
     )
+    if p1.get("_status") == "suggestion_incomplete":
+        english = is_english_language(language)
+        error_text = str(p1.get("_error") or "")
+        desc = (
+            f"Modeling suggestion generation did not complete: {error_text}"
+            if english
+            else f"建模建议生成未完成：{error_text}"
+        )
+        return {
+            "summary_4": {
+                "title": "Modeling Analysis" if english else "建模分析",
+                "desc": desc,
+                "result": "",
+                "code": "",
+                "table_title": "",
+                "table_markdown": "",
+                "table_html": "",
+            },
+            "abstract_4": desc,
+            "model_suggestion": "",
+            "_status": "suggestion_incomplete",
+            "_error": error_text,
+            "_contract_violations": [error_text] if error_text else [],
+        }
     ctx = p1.get("_ctx")
     if not ctx:
         return _empty_modeling_result()
@@ -740,6 +887,9 @@ def compact_modeling_result(
         out["metrics"] = _compact_for_llm(payload.get("metrics"), key="metrics")
     if "score" in payload:
         out["score"] = _compact_for_llm(payload.get("score"), key="score")
+
+    report_artifacts = build_modeling_report_artifacts(payload, target=target)
+    out["report_artifacts"] = report_artifacts
 
     interpretability = _extract_interpretability(payload)
     if interpretability:
@@ -1197,31 +1347,140 @@ def _is_empty_compact_value(value: Any) -> bool:
 # ===================================================================
 
 
-def _run_modeling_code(*, code: str, data: str, timeout_seconds: int = 300) -> dict[str, Any]:
+def _records_json_to_dataframe(value: Any) -> pd.DataFrame:
+    raw = to_str(value) or "[]"
+    records = json.loads(raw)
+    if not isinstance(records, (list, dict)):
+        raise ValueError("data must be a JSON records list or object.")
+    return pd.DataFrame(records)
+
+
+def _clean_modeling_transport_value(value: Any) -> Any:
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            return str(value)
+    if isinstance(value, pd.DataFrame):
+        return {
+            "rows": len(value),
+            "columns": [str(column) for column in value.columns],
+            "sample": value.head(10).to_dict(orient="records"),
+        }
+    if isinstance(value, pd.Series):
+        if len(value) <= 50:
+            return value.tolist()
+        return {"count": len(value), "sample": value.head(10).tolist()}
+    if isinstance(value, np.ndarray):
+        values = value.tolist()
+        if value.size <= 50:
+            return values
+        flat_values = value.reshape(-1).tolist()
+        return _summarize_numeric_list(flat_values) if _looks_numeric_list(flat_values) else {
+            "shape": list(value.shape),
+            "sample": flat_values[:10],
+        }
+    if isinstance(value, dict):
+        return {str(key): _clean_modeling_transport_value(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean_modeling_transport_value(child) for child in value]
+    return value
+
+
+def _looks_numeric_list(values: Any) -> bool:
+    if not isinstance(values, list) or not values:
+        return False
+    sample = values[:50]
+    return all(isinstance(value, (int, float, np.integer, np.floating)) for value in sample)
+
+
+def _summarize_numeric_list(values: list[Any]) -> dict[str, Any]:
+    arr = np.asarray(values, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    summary: dict[str, Any] = {"count": int(arr.size), "sample": values[:10]}
+    if finite.size:
+        summary.update(
+            {
+                "mean": float(np.mean(finite)),
+                "std": float(np.std(finite)),
+                "min": float(np.min(finite)),
+                "max": float(np.max(finite)),
+            }
+        )
+    return summary
+
+
+def _strip_modeling_transport_heavy_values(value: Any, key: str = "") -> Any:
+    key_text = str(key).lower()
+    heavy_key_hints = (
+        "artifact",
+        "b64",
+        "base64",
+        "pickle",
+        "gzip",
+        "blob",
+        "bytes",
+        "model_object",
+        "serialized",
+        "raw_model",
+        "fitted_model",
+    )
+    if any(hint in key_text for hint in heavy_key_hints):
+        return {"stripped": True, "reason": "model artifact removed before report transport"}
+    if isinstance(value, dict):
+        return {
+            str(child_key): _strip_modeling_transport_heavy_values(child_value, str(child_key))
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        if len(value) > 50 and _looks_numeric_list(value):
+            return _summarize_numeric_list(value)
+        if len(value) > 50:
+            return {
+                "count": len(value),
+                "sample": [_strip_modeling_transport_heavy_values(child, key) for child in value[:10]],
+            }
+        return [_strip_modeling_transport_heavy_values(child, key) for child in value]
+    if isinstance(value, str) and len(value) > 4000:
+        return {
+            "stripped": True,
+            "chars": len(value),
+            "reason": "large string removed before report transport",
+        }
+    return value
+
+
+def _modeling_result_for_transport(result_dict: dict[str, Any]) -> dict[str, Any]:
+    cleaned = _strip_modeling_transport_heavy_values(
+        _clean_modeling_transport_value(result_dict)
+    )
+    try:
+        return json.loads(json.dumps(cleaned, ensure_ascii=False, default=str))
+    except Exception:
+        return {
+            "serialization_error": "result_dict could not be serialized for workflow transport"
+        }
+
+
+def _run_modeling_code(
+    *,
+    code: str,
+    data: str,
+    timeout_seconds: int = 300,
+    n_rows: int | None = None,
+) -> dict[str, Any]:
     """
     执行建模训练代码。
     约定用户代码必须设置 result_dict 变量，与前端执行器保持一致。
     """
-    import json
-    import subprocess
-    import sys
-    import textwrap
-
     user_code = to_str(code).strip()
     if not user_code:
         return {"is_success": False, "error": "空代码", "stdout": "", "result_json": {}}
 
-    try:
-        validate_code(user_code)
-    except UnsafeCodeError as exc:
-        return {
-            "is_success": False,
-            "error": str(exc),
-            "stdout": "",
-            "result_json": {},
-        }
-
-    compatibility_issues = validate_modeling_runtime_compatibility(user_code)
+    compatibility_issues = validate_modeling_runtime_compatibility(
+        user_code,
+        n_rows=infer_data_row_count(data) if n_rows is None else int(n_rows),
+    )
     if compatibility_issues:
         return {
             "is_success": False,
@@ -1232,161 +1491,44 @@ def _run_modeling_code(*, code: str, data: str, timeout_seconds: int = 300) -> d
             "result_json": {},
         }
 
-    script = '''import json, sys, traceback
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, LabelEncoder, OrdinalEncoder, OneHotEncoder
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor, ExtraTreesClassifier, ExtraTreesRegressor, AdaBoostClassifier, AdaBoostRegressor
-from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge, Lasso, ElasticNet
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.svm import SVC, SVR
-from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-from sklearn.naive_bayes import GaussianNB
-
-if not hasattr(pd.DataFrame, "concat"):
-    pd.DataFrame.concat = staticmethod(pd.concat)
-
-def pd_isna_like(value):
-    return pd.isna(value)
-
-try:
-    from xgboost import XGBClassifier, XGBRegressor
-except Exception:
-    XGBClassifier = None
-    XGBRegressor = None
-
-try:
-    from lightgbm import LGBMClassifier, LGBMRegressor
-except Exception:
-    LGBMClassifier = None
-    LGBMRegressor = None
-
-_RECORDS = json.loads(sys.stdin.read())
-df = pd.DataFrame(_RECORDS)
-
-try:
-__USER_CODE__
-except Exception as e:
-    print("__AUTOSTAT_ERROR__", file=sys.stderr)
-    traceback.print_exc(file=sys.stderr)
-    sys.exit(2)
-
-# 收集 result_dict 变量。后端 runner 与前端训练执行器保持同一输出协议。
-_out = locals().get("result_dict")
-if not isinstance(_out, dict):
-    print("__AUTOSTAT_ERROR__", file=sys.stderr)
-    print("代码必须定义 dict 类型的 result_dict", file=sys.stderr)
-    sys.exit(3)
-
-# 把 numpy / pandas 类型变成原生 JSON 友好类型
-def _clean(o):
-    if hasattr(o, "item"):
-        try:
-            return o.item()
-        except Exception:
-            return str(o)
-    if isinstance(o, dict):
-        return {str(k): _clean(v) for k, v in o.items()}
-    if isinstance(o, (list, tuple)):
-        return [_clean(v) for v in o]
-    return o
-
-def _looks_numeric_list(values):
-    if not isinstance(values, list) or not values:
-        return False
-    sample = values[:50]
-    return all(isinstance(v, (int, float, np.integer, np.floating)) for v in sample)
-
-def _summarize_numeric_list(values):
-    arr = np.asarray(values, dtype=float)
-    finite = arr[np.isfinite(arr)]
-    summary = {"count": int(arr.size), "sample": values[:10]}
-    if finite.size:
-        summary.update({
-            "mean": float(np.mean(finite)),
-            "std": float(np.std(finite)),
-            "min": float(np.min(finite)),
-            "max": float(np.max(finite)),
-        })
-    return summary
-
-def _strip_transport_heavy_values(o, key=""):
-    key_text = str(key).lower()
-    if any(hint in key_text for hint in (
-        "artifact", "b64", "base64", "pickle", "gzip", "blob", "bytes",
-        "model_object", "serialized", "raw_model", "fitted_model",
-    )):
-        return {"stripped": True, "reason": "model artifact removed before report transport"}
-    if isinstance(o, dict):
-        return {str(k): _strip_transport_heavy_values(v, k) for k, v in o.items()}
-    if isinstance(o, list):
-        if len(o) > 50 and _looks_numeric_list(o):
-            return _summarize_numeric_list(o)
-        if len(o) > 50:
-            return {
-                "count": len(o),
-                "sample": [_strip_transport_heavy_values(v, key) for v in o[:10]],
-            }
-        return [_strip_transport_heavy_values(v, key) for v in o]
-    if isinstance(o, str) and len(o) > 4000:
-        return {
-            "stripped": True,
-            "chars": len(o),
-            "reason": "large string removed before report transport",
-        }
-    return o
-
-_cleaned = _strip_transport_heavy_values(_clean(_out))
-print("__AUTOSTAT_RESULT__:" + json.dumps(_cleaned, ensure_ascii=False))
-'''
-
-    indented = textwrap.indent(user_code, " " * 4)
-    full_script = script.replace("__USER_CODE__", indented)
-
     try:
-        completed = subprocess.run(
-            [sys.executable, "-c", full_script],
-            input=to_str(data) or "[]",
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            env=safe_subprocess_env(),
-        )
-    except subprocess.TimeoutExpired:
+        dataframe = _records_json_to_dataframe(data)
+    except Exception as exc:
         return {
             "is_success": False,
-            "error": f"代码执行超时（>{timeout_seconds}s）",
+            "error": f"输入数据解析失败：{exc}",
             "stdout": "",
             "result_json": {},
         }
 
-    if completed.returncode != 0:
+    execution_result = run_bounded_safe_exec(
+        kind="modeling",
+        code=user_code,
+        dataframe=dataframe,
+        timeout_seconds=timeout_seconds,
+    )
+    if not execution_result.get("is_success"):
         return {
             "is_success": False,
-            "error": (completed.stderr or "")[-6000:],
-            "stdout": completed.stdout or "",
+            "error": str(execution_result.get("error") or ""),
+            "stdout": str(execution_result.get("stdout") or ""),
             "result_json": {},
         }
 
-    # 分离打印输出和 result
-    result_json: dict = {}
-    lines = completed.stdout.splitlines()
-    stdout_clean_lines = []
-    for line in lines:
-        if line.startswith("__AUTOSTAT_RESULT__:"):
-            try:
-                result_json = json.loads(line[len("__AUTOSTAT_RESULT__:"):])
-            except Exception:
-                result_json = {}
-        else:
-            stdout_clean_lines.append(line)
+    result_dict = execution_result.get("value")
+    if not isinstance(result_dict, dict):
+        return {
+            "is_success": False,
+            "error": "代码必须定义 dict 类型的 result_dict",
+            "stdout": str(execution_result.get("stdout") or ""),
+            "result_json": {},
+        }
 
     return {
         "is_success": True,
         "error": "",
-        "stdout": "\n".join(stdout_clean_lines),
-        "result_json": result_json,
+        "stdout": str(execution_result.get("stdout") or ""),
+        "result_json": _modeling_result_for_transport(result_dict),
     }
 
 

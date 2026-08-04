@@ -9,13 +9,19 @@
 【具体绘图建议】
 {{refined_suggestions}}
 
+【已确认的完整绘图建议】
+{{visual_recommendation}}
+
+【Visualization Contract（最高优先级）】
+{{visualization_contract_json}}
+
 【用户需求与偏好】
 - 用户需求：{{user_input}}
 - 用户的分析偏好设置：{{preference_selected}}
 - 用户的建模目的与特殊需求（高优先级，务必满足）：{{add_preference}}
 - 用户上传的参考资料（业务背景/算法说明/数据手册，如有相关内容请优先参考）：{{ref_context}}
 
-结合上述数据特征和绘图建议，生成最终的 `fig_dict`。请尽可能生成正确代码，确保代码逻辑严密，处理好可能的缺失值或异常列名。
+结合上述数据特征和绘图建议，生成最终的 `fig_dict`。请尽可能生成正确代码，确保代码逻辑严密，处理好可能的缺失值或异常列名。对 Visualization Contract 中每个 `charts[].id`，成功图必须使用 `fig_dict['<id>__描述性名称'] = fig` 形式保存；单图失败记录到 `figure_errors` 后继续，保留其他已完成图。
 
 重点：不得给 `df` 重新赋值；`def_head` 只是全量数据的前 5 行预览，代码必须使用运行时提供的全量 `df`。
 

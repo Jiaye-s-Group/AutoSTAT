@@ -5,15 +5,17 @@
    - 报告开头需有一行简短的“数据集说明”。
    - 仅在 Analysis Contract 为 prediction 且结果确实包含 best_model 时展示最佳模型。
    - 对 association_inference，不得使用“最佳模型”或预测性能措辞，应按预先指定模型报告统计关联。
+   - 对 association_inference，优先说明 `analysis_tables`、`candidate_results`、`summaries` 中的候选窗口/候选区段/富集分数摘要；辅助模型的 R²/AIC/BIC 只能作为描述性关联证据，不得作为主发现或筛查质量核心。
    - 若输入中包含特征工程相关信息，请在“特征工程说明”部分详细描述其具体方法与作用。
 
 2. **模型展示细节**：
-   - 对每个模型，清晰呈现：模型名称、模型类型（分类/回归）、主要性能指标。
+   - 对 prediction/unsupervised 的每个模型，清晰呈现：模型名称、模型类型（分类/回归/聚类）、主要性能指标。
+   - 对 association_inference，只在存在实际辅助模型时简要呈现模型名称和描述性统计量，且必须明确其为辅助分析。
    - 所有数值指标（如 Accuracy、R²、MAE、MSE 等）必须统一保留 4 位小数。
    - 建议使用 Markdown 表格或分点列表进行呈现。
 
 3. **深度分析**：
-   - 必须针对 JSON 中的 `intermediate` 字段进行深入讲解，包括但不限于：线性回归系数、预测值分析、残差分布、特征重要性以及交叉验证细节。
+   - 必须针对 JSON 中的 `intermediate`、`analysis_tables`、`candidate_results` 或 `summaries` 字段进行讲解；association_inference 不得编造交叉验证、预测值分析或最佳模型选择。
 
 4. **格式约束**：
    - 只返回纯 Markdown 文本。

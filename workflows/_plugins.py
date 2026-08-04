@@ -12,14 +12,15 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
-import sys
-import textwrap
 from typing import Any
 
 import pandas as pd
+import plotly.graph_objects as go
 
-from core.safe_code import UnsafeCodeError, safe_subprocess_env, validate_code
+from core.bounded_code_execution import run_bounded_safe_exec
+from core.dataframe_profile import build_dataframe_profile_json
+from core.plotly_serialization import figure_to_json
+from core.preprocessing_contract import validate_preprocessing_result
 from core.visualization_code_sanitizer import sanitize_visualization_code
 from core.workflow_runner import to_json_str, to_str
 
@@ -216,8 +217,10 @@ def df_to_meta(df: pd.DataFrame) -> dict[str, Any]:
             "shape_1": 0,
             "dtype_info_str": "{}",
             "head_dict_str": "[]",
+            "data_profile_str": build_dataframe_profile_json(pd.DataFrame()),
             "df": "",
         }
+    data_profile_str = build_dataframe_profile_json(df)
     return {
         "is_success": True,
         "error": "",
@@ -225,6 +228,7 @@ def df_to_meta(df: pd.DataFrame) -> dict[str, Any]:
         "shape_1": int(df.shape[1]),
         "dtype_info_str": df.dtypes.astype(str).to_json(),
         "head_dict_str": df.head(5).to_json(orient="records", force_ascii=False),
+        "data_profile_str": data_profile_str,
         "df": df.to_json(orient="records", force_ascii=False),
     }
 
@@ -279,60 +283,12 @@ def get_preprocessing_suggestions(*, df: str) -> dict[str, Any]:
 # ===================================================================
 
 
-_CODE_RUNNER_TEMPLATE = '''import json, sys, traceback
-import pandas as pd
-import numpy as np
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import (
-    FunctionTransformer,
-    LabelEncoder,
-    MinMaxScaler,
-    OrdinalEncoder,
-    RobustScaler,
-    StandardScaler,
-)
-from sklearn.preprocessing import OneHotEncoder as _SklearnOneHotEncoder
-
-if not hasattr(pd.DataFrame, "concat"):
-    pd.DataFrame.concat = staticmethod(pd.concat)
-
-def pd_isna_like(value):
-    return pd.isna(value)
-
-def OneHotEncoder(*args, **kwargs):
-    if "sparse" in kwargs and "sparse_output" not in kwargs:
-        kwargs["sparse_output"] = kwargs.pop("sparse")
-    try:
-        return _SklearnOneHotEncoder(*args, **kwargs)
-    except TypeError:
-        if "sparse_output" in kwargs:
-            kwargs["sparse"] = kwargs.pop("sparse_output")
-        return _SklearnOneHotEncoder(*args, **kwargs)
-
-_RECORDS = json.loads(sys.stdin.read())
-df = pd.DataFrame(_RECORDS)
-
-try:
-__USER_CODE__
-except Exception as e:
-    print("__AUTOSTAT_ERROR__", file=sys.stderr)
-    traceback.print_exc(file=sys.stderr)
-    sys.exit(2)
-
-# 约定：用户代码处理后的结果必须写入 process_df，与前端执行器保持一致
-_out = locals().get("process_df")
-if not isinstance(_out, pd.DataFrame):
-    print("__AUTOSTAT_ERROR__", file=sys.stderr)
-    print("代码必须定义 pandas.DataFrame 类型的 process_df", file=sys.stderr)
-    sys.exit(3)
-
-print(json.dumps({
-    "processed_df": _out.to_json(orient="records", force_ascii=False),
-    "processed_df_head": _out.head(5).to_json(orient="records", force_ascii=False),
-}, ensure_ascii=False))
-'''
+def _records_json_to_dataframe(value: Any) -> pd.DataFrame:
+    raw = to_str(value) or "[]"
+    records = json.loads(raw)
+    if not isinstance(records, (list, dict)):
+        raise ValueError("df must be a JSON records list or object.")
+    return pd.DataFrame(records)
 
 
 def code_runner(
@@ -340,6 +296,7 @@ def code_runner(
     code: str,
     df: str,
     timeout_seconds: int = 60,
+    preprocessing_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     preprocessing/138975
@@ -348,6 +305,7 @@ def code_runner(
     用户代码约定：
         - 输入变量名 df（pandas.DataFrame）
         - 处理后结果必须放到 process_df，与前端执行器保持一致
+        - 若契约要求 QC，则需写入 dict 类型 qc_summary
     """
     user_code = to_str(code).strip()
     if not user_code:
@@ -359,65 +317,61 @@ def code_runner(
         }
 
     try:
-        validate_code(user_code)
-    except UnsafeCodeError as exc:
-        return {
-            "processed_df": "",
-            "processed_df_head": "",
-            "error": str(exc),
-            "is_success": False,
-        }
-
-    # 给用户代码整体加一层缩进（4 空格，对应 try: 块内）
-    indented = textwrap.indent(user_code, " " * 4)
-    script = _CODE_RUNNER_TEMPLATE.replace("__USER_CODE__", indented)
-
-    try:
-        completed = subprocess.run(
-            [sys.executable, "-c", script],
-            input=to_str(df) or "[]",
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            env=safe_subprocess_env(),
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "processed_df": "",
-            "processed_df_head": "",
-            "error": f"代码执行超时（>{timeout_seconds}s）",
-            "is_success": False,
-        }
+        dataframe = _records_json_to_dataframe(df)
     except Exception as exc:
         return {
             "processed_df": "",
             "processed_df_head": "",
-            "error": f"子进程启动失败：{exc}",
+            "error": f"输入数据解析失败：{exc}",
             "is_success": False,
         }
 
-    if completed.returncode != 0:
-        err = completed.stderr or "未知错误"
+    execution_result = run_bounded_safe_exec(
+        kind="preprocessing",
+        code=user_code,
+        dataframe=dataframe,
+        timeout_seconds=timeout_seconds,
+    )
+    if not execution_result["is_success"]:
         return {
             "processed_df": "",
             "processed_df_head": "",
-            "error": err.strip()[:1500],
+            "error": str(execution_result.get("error") or "代码执行失败。"),
             "is_success": False,
         }
 
-    try:
-        result = json.loads(completed.stdout.strip().splitlines()[-1])
-    except Exception:
+    output_df = execution_result.get("value")
+    if not isinstance(output_df, pd.DataFrame):
         return {
             "processed_df": "",
             "processed_df_head": "",
-            "error": f"输出解析失败：{completed.stdout[:500]}",
+            "error": "代码必须定义 pandas.DataFrame 类型的 process_df",
+            "is_success": False,
+        }
+
+    qc_summary = (
+        (execution_result.get("metadata") or {}).get("qc_summary")
+        if isinstance(execution_result.get("metadata"), dict)
+        else None
+    )
+    semantic_issues = validate_preprocessing_result(
+        input_df=dataframe,
+        output_df=output_df,
+        qc_summary=qc_summary,
+        contract=preprocessing_contract,
+    )
+    if semantic_issues:
+        return {
+            "processed_df": "",
+            "processed_df_head": "",
+            "error": "\n".join(semantic_issues)[:1500],
             "is_success": False,
         }
 
     return {
-        "processed_df": result.get("processed_df", ""),
-        "processed_df_head": result.get("processed_df_head", ""),
+        "processed_df": output_df.to_json(orient="records", force_ascii=False),
+        "processed_df_head": output_df.head(5).to_json(orient="records", force_ascii=False),
+        "qc_summary": qc_summary if isinstance(qc_summary, dict) else {},
         "error": "",
         "is_success": True,
     }
@@ -428,45 +382,16 @@ def code_runner(
 # ===================================================================
 
 
-_VIZ_RUNNER_TEMPLATE = '''import json, sys, traceback
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-
-_RECORDS = json.loads(sys.stdin.read())
-df = pd.DataFrame(_RECORDS)
-
-fig_dict = {}
-try:
-__USER_CODE__
-except Exception as e:
-    print("__AUTOSTAT_ERROR__", file=sys.stderr)
-    traceback.print_exc(file=sys.stderr)
-    sys.exit(2)
-
-_figs = {}
-if isinstance(locals().get("fig_dict"), dict):
-    for k, v in fig_dict.items():
-        try:
-            if isinstance(v, go.Figure):
-                _figs[str(k)] = v.to_json()
-            elif hasattr(v, "to_plotly_json") and v.__class__.__module__.startswith("plotly"):
-                _figs[str(k)] = go.Figure(v).to_json()
-        except Exception:
-            pass
-_solo = locals().get("fig")
-if _solo is not None and not _figs:
+def _plotly_figure_to_json_entry(key: Any, value: Any) -> tuple[str, str] | tuple[None, dict[str, str]]:
+    figure_key = str(key)
     try:
-        if isinstance(_solo, go.Figure):
-            _figs["default"] = _solo.to_json()
-        elif hasattr(_solo, "to_plotly_json") and _solo.__class__.__module__.startswith("plotly"):
-            _figs["default"] = go.Figure(_solo).to_json()
-    except Exception:
-        pass
-
-print(json.dumps(_figs, ensure_ascii=False))
-'''
+        if isinstance(value, go.Figure):
+            return figure_key, figure_to_json(value)
+        if hasattr(value, "to_plotly_json") and value.__class__.__module__.startswith("plotly"):
+            return figure_key, figure_to_json(go.Figure(value))
+        return None, {"figure": figure_key, "error": "Value is not a Plotly Figure."}
+    except Exception as exc:
+        return None, {"figure": figure_key, "error": str(exc)}
 
 
 def execute_and_extract(
@@ -491,44 +416,54 @@ def execute_and_extract(
         }
 
     try:
-        validate_code(user_code)
-    except UnsafeCodeError as exc:
-        return {"fig_task_list": [], "error": str(exc)}
+        dataframe = _records_json_to_dataframe(df_data)
+    except Exception as exc:
+        return {"fig_task_list": [], "error": f"输入数据解析失败：{exc}"}
 
-    indented = textwrap.indent(user_code, " " * 4)
-    script = _VIZ_RUNNER_TEMPLATE.replace("__USER_CODE__", indented)
+    execution_result = run_bounded_safe_exec(
+        kind="visualization",
+        code=user_code,
+        dataframe=dataframe,
+        timeout_seconds=timeout_seconds,
+    )
+    if not execution_result["is_success"]:
+        return {
+            "fig_task_list": [],
+            "error": str(execution_result.get("error") or "可视化代码执行失败。"),
+        }
 
-    try:
-        completed = subprocess.run(
-            [sys.executable, "-c", script],
-            input=to_str(df_data) or "[]",
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            env=safe_subprocess_env(),
-        )
-    except subprocess.TimeoutExpired:
-        return {"fig_task_list": [], "error": f"超时（>{timeout_seconds}s）"}
+    raw_figs = execution_result.get("value")
+    if not isinstance(raw_figs, dict):
+        return {"fig_task_list": [], "error": "图表执行器返回了无效图表字典。"}
 
-    if completed.returncode != 0:
-        error_text = (completed.stderr or "").strip()
-        return {"fig_task_list": [], "error": error_text[-6000:]}
-
-    try:
-        figs = json.loads(completed.stdout.strip().splitlines()[-1])
-    except Exception:
-        return {"fig_task_list": [], "error": "输出解析失败"}
+    figs: dict[str, str] = {}
+    figure_errors: list[dict[str, str]] = []
+    for key, value in raw_figs.items():
+        fig_key, fig_json_or_error = _plotly_figure_to_json_entry(key, value)
+        if fig_key is None:
+            figure_errors.append(fig_json_or_error)  # type: ignore[arg-type]
+        else:
+            figs[fig_key] = fig_json_or_error  # type: ignore[assignment]
 
     fig_task_list = [{"title": k, "fig": v} for k, v in figs.items()]
     if not fig_task_list:
+        detail_parts = []
+        detail_parts.extend(
+            str(item.get("error") or "")
+            for item in figure_errors
+            if isinstance(item, dict)
+        )
         return {
             "fig_task_list": [],
             "error": (
-                "No Plotly figures were collected. Store every generated Plotly Figure "
+                "\n".join(part for part in detail_parts if part)[-6000:]
+                or "No Plotly figures were collected. Store every generated Plotly Figure "
                 "as fig_dict['descriptive_key'] = fig or assign a single figure to fig."
             ),
         }
-    return {"fig_task_list": fig_task_list}
+    warnings = list(execution_result.get("warnings") or [])
+    warnings.extend(item for item in figure_errors if isinstance(item, dict))
+    return {"fig_task_list": fig_task_list, "warnings": warnings, "error": ""}
 
 
 def validate_viz_code(*, code: str, df_data: str) -> dict[str, Any]:

@@ -17,3 +17,7 @@
 {{head_dict_str}}
 === LLM 返回的列级预处理建议（若为空则基于数据自行判断）===
 {{refined_suggestions}}
+=== 已确认的完整预处理建议（不可被压缩版遗漏或覆盖）===
+{{suggestion}}
+=== Preprocessing Contract（最高优先级；仅启用其中明确声明的限制）===
+{{preprocessing_contract_json}}

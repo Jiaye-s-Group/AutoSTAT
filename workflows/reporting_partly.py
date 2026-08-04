@@ -16,6 +16,7 @@ import os
 import re
 from typing import Any, Callable
 
+from core.figure_artifacts import figure_artifact_contexts, successful_figure_artifacts
 from core.llm_client import chat
 from core.prompt_template import render_file
 from core.report_language import (
@@ -367,6 +368,51 @@ def _visual_toc_section_score(toc_list: list, index: int) -> int:
     if not _toc_section_has_child(toc_list, index):
         score += 5
     return score
+
+
+def _is_visualization_report_section(toc_list: list, index: int) -> bool:
+    if index < 0 or index >= len(toc_list):
+        return False
+    section = toc_list[index]
+    text = re.sub(r"\s+", "", _toc_section_text(section)).lower()
+    strong_keywords = (
+        "可视化", "图表", "图像", "图片", "可视分析",
+        "visualization", "visualisation", "chart", "figure", "image", "plot",
+    )
+    if any(keyword in text for keyword in strong_keywords):
+        return True
+    if _toc_section_has_visual_ancestor(toc_list, index):
+        return True
+    modules = _section_modules(section)
+    return 2 in modules
+
+
+def _figure_section_scope(figure: int, figure_artifacts: list[dict[str, Any]] | None) -> str:
+    if not figure_artifacts or figure < 0 or figure >= len(figure_artifacts):
+        return ""
+    artifact = figure_artifacts[figure]
+    if not isinstance(artifact, dict):
+        return ""
+    return str(artifact.get("section_scope") or artifact.get("stage") or "").strip().lower()
+
+
+def _figure_allowed_in_section(
+    *,
+    figure: int,
+    toc_list: list,
+    section_index: int,
+    figure_artifacts: list[dict[str, Any]] | None,
+) -> bool:
+    scope = _figure_section_scope(figure, figure_artifacts)
+    if scope in {"visualization", "visualisation", "visual", "viz"}:
+        visual_sections = {
+            index
+            for index in range(len(toc_list))
+            if _is_visualization_report_section(toc_list, index)
+        }
+        if visual_sections:
+            return section_index in visual_sections
+    return True
 
 
 def _dedupe_toc_figure_assignments(toc_list: list) -> list:
@@ -920,8 +966,16 @@ def _figure_section_alignment_score(
     figure_contexts: dict[int, str],
     toc_list: list,
     section_index: int,
+    figure_artifacts: list[dict[str, Any]] | None = None,
 ) -> int:
     section = toc_list[section_index]
+    if not _figure_allowed_in_section(
+        figure=figure,
+        toc_list=toc_list,
+        section_index=section_index,
+        figure_artifacts=figure_artifacts,
+    ):
+        return -100
     if _is_pipeline_setup_section(section):
         return -100
     if _is_modeling_section(section) and not _figure_is_modeling_result(figure, figure_contexts):
@@ -1157,6 +1211,7 @@ def _best_available_record_for_figure(
     figure: int,
     toc_list: list,
     figure_contexts: dict[int, str],
+    figure_artifacts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     if _figure_context_filter_score(figure, figure_contexts) <= -40:
         return None
@@ -1178,6 +1233,7 @@ def _best_available_record_for_figure(
             figure_contexts=figure_contexts,
             toc_list=toc_list,
             section_index=section_index,
+            figure_artifacts=figure_artifacts,
         )
         # -100 marks a hard-incompatible section (for example, a raw-data
         # setup section or a non-model figure inside a modeling section).
@@ -1208,6 +1264,7 @@ def _build_figure_insert_plan(
     toc_list: list,
     candidate_figures: list[int],
     figure_contexts: dict[int, str],
+    figure_artifacts: list[dict[str, Any]] | None = None,
 ) -> tuple[list, list[int], list[dict[str, Any]]]:
     normalized = _normalize_toc_figures(toc_list)
     candidates = list(dict.fromkeys(candidate_figures))
@@ -1229,6 +1286,7 @@ def _build_figure_insert_plan(
                 figure_contexts=figure_contexts,
                 toc_list=normalized,
                 section_index=section_index,
+                figure_artifacts=figure_artifacts,
             )
             if score < min_score:
                 continue
@@ -1251,6 +1309,7 @@ def _build_figure_insert_plan(
             figure=figure,
             toc_list=normalized,
             figure_contexts=figure_contexts,
+            figure_artifacts=figure_artifacts,
         )
         if fallback_record is not None:
             records.append(fallback_record)
@@ -1917,6 +1976,7 @@ def run_reporting_partly_workflow(
     preproc_abstract: str,
     visual_abstract: str,
     coding_abstract: str,
+    figure_artifacts: Any = None,
     user_input: str = "",
     add_preference: str = "",
     preference_select: str = "",
@@ -1928,9 +1988,15 @@ def run_reporting_partly_workflow(
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     report_language = normalize_report_language(report_language)
+    successful_artifacts = successful_figure_artifacts(figure_artifacts)
     selected_full_conten = _ensure_visual_fig_placeholders(selected_full_conten or "")
-    candidate_figures = _extract_fig_numbers_from_text(selected_full_conten)
-    candidate_figure_contexts = _extract_figure_contexts(selected_full_conten)
+    if successful_artifacts:
+        candidate_figures = list(range(len(successful_artifacts)))
+        candidate_figure_contexts = figure_artifact_contexts(successful_artifacts)
+        selected_full_conten = _format_figure_contexts(candidate_figures, candidate_figure_contexts)
+    else:
+        candidate_figures = _extract_fig_numbers_from_text(selected_full_conten)
+        candidate_figure_contexts = _extract_figure_contexts(selected_full_conten)
     authoritative_toc = _parse_toc_text(toc_text)
     candidate_pool_figures = _select_report_figures(
         candidate_figures=candidate_figures,
@@ -1999,6 +2065,7 @@ def run_reporting_partly_workflow(
         toc_list=toc_list_final,
         candidate_figures=candidate_pool_figures,
         figure_contexts=figure_contexts,
+        figure_artifacts=successful_artifacts,
     )
     ctx["figure_insert_plan"] = figure_insert_plan
     _log_toc_figure_state("toc_list_final after insert plan", toc_list_final)

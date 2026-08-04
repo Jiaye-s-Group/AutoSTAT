@@ -31,9 +31,20 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from core.llm_client import chat, chat_code, submit_with_context
+from core.llm_client import (
+    LLMOutputIncompleteError,
+    LLMOutputTruncatedError,
+    chat,
+    chat_code,
+    chat_suggestion,
+    submit_with_context,
+)
 from core.code_runtime_profile import build_code_runtime_constraints
 from core.prompt_template import render_file
+from core.preprocessing_contract import (
+    build_preprocessing_contract,
+    contract_as_prompt as preprocessing_contract_as_prompt,
+)
 from core.rag_retriever import retrieve
 from core.report_language import (
     app_language_instruction,
@@ -53,6 +64,27 @@ from workflows._plugins import (
 )
 
 MAX_FIX_ATTEMPTS = 5
+
+
+def ensure_preprocessing_contract(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Backfill a contract for contexts created before semantic validation existed."""
+    working_ctx = dict(ctx)
+    if isinstance(working_ctx.get("preprocessing_contract"), dict):
+        working_ctx.setdefault(
+            "preprocessing_contract_json",
+            preprocessing_contract_as_prompt(working_ctx["preprocessing_contract"]),
+        )
+        return working_ctx
+    contract = build_preprocessing_contract(
+        columns=list(working_ctx.get("columns") or []),
+        user_input=str(working_ctx.get("user_input") or ""),
+        add_preference=str(working_ctx.get("add_preference") or ""),
+        suggestion=str(working_ctx.get("suggestion") or ""),
+        refined_suggestions=str(working_ctx.get("refined_suggestions") or ""),
+    )
+    working_ctx["preprocessing_contract"] = contract
+    working_ctx["preprocessing_contract_json"] = preprocessing_contract_as_prompt(contract)
+    return working_ctx
 
 
 def run_preprocessing_phase1(
@@ -109,17 +141,37 @@ def run_preprocessing_phase1(
             fallback_columns=shape_1,
         ),
     }
-    sug_sys = render_file("preprocessing/get_preprocessing_suggestions2_llm_sys.txt", ctx)
-    sug_user = render_file("preprocessing/get_preprocessing_suggestions2_llm_user.txt", ctx)
-    suggestion = normalize_suggestion_output(
-        chat(sug_sys, sug_user, name="prep.get_suggestions")
-    )
-    ctx["suggestion"] = suggestion
+    try:
+        sug_sys = render_file("preprocessing/get_preprocessing_suggestions2_llm_sys.txt", ctx)
+        sug_user = render_file("preprocessing/get_preprocessing_suggestions2_llm_user.txt", ctx)
+        suggestion = normalize_suggestion_output(
+            chat_suggestion(sug_sys, sug_user, name="prep.get_suggestions")
+        )
+        ctx["suggestion"] = suggestion
 
-    ref_sys = render_file("preprocessing/refine_suggestions_llm_sys.txt", ctx)
-    ref_user = render_file("preprocessing/refine_suggestions_llm_user.txt", ctx)
-    refined = chat(ref_sys, ref_user, name="prep.refine").strip()
+        ref_sys = render_file("preprocessing/refine_suggestions_llm_sys.txt", ctx)
+        ref_user = render_file("preprocessing/refine_suggestions_llm_user.txt", ctx)
+        refined = normalize_suggestion_output(
+            chat_suggestion(ref_sys, ref_user, name="prep.refine")
+        )
+    except (LLMOutputIncompleteError, LLMOutputTruncatedError) as exc:
+        return {
+            "suggestion": "",
+            "refined_suggestions": "",
+            "_ctx": ctx,
+            "_status": "suggestion_incomplete",
+            "_error": str(exc),
+        }
     ctx["refined_suggestions"] = refined
+    contract = build_preprocessing_contract(
+        columns=list(ctx.get("columns") or []),
+        user_input=str(ctx.get("user_input") or ""),
+        add_preference=str(ctx.get("add_preference") or ""),
+        suggestion=suggestion,
+        refined_suggestions=refined,
+    )
+    ctx["preprocessing_contract"] = contract
+    ctx["preprocessing_contract_json"] = preprocessing_contract_as_prompt(contract)
     return {"suggestion": suggestion, "refined_suggestions": refined, "_ctx": ctx}
 
 
@@ -130,25 +182,45 @@ def revise_preprocessing_phase1(
     revision_instruction: str,
 ) -> dict[str, Any]:
     revised_ctx = dict(ctx)
-    revised = revise_suggestion(
-        stage_label="preprocessing",
-        original_requirements=original_requirements,
-        current_suggestion=str(ctx.get("suggestion") or ""),
-        revision_instruction=revision_instruction,
-        hard_constraints=f"Available columns: {ctx.get('columns', [])}",
-        language_instruction=str(ctx.get("language_instruction") or ""),
-    )
-    revised_ctx["suggestion"] = revised
-    ref_sys = render_file("preprocessing/refine_suggestions_llm_sys.txt", revised_ctx)
-    ref_user = render_file("preprocessing/refine_suggestions_llm_user.txt", revised_ctx)
-    refined = chat(ref_sys, ref_user, name="prep.refine_revision").strip()
+    try:
+        revised = revise_suggestion(
+            stage_label="preprocessing",
+            original_requirements=original_requirements,
+            current_suggestion=str(ctx.get("suggestion") or ""),
+            revision_instruction=revision_instruction,
+            hard_constraints=f"Available columns: {ctx.get('columns', [])}",
+            language_instruction=str(ctx.get("language_instruction") or ""),
+        )
+        revised_ctx["suggestion"] = revised
+        ref_sys = render_file("preprocessing/refine_suggestions_llm_sys.txt", revised_ctx)
+        ref_user = render_file("preprocessing/refine_suggestions_llm_user.txt", revised_ctx)
+        refined = normalize_suggestion_output(
+            chat_suggestion(ref_sys, ref_user, name="prep.refine_revision")
+        )
+    except (LLMOutputIncompleteError, LLMOutputTruncatedError) as exc:
+        return {
+            "suggestion": "",
+            "refined_suggestions": "",
+            "_ctx": revised_ctx,
+            "_status": "suggestion_incomplete",
+            "_error": str(exc),
+        }
     revised_ctx["refined_suggestions"] = refined
+    contract = build_preprocessing_contract(
+        columns=list(revised_ctx.get("columns") or []),
+        user_input=str(revised_ctx.get("user_input") or original_requirements or ""),
+        add_preference=str(revised_ctx.get("add_preference") or ""),
+        suggestion=revised,
+        refined_suggestions=refined,
+    )
+    revised_ctx["preprocessing_contract"] = contract
+    revised_ctx["preprocessing_contract_json"] = preprocessing_contract_as_prompt(contract)
     return {"suggestion": revised, "refined_suggestions": refined, "_ctx": revised_ctx}
 
 
 def generate_preprocessing_code(*, ctx: dict[str, Any]) -> dict[str, Any]:
     """Generate a preprocessing code draft without executing user data."""
-    working_ctx = dict(ctx)
+    working_ctx = ensure_preprocessing_contract(ctx)
     q_sys = render_file("preprocessing/get_query_llm_sys.txt", working_ctx)
     q_user = render_file("preprocessing/get_query_llm_user.txt", working_ctx)
     rag_query = chat(q_sys, q_user, name="prep.get_query", temperature=0).strip()
@@ -165,12 +237,15 @@ def generate_preprocessing_code(*, ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def repair_preprocessing_code(*, ctx: dict[str, Any], code: str, error: str) -> str:
+    contract_ctx = ensure_preprocessing_contract(ctx)
     fix_ctx = {
-        **ctx,
+        **contract_ctx,
         "code": code,
         "code_prep": code,
         "error": error,
         "error_msg": error,
+        "suggestion": str(contract_ctx.get("suggestion") or ""),
+        "preprocessing_contract_json": str(contract_ctx.get("preprocessing_contract_json") or "{}"),
     }
     fix_sys = render_file("preprocessing/code_fixer_llm_sys.txt", fix_ctx, strict=True)
     fix_user = render_file("preprocessing/code_fixer_llm_user.txt", fix_ctx, strict=True)
@@ -186,7 +261,7 @@ def validate_preprocessing_code(
     initial_code: str = "",
 ) -> dict[str, Any]:
     """Run the shared legacy five-attempt generation/fix loop without publishing results."""
-    working_ctx = dict(ctx)
+    working_ctx = ensure_preprocessing_contract(ctx)
     if initial_code:
         current_code = _unwrap_code_block(initial_code)
     else:
@@ -201,7 +276,11 @@ def validate_preprocessing_code(
     attempts = 0
     for attempt in range(MAX_FIX_ATTEMPTS):
         attempts = attempt + 1
-        run_result = code_runner(code=current_code, df=df)
+        run_result = code_runner(
+            code=current_code,
+            df=df,
+            preprocessing_contract=working_ctx.get("preprocessing_contract") or {},
+        )
         if run_result["is_success"]:
             processed_df = run_result["processed_df"]
             processed_df_head = run_result["processed_df_head"]
@@ -219,6 +298,7 @@ def validate_preprocessing_code(
         "code": current_code,
         "processed_df": processed_df,
         "processed_df_head": processed_df_head,
+        "qc_summary": run_result.get("qc_summary", {}) if success else {},
         "error": last_error,
         "success": success,
         "attempts": attempts,
@@ -251,6 +331,8 @@ def run_preprocessing_workflow(
 
     if phase1_ctx:
         ctx = dict(phase1_ctx)
+        phase1_status = ""
+        phase1_error = ""
     else:
         phase1 = run_preprocessing_phase1(
             df=df,
@@ -265,7 +347,24 @@ def run_preprocessing_workflow(
             ref_context=ref_context,
             language=language,
         )
+        phase1_status = str(phase1.get("_status") or "")
+        phase1_error = str(phase1.get("_error") or "")
         ctx = dict(phase1.get("_ctx") or {})
+    if phase1_status == "suggestion_incomplete":
+        english = is_english_language(language)
+        desc = (
+            f"Preprocessing suggestion generation did not complete: {phase1_error}"
+            if english
+            else f"预处理建议生成未完成：{phase1_error}"
+        )
+        return {
+            "summary_2": {"title": "Preprocessing" if english else "数据预处理", "desc": desc, "code": "", "status": "failed"},
+            "abstract_2": desc,
+            "suggestion": "",
+            "_status": "suggestion_incomplete",
+            "_code_success": False,
+            "_error": phase1_error,
+        }
     if not ctx:
         return {
             "summary_2": {"title": "数据预处理", "desc": "预处理建议生成失败。", "code": "", "status": "failed"},
@@ -331,6 +430,7 @@ def run_preprocessing_workflow(
     ctx["code"] = current_code
     ctx["processed_df"] = processed_df
     ctx["processed_df_head"] = processed_df_head
+    ctx["qc_summary"] = validation.get("qc_summary", {})
 
     # ---------- 节点 8 & 9: 章节正文 + 摘要 并行 ----------
     chap_sys = render_file("preprocessing/chap2_summary_html_llm_sys.txt", ctx)
@@ -346,6 +446,7 @@ def run_preprocessing_workflow(
 
     # ---------- 节点 10: summary2_composer (plugin) ----------
     composed = summary2_composer(code=current_code, desc=desc, processed_df=processed_df)
+    composed["summary_2"]["qc_summary"] = validation.get("qc_summary", {})
     if is_english_language(language):
         composed["summary_2"]["title"] = "Data Preprocessing"
 
@@ -359,6 +460,7 @@ def run_preprocessing_workflow(
         "_code_success": success,
         "_code_error": last_error if not success else "",
         "_fix_attempts": attempts,
+        "_preprocessing_contract": ctx.get("preprocessing_contract") or {},
         "_status": "succeeded",
     }
 

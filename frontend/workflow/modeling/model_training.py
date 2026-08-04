@@ -5,11 +5,11 @@ import pickle
 import traceback
 from typing import Any
 
-import lightgbm
-import numpy as np
-import pandas as pd
 import streamlit as st
-import xgboost
+from core.bounded_code_execution import (
+    MODELING_TIMEOUT_SECONDS,
+    run_bounded_safe_exec,
+)
 from core.modeling_table_utils import (
     build_model_comparison_table_bundle,
     build_modeling_execution_summary_markdown,
@@ -17,34 +17,12 @@ from core.modeling_table_utils import (
 from core.modeling_contract import (
     build_analysis_contract,
     format_contract_violations,
-    validate_result_against_contract,
+    has_primary_analysis_outputs,
+    validate_code_against_contract,
+    validate_modeling_result,
 )
 from core.modeling_runtime_compat import validate_modeling_runtime_compatibility
-from core.safe_code import restricted_pickle_loads, safe_exec
-from sklearn.ensemble import (
-    AdaBoostClassifier,
-    AdaBoostRegressor,
-    ExtraTreesClassifier,
-    ExtraTreesRegressor,
-    GradientBoostingClassifier,
-    GradientBoostingRegressor,
-    RandomForestClassifier,
-    RandomForestRegressor,
-)
-from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression, Ridge
-from sklearn.model_selection import train_test_split
-from sklearn.naive_bayes import GaussianNB
-from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-from sklearn.preprocessing import (
-    LabelEncoder,
-    MinMaxScaler,
-    OneHotEncoder,
-    OrdinalEncoder,
-    RobustScaler,
-    StandardScaler,
-)
-from sklearn.svm import SVC, SVR
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from core.safe_code import restricted_pickle_loads
 
 from utils.i18n import bt, get_language
 from utils.sanitize_code import to_json_serializable
@@ -189,87 +167,14 @@ def _record_modeling_failure(agent, error_text: str) -> None:
         )
 
 
-def train_execution(agent) -> bool:
-    code = agent.load_code()
-    df = agent.load_df()
+def _analysis_contract_for_execution(agent, df) -> dict[str, Any]:
+    phase1_ctx = st.session_state.get("_model_phase1_ctx")
+    if isinstance(phase1_ctx, dict):
+        from workflows.modeling import ensure_analysis_contract
 
-    compatibility_issues = validate_modeling_runtime_compatibility(code)
-    if compatibility_issues:
-        _record_modeling_failure(
-            agent,
-            "Modeling runtime compatibility validation failed:\n- "
-            + "\n- ".join(compatibility_issues),
-        )
-        return False
-
-    torch_module, torchvision_module, missing_torch = _load_optional_torch_modules(code)
-
-    if missing_torch:
-        _record_modeling_failure(
-            agent,
-            bt(
-                "当前训练代码使用了 PyTorch，但环境未安装 `torch`。",
-                "The current training code uses PyTorch, but `torch` is not installed in this environment.",
-            ),
-        )
-        return False
-
-    exec_ns = {
-        "df": df,
-        "np": np,
-        "pd": pd,
-        "train_test_split": train_test_split,
-        "StandardScaler": StandardScaler,
-        "MinMaxScaler": MinMaxScaler,
-        "RobustScaler": RobustScaler,
-        "LabelEncoder": LabelEncoder,
-        "OrdinalEncoder": OrdinalEncoder,
-        "OneHotEncoder": OneHotEncoder,
-        "LinearRegression": LinearRegression,
-        "LogisticRegression": LogisticRegression,
-        "Ridge": Ridge,
-        "Lasso": Lasso,
-        "ElasticNet": ElasticNet,
-        "RandomForestRegressor": RandomForestRegressor,
-        "GradientBoostingRegressor": GradientBoostingRegressor,
-        "RandomForestClassifier": RandomForestClassifier,
-        "GradientBoostingClassifier": GradientBoostingClassifier,
-        "ExtraTreesClassifier": ExtraTreesClassifier,
-        "ExtraTreesRegressor": ExtraTreesRegressor,
-        "AdaBoostClassifier": AdaBoostClassifier,
-        "AdaBoostRegressor": AdaBoostRegressor,
-        "DecisionTreeClassifier": DecisionTreeClassifier,
-        "DecisionTreeRegressor": DecisionTreeRegressor,
-        "SVC": SVC,
-        "SVR": SVR,
-        "KNeighborsClassifier": KNeighborsClassifier,
-        "KNeighborsRegressor": KNeighborsRegressor,
-        "GaussianNB": GaussianNB,
-        "xgboost": xgboost,
-        "lightgbm": lightgbm,
-    }
-
-    if torch_module is not None:
-        exec_ns["torch"] = torch_module
-    if torchvision_module is not None:
-        exec_ns["torchvision"] = torchvision_module
-
-    try:
-        with st.spinner(bt("正在运行程序...", "Running the program...")):
-            safe_exec(code, exec_ns)
-    except Exception:
-        error_text = traceback.format_exc()
-        _record_modeling_failure(agent, error_text)
-        return False
-
-    result_dict = exec_ns.get("result_dict")
-    if not isinstance(result_dict, dict):
-        error_text = bt(
-            "脚本执行完成，但未生成字典类型的 `result_dict`。请确保脚本末尾赋值 `result_dict = {...}`。",
-            "The script finished without a dictionary `result_dict`. Make sure it assigns `result_dict = {...}` at the end.",
-        )
-        _record_modeling_failure(agent, error_text)
-        return False
+        phase1_ctx = ensure_analysis_contract(phase1_ctx)
+        st.session_state._model_phase1_ctx = phase1_ctx
+        st.session_state.modeling_analysis_contract = phase1_ctx.get("analysis_contract") or {}
 
     analysis_contract = st.session_state.get("modeling_analysis_contract") or {}
     if not analysis_contract:
@@ -281,7 +186,78 @@ def train_execution(agent) -> bool:
             task_type=getattr(agent, "load_task_type", lambda: "auto")() or "auto",
         )
         st.session_state.modeling_analysis_contract = analysis_contract
-    contract_issues = validate_result_against_contract(
+    return analysis_contract
+
+
+def train_execution(agent) -> bool:
+    code = agent.load_code()
+    df = agent.load_df()
+
+    analysis_contract = _analysis_contract_for_execution(agent, df)
+    if not analysis_contract.get("valid", False):
+        _record_modeling_failure(
+            agent,
+            format_contract_violations(list(analysis_contract.get("issues") or [])),
+        )
+        return False
+
+    static_contract_issues = validate_code_against_contract(
+        code=code,
+        contract=analysis_contract,
+    )
+    if static_contract_issues:
+        _record_modeling_failure(
+            agent,
+            format_contract_violations(static_contract_issues),
+        )
+        return False
+
+    compatibility_issues = validate_modeling_runtime_compatibility(code, n_rows=len(df))
+    if compatibility_issues:
+        _record_modeling_failure(
+            agent,
+            "Modeling runtime compatibility validation failed:\n- "
+            + "\n- ".join(compatibility_issues),
+        )
+        return False
+
+    _, _, missing_torch = _load_optional_torch_modules(code)
+
+    if missing_torch:
+        _record_modeling_failure(
+            agent,
+            bt(
+                "当前训练代码使用了 PyTorch，但环境未安装 `torch`。",
+                "The current training code uses PyTorch, but `torch` is not installed in this environment.",
+            ),
+        )
+        return False
+
+    try:
+        with st.spinner(bt("正在运行程序...", "Running the program...")):
+            execution_result = run_bounded_safe_exec(
+                kind="modeling",
+                code=code,
+                dataframe=df,
+                timeout_seconds=MODELING_TIMEOUT_SECONDS,
+            )
+        if not execution_result["is_success"]:
+            raise RuntimeError(str(execution_result["error"]))
+    except Exception:
+        error_text = traceback.format_exc()
+        _record_modeling_failure(agent, error_text)
+        return False
+
+    result_dict = execution_result.get("value")
+    if not isinstance(result_dict, dict):
+        error_text = bt(
+            "脚本执行完成，但未生成字典类型的 `result_dict`。请确保脚本末尾赋值 `result_dict = {...}`。",
+            "The script finished without a dictionary `result_dict`. Make sure it assigns `result_dict = {...}` at the end.",
+        )
+        _record_modeling_failure(agent, error_text)
+        return False
+
+    contract_issues = validate_modeling_result(
         code=code,
         result_json=result_dict,
         contract=analysis_contract,
@@ -316,6 +292,18 @@ def train_execution(agent) -> bool:
                 additional_preference=st.session_state.get("add_preference") or "",
                 language=get_language(),
             )
+            association_primary_result = (
+                str(analysis_contract.get("task_type") or "").strip().lower() == "association_inference"
+                and has_primary_analysis_outputs(serializable)
+            )
+            if not table_bundle.get("has_table") and not association_primary_result:
+                error_text = format_contract_violations(
+                    [
+                        "result_dict must contain model metrics or primary analysis tables that can produce reportable results."
+                    ]
+                )
+                _record_modeling_failure(agent, error_text)
+                return False
             formatted = _build_modeling_result_summary(current_summary, serializable, table_bundle)
             _update_modeling_summary_state(agent, code, formatted, table_bundle)
     except Exception:

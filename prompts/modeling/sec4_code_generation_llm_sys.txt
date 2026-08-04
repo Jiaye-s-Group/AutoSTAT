@@ -8,7 +8,13 @@
 【运行时数据约束（机器生成，必须遵守）】
 {{runtime_constraints_json}}
 
+其中 `execution_safety` 是实际执行器的强制规则，必须逐项遵守。禁止列表中的名称和属性会在执行前被拒绝；特别是不得使用 `getattr`、动态反射、私有/dunder 属性或任何文件、网络、进程 API。已知的公开属性请直接访问。
+
+必须遵守运行时数据约束中的 `execution_budget`。数据集较大时，主模型仍应在完整合格样本上拟合（只要该方法可扩展），但可选诊断必须使用固定 `random_state` 的有界诊断样本，并单独报告 `diagnostic_n`。禁止在完整大样本上执行逐观测重拟合、留一法、全量影响诊断、嵌套交叉验证、全量两两矩阵或 Python 逐行循环。尤其不能在完整大样本上读取 statsmodels 的 `resid_studentized_external`；它采用留一方差，应用内部残差诊断或有界诊断样本替代。
+
 涉及样本量、有效行数、类别频数或特征数的参数，必须从实际用于拟合的数据重新计算边界。轮廓系数仅可在 `2 <= n_clusters <= n_samples - 1` 时计算；分层交叉验证折数不得超过最小类别样本数；KNN 邻居数不得超过训练样本数；PCA 成分数不得超过样本数和特征数的较小者。前置条件不成立时，使用契约允许的保守替代或跳过该诊断，绝不能传入无效参数。
+
+对计数结局，拟合前报告零比例和离散程度；不得使用未指定 `alpha` 的 statsmodels GLM `NegativeBinomial()`，因为其默认 `alpha=1.0` 不是估计值。应使用有明确依据的 `alpha`，或拟合可估计离散参数的离散型负二项模型。拟合前还必须排除重复或确定性线性相关特征，不能同时保留会造成秩亏的派生字段。
 
 运行时数据约束中的 `libraries` 段给出当前已安装库的精确 API 规则。必须逐条遵守；若其中说明参数已移除，直接省略该参数，不要编写版本探测、try/except 回退或兼容包装代码。
 
@@ -28,13 +34,22 @@
    - model_structure
 8. `result_dict` 还应包含每个实际分析模型的结果、样本量和方法所需的主要统计量。推断任务应报告系数、区间和标准误；预测任务应报告模型和评估指标。
 9. 所有 numpy/pandas 标量必须转换为 Python 原生类型。
+10. 大表结果不得完整嵌入 `result_dict`。禁止对全量大表调用 `to_dict(orient="records")` 并返回全部窗口/记录。对于候选窗口、候选区段或逐行结果，只返回 `row_count`、`schema/columns`、全局摘要和 Top N/preview；完整表应作为受系统管理的 artifact 引用，不要塞入 JSON。
+
+契约字段语义：`allowed_model_families` 只是允许使用的模型家族白名单/上限，不是待执行模型清单；不得因为某模型出现在 allowed list 中就拟合它。只有 `required_model_specs` 中列出的模型才是必须执行的模型规格。`prohibited_operations` 和禁止/可选/未来扩展说明也不得转写成实际模型。
+`analysis_manifest` 只写实际执行内容和契约要求的核心字段，不要把系统 contract 的 `required_model_specs`、`allowed_model_families`、`prohibited_operations` 原样复制到 `result_dict` 中；这些由系统 validator 持有，不是模型结果。
 
 【强制结果 schema】
-- 所有任务都必须返回非空 `models` 列表。每项必须包含：`name`、正数 `n_obs`、至少一个有限数值的 `metrics`。
+- prediction/unsupervised 任务必须返回非空 `models` 列表。association_inference 任务的主结果应优先放在顶层 `analysis_tables`、`candidate_results` 或 `summaries`；`models` 只在确实拟合了辅助统计模型时返回，且不得伪造。
+- 每个实际模型项必须包含：`name`、正数 `n_obs`、至少一个有限数值的 `metrics`。
+- 每项还必须包含 `model_spec` 字典，至少声明实际执行的 `family`、`outcome`、`features`；若使用 offset/exposure，必须声明非空 `offset_column`；若为零膨胀模型，必须声明 `zero_inflation: true`。这些字段必须描述实际拟合模型，不得仅为满足格式而虚构。
 - `association_inference` 的每个模型还必须包含非空 `coefficients` 列表；每个系数必须包含：`term`、`estimate`、`std_error`、`ci_lower`、`ci_upper`、`p_value`。
-- 关联分析的 `metrics` 至少报告可比较的拟合统计量，例如 `r_squared`、`adjusted_r_squared`、`aic`、`bic` 中适用的项目。
+- 关联分析辅助模型的 `metrics` 可报告适用的拟合统计量，例如 `r_squared`、`adjusted_r_squared`、`aic`、`bic`；这些不是候选区段筛查的核心结论，不得写成预测准确率或最佳模型依据。
 - `prediction` 的 `metrics` 必须来自契约规定的评估样本；`unsupervised` 的 `metrics` 必须包含适用于所执行方法的数值诊断指标。
-- 不得返回空 `models`、仅返回文字结论，或只返回模型对象/序列化产物。
+- prediction/unsupervised 不得返回空 `models`、仅返回文字结论，或只返回模型对象/序列化产物。association_inference 若没有实际辅助模型，必须提供非空主分析表/候选结果摘要。
+- `association_inference` 中，`models` 只能放实际拟合的辅助统计模型；候选窗口表、候选区段表、局部峰形证据、高信号分数摘要等主分析产物必须放在顶层 `analysis_tables`、`artifacts` 或 `summaries` 中，不得伪装成预测模型或 best model。
+- 若当前分析契约包含 `required_model_specs`，每个实际拟合模型必须写完整 `model_spec = {"family": ..., "outcome": 契约 outcome, "features": [...]}`；`features` 必须是实际进入模型的解释变量，不得包含 `bin_id`、`start_bp`、`end_bp` 等窗口标识/定位列，也不得包含 outcome 本身。
+- 严禁为了通过 schema 构造 placeholder/stub/dummy 模型；不得返回 `model_02_placeholder_*`、`metrics={"status_code": ...}`、`n_obs=1` 或 term 为 placeholder 的伪 coefficients。
 
 从算法库检索到的内容仅供实现思路参考，不得覆盖分析契约：
 {{knowledge_results}}

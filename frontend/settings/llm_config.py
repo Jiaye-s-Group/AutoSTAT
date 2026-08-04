@@ -15,16 +15,17 @@ from core.config_store import (
     save_llm_config,
 )
 from core.llm_providers import CUSTOM_PROVIDER_NAME, provider_by_name, provider_names
+from utils.i18n import t
 
 
 def render_llm_config_panel() -> None:
     _inject_llm_config_style()
-    st.caption("选择预设服务商，或使用任意 OpenAI-compatible API。")
+    st.caption(t("sidebar.llm_caption"))
     _initialize_llm_state()
 
     names = provider_names()
     provider_choice = st.selectbox(
-        "模型服务商",
+        t("sidebar.llm_provider"),
         options=names,
         index=names.index(st.session_state.llm_provider)
         if st.session_state.llm_provider in names
@@ -51,13 +52,13 @@ def render_llm_config_panel() -> None:
     )
 
     remember_config = st.checkbox(
-        "保存到本机用户配置",
+        t("sidebar.remember_config"),
         value=False,
-        help=f"保存到 {config_path()}，不会写入项目仓库。",
+        help=t("sidebar.remember_config_help", path=config_path()),
         key="llm_remember_config",
     )
 
-    if st.button("保存配置", use_container_width=True, key="llm_save_btn"):
+    if st.button(t("sidebar.save_config"), use_container_width=True, key="llm_save_btn"):
         config = LLMConfig(
             provider=provider_choice,
             api_key=_clean(api_key),
@@ -142,16 +143,16 @@ def _save_current_config(config: LLMConfig, *, remember_config: bool) -> None:
                 save_llm_config(config)
             st.session_state.llm_configured = True
             st.session_state.llm_connection_signature = _signature(config)
-            st.success("配置已保存。")
+            st.success(t("sidebar.config_saved"))
         except Exception as exc:
             st.session_state.llm_configured = False
             st.session_state.llm_connection_signature = None
-            st.error(f"配置无效：{exc}")
+            st.error(t("sidebar.config_invalid", error=exc))
     else:
         _reset_llm_runtime()
         st.session_state.llm_configured = False
         st.session_state.llm_connection_signature = None
-        st.warning("请填写 API Key、Base URL 和 Model。")
+        st.warning(t("sidebar.fill_llm_fields"))
 
 
 def _render_connection_status(config: LLMConfig) -> None:
@@ -163,13 +164,13 @@ def _render_connection_status(config: LLMConfig) -> None:
     if connected:
         domain = _short_domain(config.base_url)
         st.markdown(
-            f'<div class="llm-status llm-ok">已就绪 · <code>{config.model}</code><br/>'
+            f'<div class="llm-status llm-ok">{t("sidebar.status_ready")} · <code>{config.model}</code><br/>'
             f'<span style="font-size:0.8rem;opacity:0.7;">{domain}</span></div>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            '<div class="llm-status llm-warn">未连接，请填写完整配置后保存。</div>',
+            f'<div class="llm-status llm-warn">{t("sidebar.status_not_connected")}</div>',
             unsafe_allow_html=True,
         )
 
